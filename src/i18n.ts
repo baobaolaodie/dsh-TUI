@@ -142,6 +142,8 @@ const dict = {
   'skill-release-notes-prompt': { zh: '请使用 release-notes 技能为当前项目生成发布说明。', en: 'Use the release-notes skill to generate release notes for the current project.' },
   'skill-vuln-check-prompt': { zh: '请使用 vuln-check 技能对当前项目做一次安全漏洞检查。', en: 'Use the vuln-check skill to run a security vulnerability check on the current project.' },
   'context-loaded': { zh: '已加载上下文', en: 'Context loaded' },
+  'context-panel-expand': { zh: '展开', en: 'Expand' },
+  'context-panel-collapse': { zh: '折叠', en: 'Collapse' },
   'copied-chars': { zh: '已复制 {{n}} 个字符', en: 'Copied {{n}} characters' },
   'activity-usage-name': { zh: '/activity frames <名>', en: '/activity frames <name>' },
   'activity-current-preset': { zh: '当前预设  {{name}}', en: 'Current preset  {{name}}' },
@@ -261,6 +263,16 @@ const dict = {
 
   // ── plugin.ts — /update flow ───────────────────────────────────────
   'update-aborted-no-profile': { zh: 'dsh-tui 更新中止：未解析到 dsh profile。', en: 'dsh-tui update aborted: no dsh profile resolved.' },
+  // 0.8.3 launcher alignment bridge: /update only replaces the profile
+  // copy; the global `dsh-tui` launcher must be aligned separately.
+  'update-launcher-align-unknown': {
+    zh: 'Profile 已更新到 v{{version}}。如果你平时使用全局 dsh-tui 命令启动，请同步更新全局启动器：\n  npm install -g @deepseek-harness-tui/dsh-tui@{{version}}',
+    en: 'The profile is now v{{version}}. If you normally launch with the global dsh-tui command, align the global launcher too:\n  npm install -g @deepseek-harness-tui/dsh-tui@{{version}}',
+  },
+  'update-launcher-outdated': {
+    zh: 'Profile 已更新到 v{{profile}}，但全局启动器仍是 v{{launcher}}。请同步更新：\n  npm install -g @deepseek-harness-tui/dsh-tui@{{profile}}',
+    en: 'The profile is now v{{profile}}, but the global launcher is still v{{launcher}}. Align it with:\n  npm install -g @deepseek-harness-tui/dsh-tui@{{profile}}',
+  },
 
   // ── components/ActivityLine.tsx ──────────────────────────────────────
   'activity-ctx-warn': { zh: '⚠ 上下文', en: '⚠ ctx ' },

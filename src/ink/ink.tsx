@@ -468,6 +468,23 @@ export default class Ink {
     // without the pop we'd accumulate depth on each editor round-trip).
     this.options.stdout.write('\x1b[?1004h' + (supportsWin32InputMode() ? ENABLE_WIN32_INPUT_MODE : supportsExtendedKeys() ? DISABLE_KITTY_KEYBOARD + ENABLE_KITTY_KEYBOARD + ENABLE_MODIFY_OTHER_KEYS : ''));
   }
+  /**
+   * One-shot viewport re-anchor for the NEXT main-screen frame: repaint the
+   * visible viewport in place instead of diffing. Exposed for callers that
+   * know a layout flip just rewrote the whole frame (Ctrl+O transcript
+   * toggle): the ordinary scroll-based diff pushes rows into terminal
+   * scrollback on every expand and nothing removes them on collapse — rapid
+   * toggles drift the virtual↔scrollback mapping until writes misland.
+   * In-place repaint adds nothing to scrollback. No-op in alt-screen
+   * (already CSI H-anchored every frame). ONLY sets the flag: the caller's
+   * own state change (setExpanded) drives the render that consumes it —
+   * forcing an extra render here would paint the OLD layout once more and
+   * burn the flag before the real frame lands.
+   */
+  reanchorViewport() {
+    if (this.altScreenActive) return;
+    this.log.requestViewportReanchor();
+  }
   onRender() {
     if (this.isUnmounted || this.isPaused) {
       return;

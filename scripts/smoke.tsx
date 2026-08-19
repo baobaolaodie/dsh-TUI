@@ -517,8 +517,8 @@ console.log('--- has interrupted?', plain.includes('Interrupted') && plain.inclu
 console.log('--- has notification?', plain.includes('Test notification'))
 console.log('--- has help menu?', plain.includes('/ for commands') || true)
 
-// Startup loaded-context summary: details live behind the one-shot `/context`
-// command; Ctrl+T remains exclusively owned by the trajectory scene.
+// Startup loaded-context panel: collapsed summary, expandable with Ctrl+P;
+// the one-shot `/context` command still prints the same details as a report.
 const panelChannel = {
   ...channel,
   version: 1,
@@ -547,7 +547,7 @@ const panelInstance = await render(
 await new Promise(resolve => setTimeout(resolve, 600))
 const collapsed = plainText(panelStdout.frames)
 const hasContextSummary = collapsed.includes('已加载上下文') || collapsed.includes('Context loaded')
-console.log('--- context summary?', hasContextSummary, collapsed.includes('/context'), !collapsed.includes('Ctrl+T'))
+console.log('--- context summary?', hasContextSummary, collapsed.includes('Ctrl+P'))
 // ── Interaction panels: plan review + approval ─────────────────────────
 // Drives a third Chat with real QuestionStore/ApprovalStore instances. The
 // fake channel needs pushLocal: resolving a question folds a Q&A summary

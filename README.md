@@ -13,6 +13,12 @@
   <a href="LICENSE"><img alt="MIT License" src="https://img.shields.io/badge/license-MIT-263146?style=flat-square"></a>
   <img alt="Public beta" src="https://img.shields.io/badge/status-public%20beta-7da1de?style=flat-square">
   <img alt="官方收录" src="https://img.shields.io/badge/DeepSeek%20Harness%20官方公众号-收录-brightgreen">
+  <a href="https://github.com/ccch1mneyyy/dsh-TUI/stargazers"><img alt="GitHub stars" src="https://img.shields.io/github/stars/ccch1mneyyy/dsh-TUI?style=flat-square&color=4b6fff"></a>
+  <a href="https://www.npmjs.com/package/@deepseek-harness-tui/dsh-tui"><img alt="npm downloads" src="https://img.shields.io/npm/dm/@deepseek-harness-tui/dsh-tui?style=flat-square&color=4b6fff"></a>
+</p>
+
+<p align="center">
+  <a href="https://trendshift.io/repositories/146168" title="GitHub Trending 日榜 #7 · TypeScript 口径"><img alt="Trendshift" src="https://trendshift.io/api/badge/trendshift/repositories/146168/daily?language=TypeScript"></a>
 </p>
 
 # dsh-TUI
@@ -87,8 +93,14 @@ sh install.sh
 已上架 VS Code Marketplace**）见
 [在 VS Code 中运行 dsh-TUI](docs/vscode.md)。
 
-TUI 启动后会在后台检查 npm 是否有新版本；发现更新时会提示，输入 `/update`
-即可自动更新并重启恢复当前会话。
+TUI 启动后会在后台检查 npm 是否有新版本；发现更新时可输入 `/update`。
+`/update` 更新当前 `dsh-tui` profile 中的 runtime 并重启会话，它不会静默修改
+npm/pnpm 的全局安装。若通过全局 `dsh-tui` 命令启动且 Launcher 版本落后，
+0.8.3 起会给出精确的全局对齐命令，例如：
+
+```sh
+npm install -g @deepseek-harness-tui/dsh-tui@<profile-version>
+```
 
 旧版 `dsh-cc-tui` / `cc-tui` profile 的迁移命令与兼容数据说明见
 [安装与快速开始](docs/getting-started.md#从旧包迁移)。

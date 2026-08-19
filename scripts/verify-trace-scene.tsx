@@ -88,9 +88,16 @@ function makeHarness(cols: number, rows: number, scrollback = 200) {
    * here and nowhere else. The alternate screen has no scrollback, so reading
    * from 0 is what that part is actually about.
    */
-  const screenFromTop = (): string =>
-    Array.from({ length: rows }, (_, y) => term.buffer.active.getLine(y)?.translateToString(true) ?? '')
+  // Read the WHOLE buffer (frame + any scroll history): the scene's frame
+  // legitimately grows past the terminal (ledger of 20 steps), and the
+  // checks assert content presence — title at the head, hotspot rows
+  // wherever the layout put them. A 30-row window (head OR viewport)
+  // loses one end or the other.
+  const screenFromTop = (): string => {
+    const buf = term.buffer.active
+    return Array.from({ length: buf.length }, (_, y) => buf.getLine(y)?.translateToString(true) ?? '')
       .join('\n')
+  }
   return { term, stdout: new FakeStdout(), stdin, screen, screenFromTop, writes }
 }
 
@@ -270,16 +277,31 @@ function makeChannel(overrides: Record<string, unknown> = {}): Record<string, un
   await sleep(140)
   check('esc clears the query', screen().includes('grep_repo'))
 
-  // View switching.
+  // View switching. The hotspot rows animate in (motion arrive); a fixed
+  // sleep races the animation — poll until the view materializes.
   stdin.write('\x1b[C')
-  await sleep(180)
-  const hotspot = screen()
+  let hotspot = ''
+  for (let i = 0; i < 40 && !(hotspot.includes('工具') || hotspot.includes('Tools')); i++) {
+    await sleep(80)
+    hotspot = screen()
+  }
+  {
+    const buf = term.buffer.active
+    const all: string[] = []
+    for (let y = 0; y < buf.length; y++) all.push(`${y}|${buf.getLine(y)?.translateToString(true)?.slice(0, 70) ?? ''}`)
+    console.error('--- FULL BUFFER (len=' + buf.length + ' vy=' + buf.viewportY + ') ---')
+    console.error(all.join(String.fromCharCode(10)))
+  }
   check('→ switches to the hotspot view', hotspot.includes('工具') || hotspot.includes('Tools'))
   check('hotspot ranks tools by cost', /web_search|read_file/.test(hotspot))
   check('hotspot draws bars', /[█▌]/.test(hotspot))
   stdin.write('\x1b[D')
-  await sleep(180)
-  check('← returns to the timeline', screen().includes('read_file'))
+  let backToTimeline = ''
+  for (let i = 0; i < 40 && !backToTimeline.includes('read_file'); i++) {
+    await sleep(80)
+    backToTimeline = screen()
+  }
+  check('← returns to the timeline', backToTimeline.includes('read_file'))
 
   instance.unmount()
   term.dispose()
@@ -491,11 +513,18 @@ function makeChannel(overrides: Record<string, unknown> = {}): Record<string, un
   })
   await sleep(400)
 
-  const buffer = term.buffer.active
-  const lines = Array.from({ length: buffer.length }, (_, row) =>
-    buffer.getLine(row)?.translateToString(true) ?? '',
-  )
-  const secondIndex = lines.findLastIndex(line => line.includes('SECOND RESPONSE SECTION'))
+  // The settle paint is throttled behind the ink frame clock — poll for the
+  // markers instead of racing a fixed sleep.
+  let lines: string[] = []
+  let secondIndex = -1
+  for (let attempt = 0; attempt < 25 && secondIndex < 0; attempt++) {
+    await sleep(80)
+    const buffer = term.buffer.active
+    lines = Array.from({ length: buffer.length }, (_, row) =>
+      buffer.getLine(row)?.translateToString(true) ?? '',
+    )
+    secondIndex = lines.findLastIndex(line => line.includes('SECOND RESPONSE SECTION'))
+  }
   let firstIndex = -1
   for (let index = secondIndex - 1; index >= 0; index--) {
     if (lines[index]?.includes('FIRST RESPONSE SECTION')) {
@@ -509,7 +538,7 @@ function makeChannel(overrides: Record<string, unknown> = {}): Record<string, un
   check(
     'reasoning that settles in the trajectory leaves no blank answer gap',
     firstIndex >= 0 && secondIndex >= 0 && gap <= 1,
-    `first=${firstIndex}, second=${secondIndex}, blank=${gap}, buffer=${buffer.length}`,
+    `first=${firstIndex}, second=${secondIndex}, blank=${gap}, buffer=${lines.length}`,
   )
 
   stdin.write('\x0f') // Ctrl+O

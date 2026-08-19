@@ -378,6 +378,8 @@ export function Chat({
   }, [])
   /** The startup summary gives way to transcript rows after the first local command or message. */
   const loadedContextVisible = channel.rows.length === 0 && channel.loadedContext !== undefined
+  /** Startup context panel: collapsed by default, toggled with Ctrl+P. */
+  const [loadedContextOpen, setLoadedContextOpen] = React.useState(false)
   /** `/` transcript search (less-style incsearch, ported from CC's REPL). */
   const [searchOpen, setSearchOpen] = React.useState(false)
   const [searchQuery, setSearchQuery] = React.useState('')
@@ -1843,8 +1845,15 @@ export function Chat({
       return
     }
     if (isMod(key) && input === 't') {
-      // Ctrl+T has one stable meaning; loaded-context details live at /context.
+      // Ctrl+T opens the trajectory scene at any point in the session.
       openScene()
+      return
+    }
+    if (isMod(key) && input === 'p' && loadedContextVisible) {
+      // Ctrl+P toggles the startup loaded-context panel while it is on
+      // screen (transcript still empty); once rows take over and the
+      // panel disappears the key has nothing left to do.
+      setLoadedContextOpen(previous => !previous)
       return
     }
     if (isMod(key) && input === 'r' && !helpOpen) {
@@ -1885,6 +1894,16 @@ export function Chat({
     } else if (isMod(key) && input === 'o') {
       // Leaving transcript mode (Ctrl+O) — search was already handled above.
       setExpanded(previous => !previous)
+      // The toggle rewrites every thinking row's layout at once. The
+      // ordinary scroll-based diff pushes rows into terminal scrollback on
+      // each expand and nothing removes them on collapse — rapid toggling
+      // drifts the virtual↔scrollback mapping until writes misland
+      // (garbled transcript, duplicated rows). Re-anchor the next frame:
+      // in-place viewport repaint, nothing added to scrollback. Lookup
+      // falls back to the only live instance for embedders whose stdout
+      // isn't process.stdout (test harnesses).
+      const ink = instances.get(process.stdout) ?? instances.values().next().value
+      ink?.reanchorViewport()
     } else if (input === '/' && !key.ctrl && !key.meta && !key.super) {
       // `/` in transcript mode (Ctrl+O expanded, CC's REPL semantics:
       // search is active on the transcript screen where `/` isn't a command).
@@ -2044,12 +2063,17 @@ export function Chat({
           effort={channel.reasoningEffort}
           cwd={channel.displayCwd}
         />
-        {/* The startup loaded-context summary: before the first message the
-            transcript is empty, so the one-line inventory of what this
-            conversation will load (system prompt, workspace instructions,
-            skills, tools) sits at the top; the first rows take over. */}
+        {/* The startup loaded-context panel: before the first message the
+            transcript is empty, so the inventory of what this conversation
+            will load (system prompt, workspace instructions, skills, tools)
+            sits at the top, collapsed to a summary line and expandable with
+            Ctrl+P; the first rows take over. */}
         {loadedContextVisible && (
-          <LoadedContextPanel context={channel.loadedContext} />
+          <LoadedContextPanel
+            context={channel.loadedContext}
+            open={loadedContextOpen}
+            onToggle={() => { setLoadedContextOpen(previous => !previous) }}
+          />
         )}
         <MessageList
           rows={channel.rows}
@@ -2061,6 +2085,7 @@ export function Chat({
           onToggleRow={toggleRowExpanded}
           model={channel.model}
           diffLayout={channel.diffLayout}
+          thinkingFold={channel.thinkingFold}
           showAll={showAllMessages}
           thinkingVisible={thinkingVisible}
           onToggleAll={() =>{  setShowAllMessages(previous => !previous) }}
