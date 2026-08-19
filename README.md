@@ -93,8 +93,14 @@ sh install.sh
 已上架 VS Code Marketplace**）见
 [在 VS Code 中运行 dsh-TUI](docs/vscode.md)。
 
-TUI 启动后会在后台检查 npm 是否有新版本；发现更新时会提示，输入 `/update`
-即可自动更新并重启恢复当前会话。
+TUI 启动后会在后台检查 npm 是否有新版本；发现更新时可输入 `/update`。
+`/update` 更新当前 `dsh-tui` profile 中的 runtime 并重启会话，它不会静默修改
+npm/pnpm 的全局安装。若通过全局 `dsh-tui` 命令启动且 Launcher 版本落后，
+0.8.3 起会给出精确的全局对齐命令，例如：
+
+```sh
+npm install -g @deepseek-harness-tui/dsh-tui@<profile-version>
+```
 
 旧版 `dsh-cc-tui` / `cc-tui` profile 的迁移命令与兼容数据说明见
 [安装与快速开始](docs/getting-started.md#从旧包迁移)。

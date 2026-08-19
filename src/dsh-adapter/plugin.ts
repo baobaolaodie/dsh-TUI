@@ -126,6 +126,23 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
               `可能是镜像 registry 未同步，请稍后重试或检查 registry 配置。\n`,
           )
         }
+      } else if (process.stderr.isTTY) {
+        // Launcher alignment bridge (0.8.3): /update only replaces the
+        // package inside the DSH profile; a globally installed `dsh-tui`
+        // launcher is a separate copy that keeps its old version. Launchers
+        // >=0.8.3 export DSH_TUI_LAUNCHER_VERSION so we can tell whether
+        // the outer launcher lags the freshly installed profile. Launchers
+        // <=0.8.2 never set the marker — the generic branch below is
+        // intentionally one-shot: DSH_TUI_UPDATED_FROM exists only on the
+        // replacement process immediately after /update.
+        const launcherVersion = process.env.DSH_TUI_LAUNCHER_VERSION
+        if (launcherVersion === undefined) {
+          process.stderr.write(`\n[dsh-tui] ${t('update-launcher-align-unknown', { version: now })}\n`)
+        } else if (isVersionNewer(now, launcherVersion)) {
+          process.stderr.write(
+            `\n[dsh-tui] ${t('update-launcher-outdated', { profile: now, launcher: launcherVersion })}\n`,
+          )
+        }
       }
     }
   }
