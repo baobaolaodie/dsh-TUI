@@ -2,6 +2,8 @@
  * AC 回归脚本（issue #359 / PR-A）：
  * - AC-1：extractMentions 的 `#L 行区间后缀解析（纯函数断言）。
  * - AC-2：expandMentions 对行区间 mention 的内存切片附加（stub fs 断言）。
+ * - AC-3：起行超总行数时整文件回退 + warnings 提示（不进 missing、消息
+ *   不被静默丢弃——D3/ADR-002）。
  *
  * Run via tsx:
  *   node --import tsx/esm scripts/verify-mentions-line-range.tsx
@@ -158,6 +160,28 @@ await checkAsync('AC2: @src/a.ts#L6 起行超总行数回退整文件', async ()
   assert.ok(text.includes('line1'), '超界引用应整文件回退而非空块')
   assert.ok(text.includes('line5'), '回退须含全部内容（含幻影尾行后的真实行）')
   assert.deepEqual(expansion.missing, [])
+})
+
+// --- AC-3: 越界回退 + warnings 提示（D3/ADR-002：显式意图不静默丢）------------
+const TWO_LINES = 'alpha\nbeta\n'
+await checkAsync('AC3: @2 行文件#L99 整文件回退且 warnings 非空', async () => {
+  const expansion = await expandMentions(stubFs(TWO_LINES), '/cwd', '@a.md#L99')
+  const text = attachedFileText(expansion)
+  assert.ok(text.includes('alpha'), '越界应回退附加整文件（含首行）')
+  assert.ok(text.includes('beta'), '越界应回退附加整文件（含末行）')
+  assert.ok(Array.isArray(expansion.warnings), 'warnings 字段应为数组（D3 新字段）')
+  assert.ok(expansion.warnings.length > 0, '越界回退必须产生 warnings 提示，不得静默')
+  assert.ok(
+    expansion.warnings.every(w => typeof w === 'string' && w.length > 0),
+    'warnings 条目须为非空字符串',
+  )
+  assert.deepEqual(expansion.missing, [], '行区间解析成功不进 missing——missing 仅表文件无法解析')
+})
+await checkAsync('AC3: 无后缀与正常切片不产生 warnings', async () => {
+  const plain = await expandMentions(stubFs(FIVE_LINES), '/cwd', '@src/a.ts')
+  assert.deepEqual(plain.warnings, [], '无后缀整文件附加不应有 warnings')
+  const sliced = await expandMentions(stubFs(FIVE_LINES), '/cwd', '@src/a.ts#L2-4')
+  assert.deepEqual(sliced.warnings, [], '合法区间切片不应有 warnings')
 })
 
 // --- summary -----------------------------------------------------------------

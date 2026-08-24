@@ -58,6 +58,7 @@ const dict = {
   'export-dir': { zh: '- 目录: {{cwd}}', en: '- Directory: {{cwd}}' },
   'mentions-attached': { zh: '已附加 {{count}} 个文件引用', en: 'Attached {{count}} file reference(s)' },
   'mentions-missing': { zh: '未找到引用: {{paths}}', en: 'References not found: {{paths}}' },
+  'mention-out-of-range': { zh: '@{{path}} 行区间从第 {{line}} 行起超出文件行数，已附加整个文件', en: '@{{path}} line range starting at L{{line}} is past the end of the file; attached the whole file' },
   'send-failed': { zh: '发送失败 · {{err}}', en: 'Send failed · {{err}}' },
   'export-user-section': { zh: '## 用户', en: '## User' },
   'export-thinking-section': { zh: '## 思考', en: '## Thinking' },

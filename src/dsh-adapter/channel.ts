@@ -1669,6 +1669,11 @@ export function createChannel(
           timeoutMs: 4000,
         })
       }
+      // Out-of-range line mentions still attach (whole-file fallback) but must
+      // be loud — the explicit intent deviated from what the model receives.
+      for (const warning of expansion.warnings) {
+        state.notify(warning, { color: 'warning', timeoutMs: 4000 })
+      }
     }).catch((error: unknown) => {
       // The chain must survive a failed send: log and notify, then continue
       // with the next queued delivery.
@@ -6024,6 +6029,13 @@ export interface MentionExpansion {
   attached: string[]
   /** Mention tokens that failed to resolve (kept literal, warned about). */
   missing: string[]
+  /**
+   * Non-fatal notices for attached content that deviated from the explicit
+   * request — currently an out-of-range `#L` mention falling back to the
+   * whole file. Already-translated text, shown to the user as-is. Unlike
+   * `missing`, these never keep a message from sending.
+   */
+  warnings: string[]
 }
 
 /**
@@ -6067,6 +6079,7 @@ export async function expandMentions(
   const blocks: MentionExpansion['blocks'] = [{ type: 'text', text }]
   const attached: string[] = []
   const missing: string[] = []
+  const warnings: string[] = []
   const mentions = extractMentions(text)
   let budget = MENTION_MAX_TOTAL_CHARS
   let imageCount = 0
@@ -6119,10 +6132,15 @@ export async function expandMentions(
         // A `#L12[-14]` line-range mention slices in memory after the full read
         // (1-based, inclusive bounds) rather than adding a fs-layer API — the
         // MentionFs contract spans providers. An unusable range (start past the
-        // last line, inverted bounds) keeps whole-file behavior; the explicit
-        // out-of-range notice rides the warnings channel separately.
+        // last line, inverted bounds) falls back to the whole file and warns —
+        // an explicit user intent must never be dropped silently (ADR-002).
         if (mention.startLine !== undefined) {
-          content = sliceLines(content, mention.startLine, mention.endLine) ?? content
+          const sliced = sliceLines(content, mention.startLine, mention.endLine)
+          if (sliced === undefined) {
+            warnings.push(t('mention-out-of-range', { path: mention.path, line: mention.startLine }))
+          } else {
+            content = sliced
+          }
         }
         const cap = Math.min(MENTION_MAX_FILE_CHARS, budget)
         let truncated = false
@@ -6187,5 +6205,5 @@ export async function expandMentions(
       imageBytes += attachment.bytes
     }
   }
-  return { blocks, attached, missing }
+  return { blocks, attached, missing, warnings }
 }
