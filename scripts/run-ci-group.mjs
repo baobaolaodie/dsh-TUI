@@ -215,6 +215,10 @@ const GROUPS = {
 // （等价于「上方每个区域都放得下、没有多占行、没有被挤出屏幕」）。
 // 中文必测：所有文案都本地化，按字符数而非列宽排版在英文下看不出来。
     ["verify-session-browser-layout", ['node', 'scripts/verify-session-browser-layout.mjs']],
+// @-mention 行区间后缀解析回归（issue #359 / PR-A）：#L12-14 与官方
+// 无 L #12-14 双写法、引号形式 @"a b.ts"#L3-5、反向区间/悬空 #L/
+// 路径中段 # 均不当行区间，无后缀行为不变。
+    ["verify-mentions-line-range", ['node', '--import', 'tsx/esm', 'scripts/verify-mentions-line-range.tsx']],
   ],
   'channel-ui': [
 // channel 层回归：发送链（submit/steer/撤回/打断重投）、compact 折叠、
