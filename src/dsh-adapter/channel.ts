@@ -313,6 +313,12 @@ export interface ChatRow {
   /** Source session event seq — present on every log-derived row (rewind
    *  fork anchor on user rows; window-floor bookkeeping for the rest). */
   seq?: number
+  /** IDE selection indicator attached to this user turn (PR-B · AC-5):
+   *  rendered above the prompt bubble. Present only on live-submitted rows
+   *  that consumed a selection — replayed rows have no record of it (the
+   *  session log stores model-facing blocks, not UI bookkeeping), which is
+   *  the correct degradation: an old transcript shows no false indicators. */
+  selectionAttached?: SelectionAttachedInfo
   /** True when the row's full text was folded to keep the transcript window
    *  bounded (see MAX_ROWS); the session log still holds the full content
    *  and loadOlder() restores it. */
@@ -4988,6 +4994,26 @@ ${output}
     }
   }
 
+  /**
+   * Selection indicator bookkeeping for the transcript (T06 renders it):
+   * keyed by message id because rows are derived from session-log replay —
+   * the replay path (state.rows.push kind:'user') cannot know this at push
+   * time, so the live user/message handler looks the info up by
+   * `event.data.id`. Declared BEFORE the boot replay below: that replay is
+   * a top-level factory statement, so a later declaration would be dead in
+   * TDZ when the first replayed user/message arrives. Bounded like
+   * stagedImages: a long session must not grow it forever.
+   */
+  const selectionAttachedByMessageId = new Map<string, SelectionAttachedInfo>()
+  const rememberSelectionAttached = (messageId: string, info: SelectionAttachedInfo): void => {
+    selectionAttachedByMessageId.set(messageId, info)
+    while (selectionAttachedByMessageId.size > 128) {
+      const oldest = selectionAttachedByMessageId.keys().next().value as string | undefined
+      if (oldest === undefined) break
+      selectionAttachedByMessageId.delete(oldest)
+    }
+  }
+
   const renderEvent = (event: SessionEvent): void => {
     // Top-level `goal/change` events are how the goal service actually
     // records durable goal mutations (create/edit/pause/resume/complete/
@@ -5059,7 +5085,13 @@ ${output}
         if (event.data.source.kind !== 'user') break
         const text = firstTextOf(event.data.content)
         if (text) {
-          state.rows.push({ id: nextRowId, kind: 'user', text, seq: event.seq })
+          // T06 (PR-B · AC-5): the selection consumed by THIS message's
+          // delivery — deliverUserText keyed it by the same message id that
+          // arrives here as `event.data.id`. Replay misses the Map (UI
+          // bookkeeping is not in the session log), so restored rows carry
+          // no indicator, which is the intended degradation.
+          const selectionAttached = selectionAttachedByMessageId.get(event.data.id)
+          state.rows.push({ id: nextRowId, kind: 'user', text, seq: event.seq, selectionAttached })
           state.lastUserText = text
           // The context estimate counts everything sent to the model —
           // typed text AND the `@`-mention attachment blocks.
@@ -5842,23 +5874,6 @@ ${output}
       return { lines: block.lines, path: selection.path }
     } catch {
       return undefined
-    }
-  }
-
-  /**
-   * Selection indicator bookkeeping for the transcript (T06 renders it):
-   * keyed by message id because rows are derived from session-log replay —
-   * the replay path (state.rows.push kind:'user') cannot know this at push
-   * time, so MessageList looks the info up by row/seq identity instead.
-   * Bounded like stagedImages: a long session must not grow it forever.
-   */
-  const selectionAttachedByMessageId = new Map<string, SelectionAttachedInfo>()
-  const rememberSelectionAttached = (messageId: string, info: SelectionAttachedInfo): void => {
-    selectionAttachedByMessageId.set(messageId, info)
-    while (selectionAttachedByMessageId.size > 128) {
-      const oldest = selectionAttachedByMessageId.keys().next().value as string | undefined
-      if (oldest === undefined) break
-      selectionAttachedByMessageId.delete(oldest)
     }
   }
 
