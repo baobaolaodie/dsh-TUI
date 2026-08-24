@@ -1,13 +1,16 @@
 /**
- * AC-1 回归脚本：extractMentions 的 `#L 行区间后缀解析（issue #359 / PR-A）。
+ * AC 回归脚本（issue #359 / PR-A）：
+ * - AC-1：extractMentions 的 `#L 行区间后缀解析（纯函数断言）。
+ * - AC-2：expandMentions 对行区间 mention 的内存切片附加（stub fs 断言）。
  *
- * 纯函数断言，无 fs / 渲染依赖。Run via tsx:
+ * Run via tsx:
  *   node --import tsx/esm scripts/verify-mentions-line-range.tsx
  */
 
 import assert from 'node:assert/strict'
 
 const { extractMentions, stripLineRange } = await import('../src/utils/mentions.js')
+const { expandMentions } = await import('../src/dsh-adapter/channel.js')
 
 let failures = 0
 let total = 0
@@ -21,6 +24,44 @@ const check = (name, fn) => {
     console.error(`  FAIL ${name}`)
     console.error(`       ${error.message}`)
   }
+}
+// AC-2 用例走异步 expandMentions；顶层 await 保证顺序与退出码语义。
+const checkAsync = async (name, fn) => {
+  total++
+  try {
+    await fn()
+    console.log(`  ok   ${name}`)
+  } catch (error) {
+    failures += 1
+    console.error(`  FAIL ${name}`)
+    console.error(`       ${error.message}`)
+  }
+}
+
+/** MentionFs 最小 stub：固定内容单文件（AC-2 专用）。 */
+const stubFs = content => ({
+  async resolve(path) {
+    return { displayPath: path }
+  },
+  async stat() {
+    return { type: 'file' }
+  },
+  async readText() {
+    return content
+  },
+  async listDir() {
+    return []
+  },
+})
+
+const FIVE_LINES = 'line1\nline2\nline3\nline4\nline5\n'
+
+/** 取 expansion 里第一个 attached-file 文本块。 */
+const attachedFileText = expansion => {
+  const block = expansion.blocks.find(
+    b => b.type === 'text' && typeof b.text === 'string' && b.text.startsWith('<attached-file'),
+  )
+  return block ? block.text : ''
 }
 
 // --- stripLineRange 单元 ----------------------------------------------------
@@ -82,6 +123,41 @@ check('AC1: 混合多 mention', () => {
     { path: 'src/a.ts', startLine: 12, endLine: 14 },
     { path: 'b.ts' },
   ])
+})
+
+// --- AC-2: expandMentions 行切片附加（stub fs）--------------------------------
+await checkAsync('AC2: @src/a.ts#L2-4 只附 line2-line4 且 missing 空', async () => {
+  const expansion = await expandMentions(stubFs(FIVE_LINES), '/cwd', '看看 @src/a.ts#L2-4')
+  const text = attachedFileText(expansion)
+  assert.ok(text.includes('line2'), '应包含 line2')
+  assert.ok(text.includes('line3'), '应包含 line3')
+  assert.ok(text.includes('line4'), '应包含 line4')
+  assert.ok(!text.includes('line1'), '不应包含 line1（切片前边界）')
+  assert.ok(!text.includes('line5'), '不应包含 line5（切片后边界）')
+  assert.deepEqual(expansion.missing, [], 'missing 应为空')
+  assert.deepEqual(expansion.attached, ['src/a.ts'], 'attached 应含该文件')
+})
+await checkAsync('AC2: @src/a.ts 无后缀仍整文件附加', async () => {
+  const expansion = await expandMentions(stubFs(FIVE_LINES), '/cwd', '@src/a.ts')
+  const text = attachedFileText(expansion)
+  for (const line of ['line1', 'line2', 'line3', 'line4', 'line5']) {
+    assert.ok(text.includes(line), `整文件应包含 ${line}`)
+  }
+  assert.deepEqual(expansion.missing, [])
+})
+await checkAsync('AC2: @src/a.ts#L0 非法零起始回退整文件', async () => {
+  const expansion = await expandMentions(stubFs(FIVE_LINES), '/cwd', '@src/a.ts#L0')
+  const text = attachedFileText(expansion)
+  assert.ok(text.includes('line1'), '零起始非合法 1-based 引用，应整文件回退')
+  assert.ok(text.includes('line5'))
+  assert.deepEqual(expansion.missing, [])
+})
+await checkAsync('AC2: @src/a.ts#L6 起行超总行数回退整文件', async () => {
+  const expansion = await expandMentions(stubFs(FIVE_LINES), '/cwd', '@src/a.ts#L6')
+  const text = attachedFileText(expansion)
+  assert.ok(text.includes('line1'), '超界引用应整文件回退而非空块')
+  assert.ok(text.includes('line5'), '回退须含全部内容（含幻影尾行后的真实行）')
+  assert.deepEqual(expansion.missing, [])
 })
 
 // --- summary -----------------------------------------------------------------

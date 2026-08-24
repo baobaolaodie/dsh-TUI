@@ -6027,6 +6027,29 @@ export interface MentionExpansion {
 }
 
 /**
+ * Slice a 1-based inclusive line range out of file content for a
+ * `#L12[-14]` mention (issue #359). Returns undefined when the range cannot
+ * denote real lines — zero/negative start, start past EOF, or inverted bounds —
+ * so callers fall back to whole-file attachment instead of emitting an empty
+ * block. A trailing newline does not count as an extra line. Shared with the
+ * IDE selection channel, which builds equivalent attached-file blocks.
+ */
+export function sliceLines(
+  content: string,
+  startLine: number,
+  endLine?: number,
+): string | undefined {
+  const end = endLine ?? startLine
+  if (!Number.isSafeInteger(startLine) || startLine < 1) return undefined
+  if (!Number.isSafeInteger(end) || end < startLine) return undefined
+  const lines = content.split('\n')
+  // A trailing newline splits into a phantom final element that is not a line.
+  if (lines.length > 1 && lines[lines.length - 1] === '') lines.pop()
+  if (startLine > lines.length) return undefined
+  return lines.slice(startLine - 1, end).join('\n')
+}
+
+/**
  * Expand a submitted text's `@` mentions (issue #15) into model-facing
  * attachment blocks: supported image files become durable image blocks,
  * other files contribute capped text, and directories contribute a shallow
@@ -6092,8 +6115,16 @@ export async function expandMentions(
         continue
       }
       try {
-        const cap = Math.min(MENTION_MAX_FILE_CHARS, budget)
         let content = await fs.readText(target)
+        // A `#L12[-14]` line-range mention slices in memory after the full read
+        // (1-based, inclusive bounds) rather than adding a fs-layer API — the
+        // MentionFs contract spans providers. An unusable range (start past the
+        // last line, inverted bounds) keeps whole-file behavior; the explicit
+        // out-of-range notice rides the warnings channel separately.
+        if (mention.startLine !== undefined) {
+          content = sliceLines(content, mention.startLine, mention.endLine) ?? content
+        }
+        const cap = Math.min(MENTION_MAX_FILE_CHARS, budget)
         let truncated = false
         if (content.length > cap) {
           content = content.slice(0, cap)
