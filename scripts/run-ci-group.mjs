@@ -219,6 +219,12 @@ const GROUPS = {
 // 无 L #12-14 双写法、引号形式 @"a b.ts"#L3-5、反向区间/悬空 #L/
 // 路径中段 # 均不当行区间，无后缀行为不变。
     ["verify-mentions-line-range", ['node', '--import', 'tsx/esm', 'scripts/verify-mentions-line-range.tsx']],
+// IDE 选区通道回归（PR-B 地基，ADR-001）：env 直连解析、lock 目录扫描与
+// workspaceFolders 归一化排序、selection_changed 坐标校验；空 env + 无 lock
+// 目录的静默降级不抛错；loopback 对连验证原生 WebSocket 握手与选区到达
+// （env 直连与 lock 发现双路径）。lock fixture 一律临时目录，绝不写真实
+// ~/.dsh-tui。
+    ["verify-ide-channel", ['node', '--import', 'tsx/esm', 'scripts/verify-ide-channel.tsx']],
   ],
   'channel-ui': [
 // channel 层回归：发送链（submit/steer/撤回/打断重投）、compact 折叠、

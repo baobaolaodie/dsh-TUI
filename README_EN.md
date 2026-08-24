@@ -69,6 +69,20 @@ the interface, and removing it leaves no core modifications behind.
   300→120 rows), and long-session resume lands straight on content (splash
   skipped, anchored to the newest message's last row).
 
+### Line-range syntax for `@` file references
+
+Append a `#L` suffix to an `@path` to attach only the given line range of a
+file (1-based, inclusive bounds):
+
+- `@src/a.ts#L12` — attach line 12 only; `@src/a.ts#L12-14` — attach lines
+  12–14.
+- The official `L`-less form is also accepted: `@src/a.ts#12-14`.
+- Quote paths containing spaces: `@"my dir/a.ts"#L3-5`.
+- When the range start is past the end of the file, the **whole file is
+  attached instead** with a warning notice — an explicit intent is never
+  dropped silently. In the rare case of a real path ending in `#L<number>`,
+  write it in quoted form.
+
 ## Preview
 
 <p align="center">
