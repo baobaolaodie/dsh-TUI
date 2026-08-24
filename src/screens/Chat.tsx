@@ -3207,6 +3207,7 @@ export function Chat({
           onTimeline={setTimeline}
           onOpenSubagent={(agentId) => setSubagentDetailId(agentId)}
           onOpenFile={openFileActions}
+          sessionCwd={channel.cwd}
         />
         </ScrollBox>
         {(() => {
