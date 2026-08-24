@@ -145,8 +145,19 @@ function signatureParts(
       // Folded one-liner vs full summary text.
       signatureScratch.push(expanded, expandedRows.has(row.id))
       break
+    case 'user':
+      // T06: the selection indicator line above the bubble adds one rendered
+      // row whose text wraps with width — its presence and content length
+      // are height inputs. Missing this would leave offscreen spacer heights
+      // stale when the field arrives (scroll jump, DESIGN R4).
+      signatureScratch.push(
+        row.selectionAttached === undefined ? 0 : 1,
+        row.selectionAttached?.path.length ?? 0,
+        String(row.selectionAttached?.lines ?? ''),
+      )
+      break
     default:
-      // user / notice / interrupt / local / local-output: height follows
+      // notice / interrupt / local / local-output: height follows
       // text + columns alone (selection/background never change height).
       break
   }
@@ -1004,6 +1015,7 @@ export function MessageList({
               kind={row.kind}
               text={row.text}
               executionTarget={row.executionTarget}
+              selectionAttached={row.selectionAttached}
               streaming={row.streaming === true}
               durationMs={row.durationMs}
               time={row.time}
@@ -1060,6 +1072,8 @@ type MemoRowProps = {
   kind: ChatRow['kind']
   text: string
   executionTarget: string | undefined
+  /** IDE selection indicator (user rows): rendered above the prompt bubble. */
+  selectionAttached: ChatRow['selectionAttached']
   streaming: boolean
   durationMs: number | undefined
   time: number | undefined
@@ -1130,6 +1144,7 @@ function TranscriptRow({
   kind,
   text,
   executionTarget,
+  selectionAttached,
   streaming,
   durationMs,
   time,
@@ -1196,6 +1211,11 @@ function TranscriptRow({
     case 'user':
       return (
         <Box flexDirection="column" ref={ref}>
+          {selectionAttached && (
+            <Text dimColor>
+              {'⧉ '}{t('selection-attached', { lines: selectionAttached.lines, path: selectionAttached.path })}
+            </Text>
+          )}
           <UserPromptMessage
             text={text}
             addMargin={addMargin}
