@@ -781,6 +781,14 @@ export interface Channel {
    */
   readonly loadedContext: LoadedContext | undefined
   /**
+   * The live IDE selection (loopback channel), or `undefined` when no IDE is
+   * connected / the selection is empty — the prompt footer renders a
+   * `⧉ N lines selected` badge from it (T-FIX-02). Cleared by an isEmpty
+   * notification; every update bumps `version` so subscribed screens
+   * re-render immediately, before any submit consumes the selection.
+   */
+  readonly selection: SelectionSnapshot | undefined
+  /**
    * Messages submitted while the model was working and not yet claimed by a
    * turn (`steer` → next step boundary of the running turn, `followup` →
    * after the turn ends). Driven by agent inbox events.
@@ -1216,6 +1224,8 @@ export interface ChannelState {
   todos: TodoPanelItem[]
   /** Loaded-context snapshot (see the public Channel type). */
   loadedContext: LoadedContext | undefined
+  /** Live IDE selection projection (see the public Channel type). */
+  selection: SelectionSnapshot | undefined
   /** Messages submitted while working, awaiting their turn/step boundary.
    *  Driven by agent inbox events (inserted/claimed/discarded). */
   pending: PendingMessage[]
@@ -2850,6 +2860,7 @@ export function createChannel(
     goal: undefined,
     todos: [],
     loadedContext: undefined,
+    selection: undefined,
     pending: [],
     commandList: LOCAL_COMMANDS,
     commandCompletions(input: string) {
@@ -7244,6 +7255,11 @@ ${output}
     // The channel already clears empty snapshots internally; mirror that
     // here so consumption reads one consistent variable.
     currentSelection = snapshot.isEmpty ? undefined : snapshot
+    // Live prompt-footer badge (T-FIX-02): the projection must reach the
+    // screen BEFORE the user submits — emit() bumps `version` so the
+    // useSyncExternalStore tree re-renders with the new badge immediately.
+    state.selection = currentSelection
+    state.emit()
   })
 
   /**
