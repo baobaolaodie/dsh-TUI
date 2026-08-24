@@ -383,6 +383,51 @@ async function main(): Promise<void> {
       liveCleared)
   }
 
+  // ── 9. 指示行显示相对化（T-FIX-01）：displaySelectionPath 纯函数 ───────────
+  // UAT 实测根因：扩展基准（工作区根）与 TUI 基准（会话 cwd）不一致，指示行
+  // 显示冗长绝对路径。修复为纯展示层前缀剥离——块内 path 保持绝对不动。
+  {
+    const listMod = await import('../src/components/MessageList.js') as {
+      displaySelectionPath?: (
+        path: string,
+        sessionCwd: string | undefined,
+        caseInsensitive?: boolean,
+      ) => string
+    }
+    const dsp = listMod.displaySelectionPath
+    check('displaySelectionPath: 导出存在（T-FIX-01）', typeof dsp === 'function')
+
+    // ① cwd 前缀命中 → 去前缀的相对串（正斜杠形态，保留目录上下文）。
+    check('displaySelectionPath: cwd 内文件 → 相对路径',
+      dsp?.('/repo/src/my file.ts', '/repo') === 'src/my file.ts')
+
+    // ② 不在 cwd 下 → 原样返回（不用 basename——同名歧义丢目录上下文）。
+    check('displaySelectionPath: cwd 外文件 → 原样返回',
+      dsp?.('/other/lib/a.ts', '/repo') === '/other/lib/a.ts')
+
+    // ③ Windows UAT 场景：扩展推小盘符正斜杠、会话 cwd 大盘符反斜杠 →
+    //    归一化（反斜杠→正斜杠、尾斜杠剥、大小写折叠）后仍命中。
+    check('displaySelectionPath: Windows 盘符大小写+分隔符归一化命中（UAT d:/ vs D:\\）',
+      dsp?.('d:/repo/src/a.ts', 'D:\\Repo', true) === 'src/a.ts')
+    check('displaySelectionPath: Windows 反斜杠路径 vs 带尾斜杠 cwd 命中',
+      dsp?.('D:\\Repo\\src\\b.ts', 'd:/repo/', true) === 'src/b.ts')
+
+    // ④ 空/缺失 cwd → 原样返回（保住不传新 prop 的测试 harness 消费者）。
+    check('displaySelectionPath: 空 cwd → 原样返回',
+      dsp?.('/repo/a.ts', '') === '/repo/a.ts')
+    check('displaySelectionPath: undefined cwd → 原样返回',
+      dsp?.('/repo/a.ts', undefined) === '/repo/a.ts')
+
+    // 边界：path 恰等于 cwd 本身 → 无相对语义可表达，原样返回。
+    check('displaySelectionPath: path 即 cwd → 原样返回',
+      dsp?.('/repo', '/repo') === '/repo')
+
+    // 大小写敏感模式显式关闭折叠（caseInsensitive 参数化，任何主机可钉死行为）：
+    // POSIX 敏感语义下大小写不同即不命中。
+    check('displaySelectionPath: caseInsensitive=false 时大小写差异不命中',
+      dsp?.('/Repo/src/a.ts', '/repo', false) === '/Repo/src/a.ts')
+  }
+
   rmSync(tmpRoot, { recursive: true, force: true })
 
   console.log(results.join('\n'))

@@ -3,6 +3,7 @@ import { t } from '../i18n.js'
 import { Box, Text, useTerminalSize, type ScrollBoxHandle } from '../ui.js'
 import type { ClickEvent } from '../ink/events/click-event.js'
 import type { ChatRow, ToolRow, ToolCallView, ToolResultView, SubagentRow } from '../dsh-adapter/channel.js'
+import { normalizeIdePath } from '../dsh-adapter/ide-channel.js'
 import type { DOMElement } from '../ink/dom.js'
 import { Divider } from './design-system/Divider.js'
 import { UserPromptMessage } from './messages/UserPromptMessage.js'
@@ -61,6 +62,44 @@ const NO_STREAM_FOLDED: ReadonlySet<number> = new Set()
 const NOOP_TOGGLE_STREAM_FOLD = (_rowId: number): void => {}
 
 /**
+ * Display form of an IDE-selection path (T-FIX-01): when the path lives
+ * under the session cwd, strip that prefix so the indicator line reads
+ * `src/a.ts` instead of a long absolute path (UAT finding — the extension
+ * anchors at its workspace root while the TUI session cwd is the git
+ * worktree root, so raw paths are long and redundant). Pure display layer:
+ * the `<attached-file>` block keeps its absolute path for the model.
+ *
+ * Comparison reuses normalizeIdePath (the ide-channel lock matcher's
+ * normalizer: backslashes folded to forward slashes, trailing slashes
+ * stripped, case folded on case-insensitive filesystems) so Windows forms
+ * like `d:/x` vs `D:\X` still match. Prefix hits return the remainder
+ * (`src/a.ts`); everything else — outside cwd, empty/undefined cwd, or the
+ * path being the cwd itself — returns the input unchanged. NOT basename:
+ * that would drop the directory context and collide on same-named files.
+ * `caseInsensitive` is parameterized so verifiers can pin either mode on
+ * any host.
+ */
+export function displaySelectionPath(
+  path: string,
+  sessionCwd: string | undefined,
+  caseInsensitive: boolean = process.platform === 'win32' || process.platform === 'darwin',
+): string {
+  if (sessionCwd === undefined || sessionCwd === '') return path
+  // Shared normalizer (lock matching uses the same): backslashes fold to
+  // forward slashes, trailing slashes stripped — transforms that preserve
+  // character positions, so slicing the canonical path at the cwd's length
+  // keeps the file's own casing in the displayed relative string. Folding
+  // decides only WHETHER the prefix matches, never what gets sliced off.
+  const pathNorm = normalizeIdePath(path, false)
+  const cwdNorm = normalizeIdePath(sessionCwd, false)
+  if (cwdNorm === '' || cwdNorm.length >= pathNorm.length) return path
+  const foldedPath = normalizeIdePath(pathNorm, caseInsensitive)
+  const foldedCwd = normalizeIdePath(cwdNorm, caseInsensitive)
+  if (!foldedPath.startsWith(`${foldedCwd}/`)) return path
+  return pathNorm.slice(cwdNorm.length + 1)
+}
+
+/**
  * Per-kind layout signature PARTS: the O(1) identity of every input that
  * decides a row's rendered HEIGHT (see sigRef in MessageList). Fields are
  * scoped to the row's own renderer — a global flat signature
@@ -93,6 +132,7 @@ function signatureParts(
   model: string,
   failureHintRowId: number | null | undefined,
   failureHint: string | undefined,
+  sessionCwd: string | undefined,
 ): Array<string | number | boolean> {
   signatureScratch.length = 0
   // Universal height inputs: width reflows every row; kind switches height
@@ -145,9 +185,12 @@ function signatureParts(
       // row whose text wraps with width — its presence and content length
       // are height inputs. Missing this would leave offscreen spacer heights
       // stale when the field arrives (scroll jump, DESIGN R4).
+      // T-FIX-01: the indicator renders the cwd-relative display path, so
+      // the signature hashes THAT string — a cwd switch (/workspace) that
+      // changes the display form must invalidate the cached height too.
       signatureScratch.push(
         row.selectionAttached === undefined ? 0 : 1,
-        row.selectionAttached?.path.length ?? 0,
+        displaySelectionPath(row.selectionAttached?.path ?? '', sessionCwd).length,
         String(row.selectionAttached?.lines ?? ''),
       )
       break
@@ -186,6 +229,7 @@ export function MessageList({
   failureHintRowId,
   failureHint,
   onOpenSubagent,
+  sessionCwd,
 }: {
   rows: readonly ChatRow[]
   expanded: boolean
@@ -264,6 +308,12 @@ export function MessageList({
   failureHint?: string
   /** 打开子代理详情场景（transcript 内点击子代理卡）。 */
   onOpenSubagent?: (agentId: string) => void
+  /** Session working directory (fs path, `channel.cwd`): the IDE-selection
+   *  indicator line strips this prefix for display (T-FIX-01). Optional —
+   *  repro/verify harnesses that predate the field render unchanged with
+   *  raw paths. The real fs cwd, NOT displayCwd: remote URI display forms
+   *  can't prefix-match selection paths. */
+  sessionCwd?: string | undefined
 }) {
   const hiddenCount = rows.length - MAX_RENDERED_ROWS
   // The thinking filter runs BEFORE virtualization so window indices line up.
@@ -480,6 +530,7 @@ export function MessageList({
         model,
         failureHintRowId,
         failureHint,
+        sessionCwd,
       )
       const cachedParts = sigs.get(row.id)
       let same = false
@@ -1027,6 +1078,7 @@ export function MessageList({
               onToggleStreamFold={onToggleStreamFold}
               streamFolded={streamFoldedRows.has(row.id)}
               onOpenSubagent={onOpenSubagent}
+              sessionCwd={sessionCwd}
               setRowRef={setRowRef}
             />
           )
@@ -1052,6 +1104,8 @@ type MemoRowProps = {
   executionTarget: string | undefined
   /** IDE selection indicator (user rows): rendered above the prompt bubble. */
   selectionAttached: ChatRow['selectionAttached']
+  /** Session cwd for the indicator's display-path relativization (T-FIX-01). */
+  sessionCwd: string | undefined
   streaming: boolean
   durationMs: number | undefined
   time: number | undefined
@@ -1120,6 +1174,7 @@ function TranscriptRow({
   text,
   executionTarget,
   selectionAttached,
+  sessionCwd,
   streaming,
   durationMs,
   time,
@@ -1186,7 +1241,10 @@ function TranscriptRow({
         <Box flexDirection="column" ref={ref}>
           {selectionAttached && (
             <Text dimColor>
-              {'⧉ '}{t('selection-attached', { lines: selectionAttached.lines, path: selectionAttached.path })}
+              {'⧉ '}{t('selection-attached', {
+                lines: selectionAttached.lines,
+                path: displaySelectionPath(selectionAttached.path, sessionCwd),
+              })}
             </Text>
           )}
           <UserPromptMessage

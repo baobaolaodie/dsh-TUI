@@ -2553,6 +2553,7 @@ export function Chat({
           onUnseenCount={setUnseenCount}
           onTimeline={setTimeline}
           onOpenSubagent={(agentId) => setSubagentDetailId(agentId)}
+          sessionCwd={channel.cwd}
         />
         </ScrollBox>
         {(() => {
