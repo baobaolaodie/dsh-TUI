@@ -9,6 +9,9 @@
  *   3. loopback 对连：本脚本内起一个最小 RFC6455 服务端（http upgrade 应答
  *      + 单帧文本编解码），验证原生 WebSocket 客户端的 ide/hello 握手与
  *      selection_changed 到达 listener——分别走 env 直连与 lock 发现两条路径。
+ *   4. 选区消费注入（T05 · AC-5 前半）：buildSelectionBlock 纯函数的正常切片 /
+ *      坐标越界钳制 / 过期选区跳过断言，外加 loopback 收到的真实快照端到端
+ *      构造 <attached-file … selection> 块、isEmpty 清空后守卫不产块。
  *
  * lock fixture 一律 mkdtempSync 临时目录，绝不写真实 ~/.dsh-tui（隔离策略，
  * DESIGN §7）。运行：node --import tsx/esm scripts/verify-ide-channel.tsx
@@ -179,6 +182,9 @@ async function main(): Promise<void> {
   const mod = await import('../src/dsh-adapter/ide-channel.js')
   type Snapshot = NonNullable<ReturnType<typeof mod.parseSelectionChanged>>
 
+  // 选区块构造断言共用的五行内容（与 mentions 验证脚本同款形态）。
+  const FIVE_LINE_CONTENT = 'line1\nline2\nline3\nline4\nline5\n'
+
   const tmpRoot = mkdtempSync(join(tmpdir(), 'verify-ide-channel-'))
 
   // ── 1. envDirect：env 直连解析 ────────────────────────────────────────────
@@ -268,6 +274,8 @@ async function main(): Promise<void> {
 
   // ── 6. loopback 对连 · env 直连路径 ────────────────────────────────────────
   const envFixture = await startWsFixture('tok-env')
+  let seenLive: Snapshot[] = []
+  let liveCleared = false
   {
     const channel = new mod.IdeChannel()
     const seen: Snapshot[] = []
@@ -288,6 +296,9 @@ async function main(): Promise<void> {
     check('loopback·env 直连：isEmpty=true 清空 selection getter', cleared)
     check('loopback·env 直连：两次通知都到达 listener（含空选区）',
       seen.length === 2 && seen[1]?.isEmpty === true)
+    // 留给第 8 节（选区消费注入）：非空快照 + isEmpty 清空事实。
+    seenLive = seen.filter(item => !item.isEmpty)
+    liveCleared = channel.selection === undefined
     channel.stop()
     check('loopback·env 直连：stop 后 connected=false', channel.connected === false)
   }
@@ -317,6 +328,60 @@ async function main(): Promise<void> {
     channel.stop()
   }
   lockFixture.close()
+
+  // ── 8. 选区消费注入（T05 · AC-5 前半）：块构造与钳制 ──────────────────────
+  {
+    const channelMod = await import('../src/dsh-adapter/channel.js')
+    const build = (channelMod as {
+      buildSelectionBlock: (
+        selection: { path: string; startLine: number; endLine: number; isEmpty: boolean },
+        content: string,
+      ) => { text: string; lines: number } | undefined
+    }).buildSelectionBlock
+
+    // 正常切片：0-based [2,4] → 1-based 第 3~5 行。
+    const normal = build({ path: 'src/my file.ts', startLine: 2, endLine: 4, isEmpty: false }, FIVE_LINE_CONTENT)
+    check('selectionBlock: 0-based [2,4] 切出第 3~5 行且带 selection 属性',
+      normal !== undefined
+      && normal.text === '<attached-file path="src/my file.ts" selection>\nline3\nline4\nline5\n</attached-file>'
+      && normal.lines === 3)
+
+    // 含空格路径不经文本解析——直接构造必须原样保留。
+    const spaced = build({ path: 'my dir/a b.ts', startLine: 0, endLine: 0, isEmpty: false }, FIVE_LINE_CONTENT)
+    check('selectionBlock: 含空格路径原样保留（D7 不走文本解析）',
+      spaced !== undefined
+      && spaced.text.startsWith('<attached-file path="my dir/a b.ts" selection>')
+      && spaced.text.includes('\nline1\n</attached-file>'))
+
+    // endLine 超界钳制到实际行数（0-based 99 → 1-based 100 > 5 → 全部剩余行）。
+    const clampedEnd = build({ path: 'src/a.ts', startLine: 3, endLine: 99, isEmpty: false }, FIVE_LINE_CONTENT)
+    check('selectionBlock: endLine 越界钳制到末行',
+      clampedEnd !== undefined
+      && clampedEnd.text === '<attached-file path="src/a.ts" selection>\nline4\nline5\n</attached-file>'
+      && clampedEnd.lines === 2)
+
+    // startLine 越过 EOF → sliceLines 返回 undefined → 无块（静默跳过）。
+    const pastEof = build({ path: 'src/a.ts', startLine: 50, endLine: 60, isEmpty: false }, FIVE_LINE_CONTENT)
+    check('selectionBlock: 起行越过 EOF → undefined（静默跳过）', pastEof === undefined)
+
+    // isEmpty 快照守卫：调用侧不会传入，但纯函数自身也拒绝。
+    check('selectionBlock: isEmpty=true → undefined',
+      build({ path: 'src/a.ts', startLine: 0, endLine: 0, isEmpty: true }, FIVE_LINE_CONTENT) === undefined)
+
+    // loopback 端到端：第 6 节 env 直连收到的真实快照（非空那条）构造出合法块；
+    // isEmpty 清空后 selection getter 已为 undefined，消费守卫不产块。
+    const liveSnapshot = seenLive[0]
+    const fromLive = liveSnapshot === undefined
+      ? undefined
+      : build(liveSnapshot, FIVE_LINE_CONTENT)
+    check('selectionBlock: loopback 真实快照构造 <attached-file … selection> 块',
+      liveSnapshot !== undefined
+      && fromLive !== undefined
+      && fromLive.text.startsWith('<attached-file path="src/a.ts" selection>')
+      && fromLive.lines === 3)
+    check('selectionBlock: isEmpty 清空后 selection getter 为 undefined（消费守卫不产块）',
+      liveCleared)
+  }
 
   rmSync(tmpRoot, { recursive: true, force: true })
 

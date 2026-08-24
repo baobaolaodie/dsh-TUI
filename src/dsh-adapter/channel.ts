@@ -81,6 +81,7 @@ import type {
   TuiRewindMode,
   TuiRewindPromptDecision,
 } from './extension-events.js'
+import { IdeChannel, ideLockDir, type SelectionAttachedInfo, type SelectionSnapshot } from './ide-channel.js'
 
 /** `tui/input` return normalization: transform/handled/cancel or no opinion.
  *  A blank `{ text }` rewrite is NOT a decision — it is logged and the chain
@@ -1645,10 +1646,19 @@ export function createChannel(
         mentionAttachments(ctx),
         stagedImages,
       )
+      // IDE selection consumption (PR-B · AC-5, DESIGN D7): after `@`-mention
+      // expansion, append the live editor selection as its own attached-file
+      // block — direct construction, never text parsing, failures silently
+      // skipped. attachIdeSelection lives with the ideChannel wiring near the
+      // end of this factory.
+      const selectionAttached = await attachIdeSelection(expansion.blocks, state.cwd)
       const message = createUserMessage({
         content: expansion.blocks,
         source: { kind: 'user' },
       })
+      if (selectionAttached !== undefined) {
+        rememberSelectionAttached(message.id, selectionAttached)
+      }
       // Track BEFORE the agent call: a synchronous throw inside
       // followup/steer rolls the preview back; otherwise the inbox events
       // retire it once the message is claimed or discarded.
@@ -5790,6 +5800,68 @@ ${output}
   }
   refreshGitBranch()
 
+  // IDE selection channel (PR-B · AC-5): one IdeChannel per channel factory,
+  // started in the background against the session cwd — lock discovery needs
+  // it, env direct-connect does not but tolerates the extra hint. start() is
+  // fully non-throwing and self-degrading, so a missing IDE costs nothing
+  // (AC-4) and startup never waits on the loopback dial.
+  const ideChannel = new IdeChannel()
+  void ideChannel.start(process.env, ideLockDir(), state.cwd).catch(() => {})
+  let currentSelection: SelectionSnapshot | undefined
+  ideChannel.onSelection(snapshot => {
+    // The channel already clears empty snapshots internally; mirror that
+    // here so consumption reads one consistent variable.
+    currentSelection = snapshot.isEmpty ? undefined : snapshot
+  })
+
+  /**
+   * Append the live selection's attached-file block to a message's content.
+   * Returns what was attached ({lines, path}) or undefined when there is
+   * nothing to attach — no selection since the last isEmpty, or an
+   * unresolvable/unreadable file. Every failure mode is silent: an IDE-side
+   * extra must never block a user send. The snapshot survives consumption so
+   * consecutive submits can re-attach the same selection (DESIGN §3).
+   */
+  const attachIdeSelection = async (
+    blocks: ContentBlock[],
+    cwd: string,
+  ): Promise<SelectionAttachedInfo | undefined> => {
+    const selection = currentSelection
+    if (selection === undefined || selection.isEmpty) return undefined
+    try {
+      const fs = mentionFs(ctx)
+      if (fs === undefined) return undefined
+      const absolute = isAbsolute(selection.path) ? selection.path : join(cwd, selection.path)
+      const target = await fs.resolve(absolute)
+      const info = await fs.stat(target)
+      if (info?.type !== 'file') return undefined
+      const content = await fs.readText(target)
+      const block = buildSelectionBlock(selection, content)
+      if (block === undefined) return undefined
+      blocks.push({ type: 'text', text: block.text })
+      return { lines: block.lines, path: selection.path }
+    } catch {
+      return undefined
+    }
+  }
+
+  /**
+   * Selection indicator bookkeeping for the transcript (T06 renders it):
+   * keyed by message id because rows are derived from session-log replay —
+   * the replay path (state.rows.push kind:'user') cannot know this at push
+   * time, so MessageList looks the info up by row/seq identity instead.
+   * Bounded like stagedImages: a long session must not grow it forever.
+   */
+  const selectionAttachedByMessageId = new Map<string, SelectionAttachedInfo>()
+  const rememberSelectionAttached = (messageId: string, info: SelectionAttachedInfo): void => {
+    selectionAttachedByMessageId.set(messageId, info)
+    while (selectionAttachedByMessageId.size > 128) {
+      const oldest = selectionAttachedByMessageId.keys().next().value as string | undefined
+      if (oldest === undefined) break
+      selectionAttachedByMessageId.delete(oldest)
+    }
+  }
+
   return state
 }
 
@@ -6059,6 +6131,41 @@ export function sliceLines(
   if (lines.length > 1 && lines[lines.length - 1] === '') lines.pop()
   if (startLine > lines.length) return undefined
   return lines.slice(startLine - 1, end).join('\n')
+}
+
+/** The IDE selection snapshot a submit consumes. Kept as a plain shape so
+ *  the block builder stays a pure function (verifier-friendly). */
+export type SelectionBlockInput = SelectionSnapshot
+
+/**
+ * Build the `<attached-file path="…" selection>` block for an IDE selection
+ * (PR-B · AC-5, DESIGN D7): unlike `@`-mentions this never goes through text
+ * parsing — selection paths may contain spaces no tokenizer could survive —
+ * and reuses the same sliceLines single source as `#L` mentions. Coordinates
+ * arrive 0-based inclusive from the extension and convert to sliceLines'
+ * 1-based; an endLine past EOF clamps to the last line (the model receives
+ * every remaining line), while a startLine past EOF yields undefined — the
+ * caller silently skips instead of attaching an empty or stale block. An
+ * empty selection is rejected here too so the guard cannot be bypassed.
+ */
+export function buildSelectionBlock(
+  selection: SelectionBlockInput,
+  content: string,
+): { text: string; lines: number } | undefined {
+  if (selection.isEmpty) return undefined
+  // 0-based inclusive [start, end] → 1-based inclusive [start+1, end+1].
+  // sliceLines clamps an oversized end itself (Array#slice bounds); a start
+  // past EOF returns undefined and the whole attach is silently dropped.
+  const sliced = sliceLines(
+    content,
+    selection.startLine + 1,
+    selection.endLine + 1,
+  )
+  if (sliced === undefined || sliced === '') return undefined
+  return {
+    text: `<attached-file path="${selection.path}" selection>\n${sliced}\n</attached-file>`,
+    lines: sliced.split('\n').length,
+  }
 }
 
 /**

@@ -206,6 +206,17 @@ export function parseSelectionChanged(message: unknown): SelectionSnapshot | und
 type SelectionListener = (snapshot: SelectionSnapshot) => void
 
 /**
+ * What one consumed selection contributed to a submitted message, recorded
+ * next to the user row so the transcript can render a "Selected N lines
+ * from <file>" indicator (T06). `lines` is the number of lines actually
+ * attached after clamping — the truth the model received, not the request.
+ */
+export type SelectionAttachedInfo = {
+  lines: number
+  path: string
+}
+
+/**
  * Connection lifecycle (DESIGN §3): idle → connecting (env first, then lock
  * candidates under one shared budget) → connected, or silently disconnected.
  * Once connected, an error or drop degrades to disconnected — no retry.
