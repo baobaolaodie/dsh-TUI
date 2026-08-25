@@ -174,7 +174,11 @@ export function pickLockCandidates(lockDir: string, cwd: string, pid?: number): 
         const root = normalizeIdePath(folder, caseInsensitive)
         if (root === '') return false
         // normalizeIdePath already folds `\` → `/`, so only the forward
-        // separator is needed as the boundary.
+        // separator is needed as the boundary. The POSIX root `/` is matched
+        // as a prefix of every absolute cwd WITHOUT building a `//` (which
+        // would never match) — a root workspace lock must still win over
+        // other windows.
+        if (root === '/') return cwdNorm.startsWith('/')
         return cwdNorm === root || cwdNorm.startsWith(`${root}/`)
       }),
     })

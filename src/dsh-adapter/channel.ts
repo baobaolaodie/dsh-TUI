@@ -7647,8 +7647,16 @@ export function buildSelectionBlock(
     selection.endLine + 1,
   )
   if (sliced === undefined || sliced === '') return undefined
+  // Capped like @-mention attachments (coderabbit review): a huge selection
+  // would otherwise exceed the context window. Same policy as expandMentions
+  // (MENTION_MAX_FILE_CHARS), with the same visible truncation marker so the
+  // model knows the tail was cut.
+  let body = sliced
+  if (body.length > MENTION_MAX_FILE_CHARS) {
+    body = `${body.slice(0, MENTION_MAX_FILE_CHARS)}\n[… truncated]`
+  }
   return {
-    text: `<attached-file path="${escapeSnippetAttr(selection.path)}" selection>\n${sliced}\n</attached-file>`,
+    text: `<attached-file path="${escapeSnippetAttr(selection.path)}" selection>\n${body}\n</attached-file>`,
     lines: sliced.split('\n').length,
   }
 }

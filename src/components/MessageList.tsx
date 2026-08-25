@@ -93,6 +93,12 @@ export function displaySelectionPath(
   const pathNorm = normalizeIdePath(path, false)
   const cwdNorm = normalizeIdePath(sessionCwd, false)
   if (cwdNorm === '' || cwdNorm.length >= pathNorm.length) return path
+  // The POSIX root `/` is a prefix of every absolute path without a further
+  // separator — `/repo/file.ts` under cwd `/` displays as `repo/file.ts`.
+  // (A `startsWith('/' + '/')` check would never match; coderabbit review.)
+  if (cwdNorm === '/') {
+    return pathNorm.startsWith('/') ? pathNorm.slice(1) : path
+  }
   const foldedPath = normalizeIdePath(pathNorm, caseInsensitive)
   const foldedCwd = normalizeIdePath(cwdNorm, caseInsensitive)
   if (!foldedPath.startsWith(`${foldedCwd}/`)) return path

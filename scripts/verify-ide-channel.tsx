@@ -411,6 +411,17 @@ async function main(): Promise<void> {
     const plain = build({ path: 'plain.ts', startLine: 0, endLine: 0, isEmpty: false }, 'line1\n')
     check('selectionBlock: 普通路径不转义（行为不变）',
       plain?.text.startsWith('<attached-file path="plain.ts" selection>'))
+    // 超大选区须按 @-提及同一策略截断（C-5，coderabbit review）——防撑爆
+    // 上下文。构造远超 50k 的切片内容，断言正文被截断并带可见省略标记。
+    const huge = ('x'.repeat(200) + '\n').repeat(300) // ~60k 字符，超 50k cap
+    const capped = build(
+      { path: 'huge.ts', startLine: 0, endLine: huge.split('\n').length - 1, isEmpty: false },
+      huge,
+    )
+    check('selectionBlock: 超大选区按 MENTION_MAX_FILE_CHARS 截断并标记（C-5）',
+      capped !== undefined
+        && capped.text.includes('[… truncated]')
+        && capped.text.length < huge.length + 400)
   }
 
   // ── 8.4. POSIX 根归一化（coderabbit review C-1）──
@@ -422,6 +433,30 @@ async function main(): Promise<void> {
     check('normalizeIdePath: POSIX 根 / 保留为 /（C-1 回归）',
       ideMod.normalizeIdePath?.('/', false) === '/')
     check('normalizeIdePath: 普通路径仍去尾斜杠', ideMod.normalizeIdePath?.('/repo/', false) === '/repo')
+  }
+
+  // ── 8.5. 根工作区锁匹配 + 根前缀显示（coderabbit review C-6）──
+  // 根 `/` 是每个绝对路径的前缀但不该拼出 `//`——锁匹配得把根当特例，
+  // 指示行显示也要在根下把相对路径去单个前导斜杠。
+  {
+    const locksRoot = join(tmpRoot, 'locks-root')
+    rmSync(locksRoot, { force: true, recursive: true })
+    mkdirSync(locksRoot, { recursive: true })
+    writeFileSync(join(locksRoot, '50101.lock'),
+      JSON.stringify({ port: 50101, token: 't-root', workspaceFolders: ['/'], pid: 901 }))
+    writeFileSync(join(locksRoot, '50102.lock'),
+      JSON.stringify({ port: 50102, token: 't-deep', workspaceFolders: ['/deeper'], pid: 902 }))
+    const rootPick = mod.pickLockCandidates(locksRoot, '/repo/sub', process.pid)
+    check('pickLockCandidates: 根 / 声明匹配任何绝对 cwd（C-6）', rootPick.some(c => c.token === 't-root'))
+  }
+  {
+    const listMod = await import('../src/components/MessageList.js') as {
+      displaySelectionPath?: (path: string, cwd: string | undefined) => string
+    }
+    check('displaySelectionPath: cwd 为根 / 时相对路径去单个前导斜杠（C-6）',
+      listMod.displaySelectionPath?.('/repo/file.ts', '/') === 'repo/file.ts')
+    check('displaySelectionPath: cwd 为根 / 时非根内路径仍原样（C-6）',
+      listMod.displaySelectionPath?.('/repo/file.ts', '/other') !== 'repo/file.ts')
   }
 
   // ── 9. 指示行显示相对化（T-FIX-01）：displaySelectionPath 纯函数 ───────────
