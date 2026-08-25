@@ -400,6 +400,28 @@ async function main(): Promise<void> {
       && fromLive.lines === 3)
     check('selectionBlock: isEmpty 清空后 selection getter 为 undefined（消费守卫不产块）',
       liveCleared)
+
+    // 路径属性转义（coderabbit C-2）：POSIX 合法文件名可含 `"` `&` `<` `>`,
+    // 插进 `path="…"` 属性前必须转义,防属性逃逸/标记注入到模型侧块。
+    const evil = build({ path: 'a&b"c<d>e.ts', startLine: 0, endLine: 0, isEmpty: false }, 'line1\n')
+    check('selectionBlock: 含引号/&/尖括号路径被 HTML 转义（escapeSnippetAttr）',
+      evil !== undefined
+        && evil.text.startsWith('<attached-file path="a&amp;b&quot;c&lt;d&gt;e.ts" selection>')
+        && evil.text.includes('\nline1\n</attached-file>'))
+    const plain = build({ path: 'plain.ts', startLine: 0, endLine: 0, isEmpty: false }, 'line1\n')
+    check('selectionBlock: 普通路径不转义（行为不变）',
+      plain?.text.startsWith('<attached-file path="plain.ts" selection>'))
+  }
+
+  // ── 8.4. POSIX 根归一化（coderabbit review C-1）──
+  // normalizeIdePath('/') 不得削成空串——根工作区锁否则丢掉优先级。
+  {
+    const ideMod = await import('../src/dsh-adapter/ide-channel.js') as {
+      normalizeIdePath?: (p: string, ci: boolean) => string
+    }
+    check('normalizeIdePath: POSIX 根 / 保留为 /（C-1 回归）',
+      ideMod.normalizeIdePath?.('/', false) === '/')
+    check('normalizeIdePath: 普通路径仍去尾斜杠', ideMod.normalizeIdePath?.('/repo/', false) === '/repo')
   }
 
   // ── 9. 指示行显示相对化（T-FIX-01）：displaySelectionPath 纯函数 ───────────

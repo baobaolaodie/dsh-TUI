@@ -96,7 +96,7 @@ export type SelectionSnapshot = {
  * precedent). Exported so verifiers can pin the Windows behavior.
  */
 export function normalizeIdePath(path: string, caseInsensitive: boolean): string {
-  const normalized = path.replace(/\\/g, '/').replace(/\/+$/, '')
+  const normalized = path === '/' ? '/' : path.replace(/\\/g, '/').replace(/\/+$/, '')
   return caseInsensitive ? normalized.toLowerCase() : normalized
 }
 

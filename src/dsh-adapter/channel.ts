@@ -4169,6 +4169,7 @@ export function createChannel(
       // breadcrumb follows the adopted cwd.
       state.cwd = handle.agent.session.header.cwd ?? state.cwd
       state.displayCwd = workspaceService.describe(state.cwd).description ?? state.cwd
+      resetIdeSelection()
       refreshGitBranch()
       state.agentPreset = resumeComposed.agentPreset
       // Status-line route follows the resumed session (review feedback): the
@@ -4407,6 +4408,7 @@ export function createChannel(
       const previousDisplay = state.displayCwd
       state.cwd = target.cwd
       state.displayCwd = target.description ?? target.uri
+      resetIdeSelection()
       const switched = await state.newSession()
       if (!switched) {
         state.cwd = previousCwd
@@ -7270,6 +7272,27 @@ ${output}
   })
 
   /**
+   * Invalidate the live selection and rebind the IDE channel when the
+   * session's working directory changes (coderabbit Major review): `/resume`
+   * takes over the persisted header cwd, `/workspace` switches to another
+   * directory. A selection made in the OLD workspace would otherwise stay in
+   * currentSelection / state.selection — the badge shows it and the next
+   * submit resolves its RELATIVE path against the NEW cwd, attaching the
+   * wrong file. Clearing here invalidates until a fresh snapshot arrives;
+   * restarting the channel re-runs discovery (env + lock) so the new cwd's
+   * matching window is dialed, not the old one. The onSelection listener
+   * lives on the IdeChannel instance and survives stop(), so a fresh snapshot
+   * for the new cwd repopulates the value as usual.
+   */
+  const resetIdeSelection = (): void => {
+    currentSelection = undefined
+    state.selection = undefined
+    state.emit()
+    void ideChannel.stop()
+    void ideChannel.start(process.env, ideLockDir(), state.cwd).catch(() => {})
+  }
+
+  /**
    * Append the live selection's attached-file block to a message's content.
    * Returns what was attached ({lines, path}) or undefined when there is
    * nothing to attach — no selection since the last isEmpty, or an
@@ -7587,6 +7610,17 @@ export interface MentionExpansion {
 export type SelectionBlockInput = SelectionSnapshot
 
 /**
+ * Escape a path for reuse inside a quoted `<attached-file path="…">` attribute
+ * (coderabbit review): POSIX filenames are legal with `"`, `&`, `<`, `>` — a
+ * raw interpolated path could break out of the attribute or smuggle markup
+ * into the model-facing block. Escaping covers the XML-significant set; `&`
+ * first so the replacements themselves are not re-escaped.
+ */
+export function escapeSnippetAttr(value: string): string {
+  return value.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+}
+
+/**
  * Build the `<attached-file path="…" selection>` block for an IDE selection
  * (PR-B · AC-5, DESIGN D7): unlike `@`-mentions this never goes through text
  * parsing — selection paths may contain spaces no tokenizer could survive —
@@ -7612,7 +7646,7 @@ export function buildSelectionBlock(
   )
   if (sliced === undefined || sliced === '') return undefined
   return {
-    text: `<attached-file path="${selection.path}" selection>\n${sliced}\n</attached-file>`,
+    text: `<attached-file path="${escapeSnippetAttr(selection.path)}" selection>\n${sliced}\n</attached-file>`,
     lines: sliced.split('\n').length,
   }
 }

@@ -193,9 +193,13 @@ function signatureParts(
       // T-FIX-01: the indicator renders the cwd-relative display path, so
       // the signature hashes THAT string — a cwd switch (/workspace) that
       // changes the display form must invalidate the cached height too.
+      // width is the display-CELL width (emoji / CJK / combining / ANSI
+      // differ from JS length), not the JS string length — two paths with
+      // equal length but different terminal widths must not share a cached
+      // height (coderabbit review, repo width convention).
       signatureScratch.push(
         row.selectionAttached === undefined ? 0 : 1,
-        displaySelectionPath(row.selectionAttached?.path ?? '', sessionCwd).length,
+        stringWidth(displaySelectionPath(row.selectionAttached?.path ?? '', sessionCwd)),
         String(row.selectionAttached?.lines ?? ''),
       )
       break
