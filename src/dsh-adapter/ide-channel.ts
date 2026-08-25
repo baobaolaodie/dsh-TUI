@@ -173,7 +173,9 @@ export function pickLockCandidates(lockDir: string, cwd: string, pid?: number): 
       matched: entry.workspaceFolders.some(folder => {
         const root = normalizeIdePath(folder, caseInsensitive)
         if (root === '') return false
-        return cwdNorm === root || cwdNorm.startsWith(`${root}/`) || cwdNorm.startsWith(`${root}\\`)
+        // normalizeIdePath already folds `\` → `/`, so only the forward
+        // separator is needed as the boundary.
+        return cwdNorm === root || cwdNorm.startsWith(`${root}/`)
       }),
     })
   }
