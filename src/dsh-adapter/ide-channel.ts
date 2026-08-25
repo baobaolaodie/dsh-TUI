@@ -160,31 +160,36 @@ export function pickLockCandidates(lockDir: string, cwd: string, pid?: number): 
   }
   const caseInsensitive = platformCaseInsensitive()
   const cwdNorm = normalizeIdePath(cwd, caseInsensitive)
-  const entries: Array<{ entry: LockEntry; matched: boolean }> = []
+  const entries: Array<{ entry: LockEntry; matchLength: number }> = []
   for (const name of names) {
     const entry = readLockEntry(join(lockDir, name))
     if (entry === undefined) continue
-    entries.push({
-      entry,
-      // Boundary-checked prefix: `/repo/a` must NOT match a cwd of
-      // `/repo/abc` (another workspace's window), only `/repo/a` itself or a
-      // path under it. Without the separator guard the wrong window's lock
-      // is dialed first and its selections attach here.
-      matched: entry.workspaceFolders.some(folder => {
-        const root = normalizeIdePath(folder, caseInsensitive)
-        if (root === '') return false
-        // normalizeIdePath already folds `\` → `/`, so only the forward
-        // separator is needed as the boundary. The POSIX root `/` is matched
-        // as a prefix of every absolute cwd WITHOUT building a `//` (which
-        // would never match) — a root workspace lock must still win over
-        // other windows.
-        if (root === '/') return cwdNorm.startsWith('/')
-        return cwdNorm === root || cwdNorm.startsWith(`${root}/`)
-      }),
-    })
+    // Boundary-checked prefix: `/repo/a` must NOT match a cwd of `/repo/abc`
+    // (another workspace's window), only `/repo/a` itself or a path under it.
+    // Without the separator guard the wrong window's lock is dialed first and
+    // its selections attach here. The POSIX root `/` matches every absolute
+    // cwd WITHOUT a `//` boundary. `matchLength` records the longest matching
+    // workspace root so candidates rank most-specific-first below.
+    let matchLength = 0
+    for (const folder of entry.workspaceFolders) {
+      const root = normalizeIdePath(folder, caseInsensitive)
+      if (root === '') continue
+      const hits = root === '/'
+        ? cwdNorm.startsWith('/')
+        : cwdNorm === root || cwdNorm.startsWith(`${root}/`)
+      if (hits && root.length > matchLength) matchLength = root.length
+    }
+    entries.push({ entry, matchLength })
   }
+  // Most-specific-first: a `/repo` workspace lock must precede the root `/`
+  // fallback when both match the same cwd (coderabbit review), while
+  // unmatched locks trail every match.
   return entries
-    .sort((left, right) => Number(right.matched) - Number(left.matched))
+    .sort(
+      (left, right) =>
+        Number(right.matchLength > 0) - Number(left.matchLength > 0)
+        || right.matchLength - left.matchLength,
+    )
     .map(item => item.entry)
 }
 

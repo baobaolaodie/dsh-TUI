@@ -459,6 +459,24 @@ async function main(): Promise<void> {
       listMod.displaySelectionPath?.('/repo/file.ts', '/other') !== 'repo/file.ts')
   }
 
+  // ── 8.6. 最具体优先排序（coderabbit review，最新一轮）──
+  // 同时有 `/repo` 锁与根 `/` 锁时，二者都能匹配 cwd `/repo`——但 `/repo`
+  // 应排在 `/` 之前（具体窗口优先于全局回退），根匹配本身仍保留。
+  {
+    const locksSpecific = join(tmpRoot, 'locks-specific')
+    rmSync(locksSpecific, { force: true, recursive: true })
+    mkdirSync(locksSpecific, { recursive: true })
+    writeFileSync(join(locksSpecific, '60101.lock'),
+      JSON.stringify({ port: 60101, token: 't-repo', workspaceFolders: ['/repo'], pid: 911 }))
+    writeFileSync(join(locksSpecific, '60102.lock'),
+      JSON.stringify({ port: 60102, token: 't-root', workspaceFolders: ['/'], pid: 912 }))
+    const specific = mod.pickLockCandidates(locksSpecific, '/repo', process.pid)
+    check('pickLockCandidates: 同匹配下 /repo 锁排在 / 根锁前（最具体优先）',
+      specific[0]?.token === 't-repo')
+    check('pickLockCandidates: 根 / 锁仍参与匹配（不因排序丢失）',
+      specific.some(c => c.token === 't-root'))
+  }
+
   // ── 9. 指示行显示相对化（T-FIX-01）：displaySelectionPath 纯函数 ───────────
   // UAT 实测根因：扩展基准（工作区根）与 TUI 基准（会话 cwd）不一致，指示行
   // 显示冗长绝对路径。修复为纯展示层前缀剥离——块内 path 保持绝对不动。
