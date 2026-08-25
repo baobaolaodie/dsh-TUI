@@ -166,9 +166,15 @@ export function pickLockCandidates(lockDir: string, cwd: string, pid?: number): 
     if (entry === undefined) continue
     entries.push({
       entry,
-      matched: entry.workspaceFolders.some(
-        folder => cwdNorm.startsWith(normalizeIdePath(folder, caseInsensitive)),
-      ),
+      // Boundary-checked prefix: `/repo/a` must NOT match a cwd of
+      // `/repo/abc` (another workspace's window), only `/repo/a` itself or a
+      // path under it. Without the separator guard the wrong window's lock
+      // is dialed first and its selections attach here.
+      matched: entry.workspaceFolders.some(folder => {
+        const root = normalizeIdePath(folder, caseInsensitive)
+        if (root === '') return false
+        return cwdNorm === root || cwdNorm.startsWith(`${root}/`) || cwdNorm.startsWith(`${root}\\`)
+      }),
     })
   }
   return entries

@@ -5545,6 +5545,13 @@ export function createChannel(
     releaseContributions() {
       releaseSkillCommands()
       unsubscribeScenes?.()
+      // Release the loopback IDE socket on overall teardown (coderabbit
+      // review). Deliberately NOT on agent/disposed: the factory outlives
+      // agent swaps (/new /resume /rewind) — stopping the channel mid-session
+      // would cut a live connection the next agent would then lack.
+      // ideChannel is declared later in the factory; the closure only reads
+      // it when this method runs (plugin teardown), well after init.
+      ideChannel.stop()
     },
     traceEvents() {
       // Immutable per-append snapshot (dsh-session caches the frozen array);

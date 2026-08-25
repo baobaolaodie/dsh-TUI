@@ -1270,6 +1270,7 @@ function TranscriptRow({
             <Text dimColor>
               {'⧉ '}{t('selection-attached', {
                 lines: selectionAttached.lines,
+                count: selectionAttached.lines,
                 path: displaySelectionPath(selectionAttached.path, sessionCwd),
               })}
             </Text>

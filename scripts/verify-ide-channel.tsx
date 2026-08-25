@@ -234,6 +234,25 @@ async function main(): Promise<void> {
   check('pickLockCandidates: 原 POSIX 匹配顺序不受 Windows lock 干扰',
     posixStillFirst[0]?.token === 't-a')
 
+  // 前缀边界（coderabbit review）：/repo/a 声明不得匹配会话 cwd
+  // `/repo/abc`——会连错窗口把别的 workspace 的选区附到这里。
+  // 隔离目录 + 名字典序对比：都是不匹配锁时文件名小的（40401）排前；
+  // 若 45555(/repo/a) 被误判匹配，就会越到 40401 前。
+  const boundaryDir = join(tmpRoot, 'locks-boundary')
+  rmSync(boundaryDir, { force: true, recursive: true })
+  mkdirSync(boundaryDir, { recursive: true })
+  writeFileSync(join(boundaryDir, '40401.lock'),
+    JSON.stringify({ port: 40401, token: 't-z-z', workspaceFolders: ['/other2'], pid: 777 }))
+  writeFileSync(join(boundaryDir, '45555.lock'),
+    JSON.stringify({ port: 45555, token: 't-sub', workspaceFolders: ['/repo/a'], pid: 555 }))
+  const pickedBoundary = mod.pickLockCandidates(boundaryDir, '/repo/abc', process.pid)
+  check('pickLockCandidates: /repo/a 声明不匹配 /repo/abc 会话（前缀边界）',
+    pickedBoundary[0]?.token === 't-z-z')
+  check('pickLockCandidates: 精确等于 workspace 根仍匹配', (() => {
+    const computed = mod.pickLockCandidates(boundaryDir, '/repo/a', process.pid)
+    return computed[0]?.token === 't-sub'
+  })())
+
   // ── 4. parseSelectionChanged：通知解析与坐标校验 ───────────────────────────
   const good = mod.parseSelectionChanged({
     method: 'selection_changed',
