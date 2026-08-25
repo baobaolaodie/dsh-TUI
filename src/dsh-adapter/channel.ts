@@ -7272,24 +7272,26 @@ ${output}
   })
 
   /**
-   * Invalidate the live selection and rebind the IDE channel when the
-   * session's working directory changes (coderabbit Major review): `/resume`
-   * takes over the persisted header cwd, `/workspace` switches to another
-   * directory. A selection made in the OLD workspace would otherwise stay in
-   * currentSelection / state.selection — the badge shows it and the next
-   * submit resolves its RELATIVE path against the NEW cwd, attaching the
-   * wrong file. Clearing here invalidates until a fresh snapshot arrives;
-   * restarting the channel re-runs discovery (env + lock) so the new cwd's
-   * matching window is dialed, not the old one. The onSelection listener
-   * lives on the IdeChannel instance and survives stop(), so a fresh snapshot
-   * for the new cwd repopulates the value as usual.
+   * Invalidate the live selection when the session's working directory
+   * changes (coderabbit Major review): `/resume` takes over the persisted
+   * header cwd, `/workspace` switches to another directory. A selection made
+   * in the OLD workspace would otherwise stay in currentSelection /
+   * state.selection — the badge shows it and the next submit resolves its
+   * RELATIVE path against the NEW cwd, attaching the wrong file.
+   *
+   * Deliberately does NOT stop()/start() the IdeChannel: its state machine is
+   * terminal-on-disconnect by design (DESIGN §3) — stop() leaves
+   * `disconnected`, and start() guard-clauses on `state !== 'idle'`, so a
+   * stop-then-start can never reconnect and silently kills the whole channel
+   * (the extension then falls back to the sendText typing approximation).
+   * In the primary env-direct launch the same VS Code window keeps pushing
+   * selection_changed after the cwd switch, so clearing the value is enough —
+   * the next snapshot repopulates it for the new workspace.
    */
   const resetIdeSelection = (): void => {
     currentSelection = undefined
     state.selection = undefined
     state.emit()
-    void ideChannel.stop()
-    void ideChannel.start(process.env, ideLockDir(), state.cwd).catch(() => {})
   }
 
   /**
