@@ -227,9 +227,16 @@ async function main(): Promise<void> {
   // Windows 归一化：扩展写 fsPath 风格（反斜杠 + 大盘符），会话 cwd 是小写正斜杠
   writeFileSync(join(lockDir, '44444.lock'),
     JSON.stringify({ port: 44444, token: 't-win', workspaceFolders: ['C:\\Repo\\A'], pid: 444 }))
-  const pickedWin = mod.pickLockCandidates(lockDir, 'c:/repo/a/sub/dir', process.pid)
-  check('pickLockCandidates: Windows 反斜杠+盘符大小写归一化后匹配且排第一',
-    pickedWin[0]?.token === 't-win')
+  // platformCaseInsensitive() 只在 win32/darwin 开启：这条断言锁的是 Windows
+  // 扩展行为，其他平台直接 SKIP（照 verify-cli-subcommands 的平台守卫先例），
+  // 否则 Linux 上常红（该脚本未入 CI，作者在 Windows 本机验证）。
+  if (process.platform === 'win32') {
+    const pickedWin = mod.pickLockCandidates(lockDir, 'c:/repo/a/sub/dir', process.pid)
+    check('pickLockCandidates: Windows 反斜杠+盘符大小写归一化后匹配且排第一',
+      pickedWin[0]?.token === 't-win')
+  } else {
+    check('pickLockCandidates: Windows 归一化断言（非 win32 平台 SKIP）', true)
+  }
   const posixStillFirst = mod.pickLockCandidates(lockDir, '/repo/a', process.pid)
   check('pickLockCandidates: 原 POSIX 匹配顺序不受 Windows lock 干扰',
     posixStillFirst[0]?.token === 't-a')
@@ -290,6 +297,29 @@ async function main(): Promise<void> {
   check('无 IDE：connected=false', degraded.connected === false)
   check('无 IDE：selection 为 undefined', degraded.selection === undefined)
   check('无 IDE：在连接预算内静默完成（<2s）', degradedElapsed < 2000)
+
+  // ── 5b. 断线清残留选区（复审修复）：degrade 必须清 current 并广播 isEmpty，
+  // 否则徽标与提交自动附加会继续使用失联前的旧选区。
+  {
+    const ch = new mod.IdeChannel() as unknown as {
+      current?: Snapshot
+      socket: unknown
+      listeners: Set<(s: Snapshot) => void>
+      degradeToDisconnected(socket: unknown): void
+      onSelection(cb: (s: Snapshot) => void): () => void
+    }
+    ch.current = { path: 'stale.ts', startLine: 3, endLine: 5, isEmpty: false }
+    const fakeSocket = {}
+    ch.socket = fakeSocket
+    const seen: Snapshot[] = []
+    ch.onSelection(s => seen.push(s))
+    ch.degradeToDisconnected(fakeSocket)
+    check('断线：current 清空', ch.current === undefined)
+    check('断线：广播 isEmpty 快照', seen.length === 1 && seen[0]?.isEmpty === true && seen[0]?.path === 'stale.ts')
+    // 陈旧 socket 的二次回调不得再次广播（generation 守卫由 socket 身份比较承担）
+    ch.degradeToDisconnected({})
+    check('断线：陈旧 socket 回调不再广播', seen.length === 1)
+  }
 
   // ── 6. loopback 对连 · env 直连路径 ────────────────────────────────────────
   const envFixture = await startWsFixture('tok-env')

@@ -395,5 +395,13 @@ export class IdeChannel {
     this.socket = null
     this.detach(socket)
     this.state = 'disconnected'
+    // A dead connection's selection is stale: clear the cached snapshot and
+    // tell subscribers — the badge and submit auto-attach must not keep
+    // using whatever was selected before the disconnect.
+    const stale = this.current
+    this.current = undefined
+    if (stale !== undefined) {
+      for (const listener of [...this.listeners]) listener({ ...stale, isEmpty: true })
+    }
   }
 }
