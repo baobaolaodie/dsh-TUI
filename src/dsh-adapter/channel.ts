@@ -2465,6 +2465,12 @@ export function createChannel(
    * attachment block. The pending preview tracks the typed text.
    */
   const deliverUserText = (text: string, placement: PendingMessage['placement']): void => {
+    // ENQUEUE-time capture (maintainer review #4): read the live selection
+    // and cwd synchronously NOW — while the user is hitting submit — not
+    // inside the async chain, where expandMentions parks the delivery and a
+    // selection made in between would attach to the wrong message.
+    const enqSelection = currentSelection
+    const enqCwd = state.cwd
     sendChain = sendChain.then(async () => {
       const expansion = await expandMentions(
         mentionFs(ctx),
@@ -2478,7 +2484,7 @@ export function createChannel(
       // block — direct construction, never text parsing, failures silently
       // skipped. attachIdeSelection lives with the ideChannel wiring near the
       // end of this factory.
-      const selectionAttached = await attachIdeSelection(expansion.blocks, state.cwd)
+      const selectionAttached = await attachIdeSelection(expansion.blocks, enqCwd, enqSelection)
       const message = createUserMessage({
         content: expansion.blocks,
         source: { kind: 'user' },
@@ -8745,8 +8751,12 @@ ${output}
   const attachIdeSelection = async (
     blocks: ContentBlock[],
     cwd: string,
+    snapshot?: SelectionSnapshot,
   ): Promise<SelectionAttachedInfo | undefined> => {
-    const selection = currentSelection
+    // A call-site snapshot wins (deliverUserText captures at enqueue so the
+    // attach reflects what was selected AT SUBMIT, review #4); the live-value
+    // default keeps standalone verifier calls reading the current selection.
+    const selection = snapshot ?? currentSelection
     if (selection === undefined || selection.isEmpty) return undefined
     try {
       const fs = mentionFs(ctx)

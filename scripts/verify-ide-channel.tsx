@@ -212,9 +212,9 @@ async function main(): Promise<void> {
   rmSync(lockDir, { force: true, recursive: true })
   mkdirSync(lockDir, { recursive: true })
   writeFileSync(join(lockDir, '41111.lock'),
-    JSON.stringify({ port: 41111, token: 't-a', workspaceFolders: ['/repo/a'], pid: 111 }))
+    JSON.stringify({ port: 41111, token: 't-a', workspaceFolders: ['/repo/a'], pid: process.pid }))
   writeFileSync(join(lockDir, '42222.lock'),
-    JSON.stringify({ port: 42222, token: 't-other', workspaceFolders: ['/other'], pid: 222 }))
+    JSON.stringify({ port: 42222, token: 't-other', workspaceFolders: ['/other'], pid: process.pid }))
   writeFileSync(join(lockDir, '43333.lock'), '{ broken json !!!')
   const picked = mod.pickLockCandidates(lockDir, '/repo/a', process.pid)
   check('pickLockCandidates: 坏 JSON lock 被跳过（不出现在候选中）',
@@ -226,7 +226,7 @@ async function main(): Promise<void> {
 
   // Windows 归一化：扩展写 fsPath 风格（反斜杠 + 大盘符），会话 cwd 是小写正斜杠
   writeFileSync(join(lockDir, '44444.lock'),
-    JSON.stringify({ port: 44444, token: 't-win', workspaceFolders: ['C:\\Repo\\A'], pid: 444 }))
+    JSON.stringify({ port: 44444, token: 't-win', workspaceFolders: ['C:\\Repo\\A'], pid: process.pid }))
   // platformCaseInsensitive() 只在 win32/darwin 开启：这条断言锁的是 Windows
   // 扩展行为，其他平台直接 SKIP（照 verify-cli-subcommands 的平台守卫先例），
   // 否则 Linux 上常红（该脚本未入 CI，作者在 Windows 本机验证）。
@@ -241,6 +241,14 @@ async function main(): Promise<void> {
   check('pickLockCandidates: 原 POSIX 匹配顺序不受 Windows lock 干扰',
     posixStillFirst[0]?.token === 't-a')
 
+  // 陈旧 pid 过滤（维护者复审 #1）：锁文件里记录的扩展进程已退出 → 该锁
+  // 不再存活，不得参与发现（否则死锁能抢占并拿到 token 握手）。
+  writeFileSync(join(lockDir, '49999.lock'),
+    JSON.stringify({ port: 49999, token: 't-stale', workspaceFolders: ['/repo/a'], pid: 2147483647 }))
+  const pickedStale = mod.pickLockCandidates(lockDir, '/repo/a', process.pid)
+  check('pickLockCandidates: 陈旧 pid 锁被跳过（仅活锁参与发现）',
+    pickedStale.every(c => c.token !== 't-stale'))
+
   // 前缀边界（coderabbit review）：/repo/a 声明不得匹配会话 cwd
   // `/repo/abc`——会连错窗口把别的 workspace 的选区附到这里。
   // 隔离目录 + 名字典序对比：都是不匹配锁时文件名小的（40401）排前；
@@ -249,9 +257,9 @@ async function main(): Promise<void> {
   rmSync(boundaryDir, { force: true, recursive: true })
   mkdirSync(boundaryDir, { recursive: true })
   writeFileSync(join(boundaryDir, '40401.lock'),
-    JSON.stringify({ port: 40401, token: 't-z-z', workspaceFolders: ['/other2'], pid: 777 }))
+    JSON.stringify({ port: 40401, token: 't-z-z', workspaceFolders: ['/other2'], pid: process.pid }))
   writeFileSync(join(boundaryDir, '45555.lock'),
-    JSON.stringify({ port: 45555, token: 't-sub', workspaceFolders: ['/repo/a'], pid: 555 }))
+    JSON.stringify({ port: 45555, token: 't-sub', workspaceFolders: ['/repo/a'], pid: process.pid }))
   const pickedBoundary = mod.pickLockCandidates(boundaryDir, '/repo/abc', process.pid)
   check('pickLockCandidates: /repo/a 声明不匹配 /repo/abc 会话（前缀边界）',
     pickedBoundary[0]?.token === 't-z-z')
@@ -259,6 +267,23 @@ async function main(): Promise<void> {
     const computed = mod.pickLockCandidates(boundaryDir, '/repo/a', process.pid)
     return computed[0]?.token === 't-sub'
   })())
+
+  // stop 阻断在途拨号（维护者复审 #2）：stop() 必须递增 generation 并清空
+  // pending/socket —— 否则 connecting 阶段的拨号会在 onopen 时把已停的通道
+  // 复活。generation 单调性 + pending/socket 清空从机制上锁死「stop 后不复活」。
+  {
+    const stopCh = new mod.IdeChannel() as unknown as {
+      generation: number
+      socket: unknown
+      pendingSocket: unknown
+      stop(): void
+      connected: boolean
+    }
+    const g0 = stopCh.generation
+    stopCh.stop()
+    check('stop·阻断：stop 递增 generation（在途拨号一律作废）', stopCh.generation === g0 + 1)
+    check('stop·阻断：stop 清空 socket 与 pendingSocket', stopCh.socket === null && stopCh.pendingSocket === null)
+  }
 
   // ── 4. parseSelectionChanged：通知解析与坐标校验 ───────────────────────────
   const good = mod.parseSelectionChanged({
@@ -362,7 +387,7 @@ async function main(): Promise<void> {
       port: lockFixture.port,
       token: 'tok-lock',
       workspaceFolders: [tmpRoot],
-      pid: 12345,
+      pid: process.pid,
     }))
     const channel = new mod.IdeChannel()
     const seen: Snapshot[] = []
@@ -473,9 +498,9 @@ async function main(): Promise<void> {
     rmSync(locksRoot, { force: true, recursive: true })
     mkdirSync(locksRoot, { recursive: true })
     writeFileSync(join(locksRoot, '50101.lock'),
-      JSON.stringify({ port: 50101, token: 't-root', workspaceFolders: ['/'], pid: 901 }))
+      JSON.stringify({ port: 50101, token: 't-root', workspaceFolders: ['/'], pid: process.pid }))
     writeFileSync(join(locksRoot, '50102.lock'),
-      JSON.stringify({ port: 50102, token: 't-deep', workspaceFolders: ['/deeper'], pid: 902 }))
+      JSON.stringify({ port: 50102, token: 't-deep', workspaceFolders: ['/deeper'], pid: process.pid }))
     const rootPick = mod.pickLockCandidates(locksRoot, '/repo/sub', process.pid)
     check('pickLockCandidates: 根 / 声明匹配任何绝对 cwd（C-6）', rootPick.some(c => c.token === 't-root'))
   }
@@ -497,9 +522,9 @@ async function main(): Promise<void> {
     rmSync(locksSpecific, { force: true, recursive: true })
     mkdirSync(locksSpecific, { recursive: true })
     writeFileSync(join(locksSpecific, '60101.lock'),
-      JSON.stringify({ port: 60101, token: 't-repo', workspaceFolders: ['/repo'], pid: 911 }))
+      JSON.stringify({ port: 60101, token: 't-repo', workspaceFolders: ['/repo'], pid: process.pid }))
     writeFileSync(join(locksSpecific, '60102.lock'),
-      JSON.stringify({ port: 60102, token: 't-root', workspaceFolders: ['/'], pid: 912 }))
+      JSON.stringify({ port: 60102, token: 't-root', workspaceFolders: ['/'], pid: process.pid }))
     const specific = mod.pickLockCandidates(locksSpecific, '/repo', process.pid)
     check('pickLockCandidates: 同匹配下 /repo 锁排在 / 根锁前（最具体优先）',
       specific[0]?.token === 't-repo')

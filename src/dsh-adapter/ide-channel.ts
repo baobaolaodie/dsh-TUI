@@ -140,6 +140,21 @@ export function readLockEntry(file: string): LockEntry | undefined {
 }
 
 /**
+ * True when a process id is currently alive (used to skip stale locks whose
+ * owning extension already exited). `process.kill(pid, 0)` probes existence
+ * without signalling; a missing process throws ESRCH and reads as dead.
+ * Same user, so no permission false-negatives for the loopback's own locks.
+ */
+function isProcessAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch {
+    return false
+  }
+}
+
+/**
  * Scan a lock directory and order the candidates: locks whose
  * workspaceFolders contain the session cwd come first, everything else
  * after; ties keep directory order (stable sort). Malformed locks are
@@ -163,7 +178,10 @@ export function pickLockCandidates(lockDir: string, cwd: string, pid?: number): 
   const entries: Array<{ entry: LockEntry; matchLength: number }> = []
   for (const name of names) {
     const entry = readLockEntry(join(lockDir, name))
-    if (entry === undefined) continue
+    // Stale lock: the extension that wrote it has already exited — a dead
+    // process can no longer own the handshake token, so never dial it
+    // (maintainer review round 2: stale locks could otherwise win discovery).
+    if (entry === undefined || !isProcessAlive(entry.pid)) continue
     // Boundary-checked prefix: `/repo/a` must NOT match a cwd of `/repo/abc`
     // (another workspace's window), only `/repo/a` itself or a path under it.
     // Without the separator guard the wrong window's lock is dialed first and
@@ -242,8 +260,13 @@ export type SelectionAttachedInfo = {
  */
 export class IdeChannel {
   private socket: WebSocket | null = null
+  private pendingSocket: WebSocket | null = null
   private state: 'idle' | 'connecting' | 'connected' | 'disconnected' = 'idle'
   private current: SelectionSnapshot | undefined = undefined
+  /** Bumped on every connect attempt and on stop(): in-flight dials check it
+   *  in `finish`, so a stopped channel can never be revived by a late onopen
+   *  (maintainer review round 2 — stop() must cancel pending dials). */
+  private generation = 0
   private readonly listeners = new Set<SelectionListener>()
 
   /** True only while the loopback link is up. */
@@ -279,6 +302,7 @@ export class IdeChannel {
     cwd: string = process.cwd(),
   ): Promise<void> {
     if (this.state !== 'idle') return
+    this.generation++
     const targets: IdeChannelConfig[] = []
     const direct = envDirect(env)
     if (direct !== undefined) targets.push(direct)
@@ -299,8 +323,11 @@ export class IdeChannel {
     this.state = 'disconnected'
   }
 
-  /** Drop the link (if any) and mark the channel disconnected. */
+  /** Drop the link (if any) and mark the channel disconnected. Cancels any
+   *  dial still pending: the generation bump invalidates its finish, and the
+   *  pending socket is aborted so a late onopen can never re-connect. */
   stop(): void {
+    this.generation++
     this.teardown()
     this.state = 'disconnected'
   }
@@ -308,9 +335,16 @@ export class IdeChannel {
   private teardown(): void {
     const socket = this.socket
     this.socket = null
-    if (socket === null) return
-    this.detach(socket)
-    this.abort(socket)
+    const pending = this.pendingSocket
+    this.pendingSocket = null
+    if (socket !== null) {
+      this.detach(socket)
+      this.abort(socket)
+    }
+    if (pending !== null && pending !== socket) {
+      this.detach(pending)
+      this.abort(pending)
+    }
   }
 
   private detach(socket: WebSocket): void {
@@ -337,6 +371,7 @@ export class IdeChannel {
   private tryConnect(target: IdeChannelConfig, timeoutMs: number): Promise<boolean> {
     return new Promise(resolve => {
       let settled = false
+      const gen = this.generation
       let socket: WebSocket
       try {
         socket = new WebSocket(`ws://127.0.0.1:${target.port}`)
@@ -344,10 +379,23 @@ export class IdeChannel {
         resolve(false)
         return
       }
+      // Track the in-flight dial so stop() can abort it directly (not just
+      // via the generation guard) — cancel the CONNECTING socket to unblock
+      // the promise instead of letting it spin until the budget ends.
+      this.pendingSocket = socket
       const finish = (opened: boolean) => {
         if (settled) return
         settled = true
         clearTimeout(timer)
+        // A stop() between dial and open bumped the generation: this dial
+        // belongs to a cancelled session — drop it, never become connected.
+        if (gen !== this.generation) {
+          this.detach(socket)
+          this.abort(socket)
+          resolve(false)
+          return
+        }
+        if (this.pendingSocket === socket) this.pendingSocket = null
         if (!opened) {
           this.detach(socket)
           this.abort(socket)
