@@ -9,6 +9,7 @@ import { hasPath } from '../dsh-adapter/settingsEditor.js'
 import { planReload, type ReloadKind } from '../reload.js'
 import { AlternateScreen, Box, Text, useInput, ScrollBox, type ScrollBoxHandle, useTheme, useTerminalSize } from '../ui.js'
 import * as tuiKit from '../ui.js'
+import { usePageInset } from '../components/PageMargin.js'
 import { POINTER } from '../cc/figures.js'
 import { isPlainReturnInput, modLabel } from '../utils/modifiers.js'
 import { actionMatches } from '../utils/keymap.js'
@@ -99,6 +100,7 @@ import { setClipboard } from '../ink/termio/osc.js'
 import { TerminalWriteContext } from '../ink/useTerminalNotification.js'
 import instances from '../ink/instances.js'
 import { useAnimationFrame } from '../ink/hooks/use-animation-frame.js'
+import { useExternalVersion } from '../hooks/useExternalVersion.js'
 import { TrajectoryScene } from './TrajectoryScene.js'
 import { AgentView } from './AgentView.js'
 import { extendTrajectory, projectWave, type TrajBuild } from '../dsh-adapter/trajectory/index.js'
@@ -280,7 +282,14 @@ export function Chat({
 }) {
   const writeRaw = React.useContext(TerminalWriteContext)
   // Re-render whenever the channel mutates; rows/status are read fresh below.
-  React.useSyncExternalStore(channel.subscribe, () => channel.version)
+  // DEFAULT lane on purpose (useExternalVersion): the channel version bumps
+  // at streaming cadence (every ~16ms via emitStream), and a useSyncExternalStore
+  // wakeup would force a SyncLane render per bump — each such sync commit
+  // preempting the in-flight Default render and ending with Default work
+  // still pending feeds React's nested-update counter until error #185 kills
+  // the process (beta.3; the reveal-store half was PR #680, this is the
+  // channel half — the surviving source on Windows timer granularity).
+  useExternalVersion(channel.subscribe, () => channel.version)
   // Re-render on language switches so the whole UI hot-swaps its strings.
   React.useSyncExternalStore(subscribeLang, getLang)
   // The pending ask-user-question (DSH user-interaction seam): the model's
@@ -777,6 +786,15 @@ export function Chat({
 
   // Sticky (pinned-to-bottom) scroll state, subscribed imperatively so
   // wheel events don't re-render React — only the header/pill flip.
+  // Deliberately KEPT on useSyncExternalStore despite the SyncLane wakeup
+  // cost: the renderer's at-bottom re-pin flips sticky WITHOUT firing the
+  // scroll subscribers (see ScrollBox's subscribe doc), so only uSES's
+  // every-render getSnapshot check picks that flip up — a pure
+  // notification-driven subscription misses it and the new-message pill
+  // stops reflecting reality (repro-pill). Wheel cadence is an
+  // interaction-rate source (not streaming-rate), the streaming-side
+  // #185 sources are all Default-lane now, and the overflow guard
+  // backstops the residue.
   const isSticky = React.useSyncExternalStore(
     cb => (handle ? handle.subscribe(cb) : () => {}),
     () => (handle ? handle.isSticky() : true),
@@ -2218,6 +2236,7 @@ export function Chat({
    * every animation tick. The tick only re-colours the cells it already has.
    */
   const { columns: terminalColumns } = useTerminalSize()
+  const pageInsetX = usePageInset().x
   const wakeWidth = miniWakeWidth(terminalColumns)
   const wakeBand = React.useMemo(
         () =>
@@ -3286,7 +3305,7 @@ export function Chat({
     return fullscreen ? scene : <AlternateScreen>{scene}</AlternateScreen>
   }
 
-  // Subagent dashboard: displays all active and completed subagents.
+  // Jobs panel: background jobs (running/killed) with kill/inspect actions.
   // Like the browser and settings, it replaces the conversation entirely.
   if (jobsPanelOpen) {
     const panel = (
@@ -3383,7 +3402,14 @@ export function Chat({
           }}
         />
       )}
-      <Box flexDirection="row" flexGrow={1} flexShrink={1} width="100%">
+      {/* Transcript row. Under PageMargin the negative right margin makes
+          the row stretch past the content column to the terminal edge —
+          the gutter (timeline rail / scrollbar) thus lands at the very
+          edge while the transcript TEXT stays inside the page margin
+          (structural chrome convention: dividers and the rail bleed, text
+          and cards keep the content column). No explicit width: cross-axis
+          stretch with the margin yields exactly content+margin. */}
+      <Box flexDirection="row" flexGrow={1} flexShrink={1} marginRight={-pageInsetX}>
         <ScrollBox ref={setHandle} flexDirection="column" flexGrow={1} flexShrink={1} stickyScroll>
         <LogoHeader
           key={logoNonce}

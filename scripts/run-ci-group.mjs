@@ -48,6 +48,10 @@ const GROUPS = {
 // （thinking ticker 跟随已到达文本而展开体吃切片、工具卡行级揭示、
 // result 落定即全显）。
     ["verify-smooth-reveal", ['node', '--import', 'tsx/esm', 'scripts/verify-smooth-reveal.tsx']],
+// 根级页边距（PageMargin）契约：无内缩终端（裸 WSL/tmux/SSH）下文字贴边。
+// 左右 2 列上下 1 行内缩 + TerminalSize 收敛成内容区尺寸 + inset 坐标
+// 补偿，对照组保证无 PageMargin 时既有「全宽」契约不变。
+    ["verify-page-margin", ['node', '--import', 'tsx/esm', 'scripts/verify-page-margin.tsx']],
 // 滚动/pill/内联模式回归：新消息 pill 计数递减、Ctrl+C 交互、
 // 内联 scrollback 第三方终端适配。曾因 mock channel 缺新字段而
 // 静默冻结（render 期 TypeError 被 ink 吞掉），不在 CI 里烂了
@@ -316,6 +320,15 @@ const GROUPS = {
 // 不出现、到点内容正确、leave 即隐、leave 早于延迟取消、自定义 delayMs、
 // 多行内容锚点上方、屏顶锚点转下方、resize 隐藏（几何失效）、窄屏水平钳制。
     ["verify-tooltip", ['node', '--import', 'tsx/esm', 'scripts/verify-tooltip.tsx']],
+// 工具卡头部 hover tooltip 内容门控回归：头部已经完整显示（单行标题 / 未
+// 超出预算的 args）时悬停不再弹「重复可见文本」的浮层，改弹卡片元数据
+// （开始/结束时刻、耗时、运行中时长）；折叠的终端脚本与超出 480 字符预算
+// 的 args 仍弹完整内容（弹层优先真隐藏内容）。
+    ["verify-tool-tooltip-gating", ['node', '--import', 'tsx/esm', 'scripts/verify-tool-tooltip-gating.tsx']],
+// 悬停浮层第二批回归：@ 文件补全面板长路径悬停弹全路径（完整可见的短路径
+// 不弹）、会话列表行标题截断悬停弹完整标题+绝对时间+cwd（未截断不重复
+// 标题）、状态栏 model/git 字段悬停明细（provider/ctx 窗口/完整分支）。
+    ["verify-hover-details", ['node', '--import', 'tsx/esm', 'scripts/verify-hover-details.tsx']],
 // 便携包更新解压链安全回归：Windows 解压优先 tar.exe 数组参数，回退
 // Expand-Archive 的两个路径按 PowerShell 约定把 ' 双写为 ''——路径派生
 // 自环境变量，不转义即可注入任意命令；解压与替换之间的提取树校验拒绝
@@ -359,6 +372,11 @@ const GROUPS = {
     ["verify-compact", ['node', '--import', 'tsx/esm', 'scripts/verify-compact.mjs']],
     ["verify-channel-goal-todo", ['node', '--import', 'tsx/esm', 'scripts/verify-channel-goal-todo.mjs']],
     ["verify-whale-toggle", ['node', '--import', 'tsx/esm', 'scripts/verify-whale-toggle.mjs']],
+// 开屏鲸鱼三选一（classic 组合开场/heart/sleep）：帧表完整性（22 帧
+// 含 heart/sleep 新调色）、序列合法性（standard 起止/纯自家行为帧、
+// classic 仍捆绑眨眼+喷水+摆尾）、随机选取 API 覆盖/钳制/每次挂载
+// 独立重掷、LogoV2 渲染冒烟（粉爱心/灰 Z 上屏后落定消失）。
+    ["verify-whale-intro", ['node', '--import', 'tsx/esm', 'scripts/verify-whale-intro.mjs']],
 // 计划退出恢复进入前权限；覆盖延迟切换、会话恢复与未知权限不提权。
     ["verify-plan-exit-restore", ['node', 'scripts/verify-plan-exit-restore.mjs']],
 // 会话切换/清屏卫生：子代理投影（行 map/任务描述队列/仪表盘快照）随
@@ -374,6 +392,11 @@ const GROUPS = {
 // toast、kill 权限传递、无 jobs 服务降级、/new 重置）、JobCard/JobsPanel
 // 渲染冒烟（三行瀑布、settled 折叠、面板行/提示）。
     ["verify-jobs-panel", ['node', '--import', 'tsx/esm', 'scripts/verify-jobs-panel.tsx']],
+// #185 自愈守卫：React nested-update overflow（Minified error #185）抛出时
+// reconciler 已清零计数器，守卫在 clock.tick / reveal.tick / scrollbox.notify /
+// channel.emit(+emitStream) / selection.notify 等高频 enqueue 热点吸收该类
+// 错误——丢一拍而非进程死亡；单元（分类/透传/限流）+ 热点集成 + 渲染零干扰。
+    ["verify-update-overflow-guard", ['node', '--import', 'tsx/esm', 'scripts/verify-update-overflow-guard.tsx']],
 // /tree 与 /fork 回归：sessionTree 纯模型（条目提取、回退/分叉边界、
 // 家族拼接、扁平化/过滤、整轮丢弃预警）、compat 预算读取器
 // （全量/截断/继承前缀跳过）、SessionTree 屏幕无头组装
@@ -383,6 +406,7 @@ const GROUPS = {
 // abort 并等压缩落定再 fork 快照（后台提交 checkpoint = "压缩失败后换模型
 // 丢上下文"事故根因）；persistence 类失败与通用失败分开提示。
     ["verify-compact-switch", ['node', '--import', 'tsx/esm', 'scripts/verify-compact-switch.tsx']],
+    ["verify-live-session", ['node', '--import', 'tsx/esm', 'scripts/verify-live-session.ts']],
 // 裸 ● 空行回归：纯思考/纯工具步骤（无文本块）的 assistant/message
 // 不得创建空 assistant 行，否则思考块折叠后转录里多出一个只有
 // ● 前缀、内容为空的行。

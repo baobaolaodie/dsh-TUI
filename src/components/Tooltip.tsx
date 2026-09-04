@@ -4,6 +4,7 @@ import { Box, Text, useTerminalSize } from '../ui.js'
 import { useTerminalFocus } from '../ink/hooks/use-terminal-focus.js'
 import { stringWidth } from '../ink/stringWidth.js'
 import { getGraphemeSegmenter } from '../utils/intl.js'
+import { PageInsetContext } from './PageMargin.js'
 import type { PointerEvent } from '../ink/events/pointer-event.js'
 
 /**
@@ -12,6 +13,10 @@ import type { PointerEvent } from '../ink/events/pointer-event.js'
  * may be truncated (tool-call header paths, wrapped prompts, status-line
  * fields); after a ~600ms dwell the full content pops up in a floating card
  * anchored at the pointer, and disappears the moment the pointer leaves.
+ *
+ * Attach it ONLY when the text is actually hidden: a float that repeats
+ * content already visible next to the pointer is noise, not detail (the
+ * tool-call header gates on folded/clipped content for this reason).
  *
  * Hover events only exist in fullscreen (alternate screen + mouse
  * tracking); inline mode never fires the handlers, so the store can only
@@ -215,11 +220,23 @@ export function TooltipLayer({
   const height = lines.length + 2
   // Prefer resting on the row ABOVE the anchor; when there is no room
   // (anchor at the top of the screen), drop below it, clamped on-screen.
+  // The anchor coordinates are SCREEN coordinates (pointer events) while
+  // the absolute box is placed relative to the content-area origin — under
+  // PageMargin (root page inset) the offset must be added back, and the
+  // clamp bounds run over the inset content area.
+  const inset = React.useContext(PageInsetContext)
   const topAbove = tooltip.anchorRow - height
-  const top = topAbove >= 0
-    ? topAbove
-    : Math.max(0, Math.min(tooltip.anchorRow + 1, rows - height))
-  const left = Math.max(0, Math.min(tooltip.anchorCol, columns - width))
+  const top = Math.max(
+    inset.y,
+    Math.min(
+      topAbove >= 0 ? topAbove : tooltip.anchorRow + 1,
+      inset.y + Math.max(0, rows - height),
+    ),
+  )
+  const left = Math.max(
+    inset.x,
+    Math.min(tooltip.anchorCol, inset.x + Math.max(0, columns - width)),
+  )
   return (
     <Box
       position="absolute"

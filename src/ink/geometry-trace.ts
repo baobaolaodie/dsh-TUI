@@ -23,6 +23,7 @@ export type FrameCause =
   | 'animation'
   | 'scroll'
   | 'scroll-drain'
+  | 'overlay-shrink'
   | 'measure'
   | 'resize'
   | 'reanchor'
