@@ -405,8 +405,10 @@ async function main(): Promise<void> {
 
   // ── 8. 选区消费注入（T05 · AC-5 前半）：块构造与钳制 ──────────────────────
   {
-    const channelMod = await import('../src/dsh-adapter/channel.js')
-    const build = (channelMod as {
+    // Block construction moved with the channel split: it now lives in the
+    // dedicated ide-selection module, not the channel barrel.
+    const selectionMod = await import('../src/dsh-adapter/channel/ide-selection.js')
+    const build = (selectionMod as {
       buildSelectionBlock: (
         selection: { path: string; startLine: number; endLine: number; isEmpty: boolean },
         content: string,

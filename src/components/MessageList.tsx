@@ -1,9 +1,10 @@
 import React, { useState } from 'react'
-import { t } from '../i18n.js'
+import { getLang, subscribeLang, t, type Lang } from '../i18n.js'
 import { Box, Text, useTerminalSize, type ScrollBoxHandle } from '../ui.js'
 import type { ClickEvent } from '../ink/events/click-event.js'
 import type { ChatRow, ToolRow, ToolCallView, ToolResultView, SubagentRow, JobRow } from '../dsh-adapter/channel.js'
 import { normalizeIdePath } from '../dsh-adapter/ide-channel.js'
+import type { TranscriptImage } from '../dsh-adapter/transcript-images.js'
 import type { DOMElement } from '../ink/dom.js'
 import { Divider } from './design-system/Divider.js'
 import { UserPromptMessage } from './messages/UserPromptMessage.js'
@@ -15,7 +16,7 @@ import { JobCard } from './Chat/JobCard.js'
 import { isMinimalMode } from '../minimalMode.js'
 import { noteFrameCause, noteListGeometry } from '../ink/geometry-trace.js'
 import { getTerminalFlushTick } from '../ink/flush-tick.js'
-import { InterruptedByUser } from './InterruptedByUser.js'
+import { TurnInterruptedRow } from './TurnInterruptedRow.js'
 import { LogoV2 } from './LogoV2.js'
 import { StreamingMarkdown } from './StreamingMarkdown.js'
 import { MessageMetadata } from './messages/MessageMetadata.js'
@@ -26,9 +27,10 @@ import { clipPreview, type TimelineSnapshot, type TimelineTurn } from '../ink/ti
 import type { ToolBackground } from '../tuiDisplayPrefs.js'
 import { getRevealVersion, revealLengthOf, revealTextOf } from './smoothReveal.js'
 import { useRevealVersion } from '../hooks/useRevealVersion.js'
+import { TranscriptImages } from './messages/TranscriptImages.js'
 
 /**
- * Transcript rows rendered in the Claude Code visual language: user prompts
+ * Transcript rows rendered with the dsh-TUI message layout: user prompts
  * on a grey bubble with a `❯` pointer, assistant text with a `●` bullet and
  * markdown, thinking as a live three-line/full toggle then a settled
  * `⚓ Thinking (ctrl+o to expand)` row, and tool calls as status-dot cards.
@@ -36,15 +38,15 @@ import { useRevealVersion } from '../hooks/useRevealVersion.js'
  * args/results; `expandedRows` (message-selection mode, Enter) expands single
  * rows; `selectedId` highlights the selected row.
  */
-/** Render cap for very long sessions (CC's MAX_MESSAGES_WITHOUT_VIRTUALIZATION
- *  equivalent): older rows fold behind a Divider until Ctrl+E expands them.
+/** Render cap for very long sessions: older rows fold behind a Divider until
+ *  Ctrl+E expands them.
  *  120 (was 300): opening a long session paints the whole cap into the
  *  main-screen scrollback (historyPaint), and each row's first markdown
  *  lex + wrap costs ~2-5ms — 300 rows saturated the main thread for ~6s
  *  on open (measured, 800-row inline session). 120 rows ≈ 4-5 screens of
- *  paint (<1s) with the rest behind the show-previous divider (CC parity:
- *  the transcript is a viewport, not a printout; load-earlier restores). */
-const MAX_RENDERED_ROWS = 120
+ *  paint (<1s) with the rest behind the show-previous divider. The transcript
+ *  is a viewport, not a printout; load-earlier restores older rows. */
+const RENDERED_ROW_CAP = 120
 
 // --- layout virtualization constants -------------------------------------
 // Offscreen rows render as fixed-height spacers whose heights come from the
@@ -188,6 +190,11 @@ function signatureParts(
   // REVEALED length while smooth streaming is painting (the height follows
   // what is on screen, not what has arrived).
   signatureScratch.push(columns, row.kind, displayTextLen)
+  const images = row.images
+  signatureScratch.push(images?.length ?? 0)
+  if (images?.length === 1) {
+    signatureScratch.push(images[0]!.width, images[0]!.height)
+  }
   switch (row.kind) {
     case 'assistant':
       // Streaming vs settled swaps renderers; Ctrl+O/per-row expand adds the
@@ -291,6 +298,8 @@ export function MessageList({
   onOpenJobs,
   onOpenFile,
   sessionCwd,
+  onPreviewImage,
+  suppressImageGraphics = false,
 }: {
   rows: readonly ChatRow[]
   expanded: boolean
@@ -318,8 +327,8 @@ export function MessageList({
   activityFrames?: string
   showAll: boolean
   onToggleAll: () => void
-  /** Restore folded-away older rows from the session log (CC-style "load
-   *  earlier messages" affordance; shown only when rows were folded). */
+  /** Restore folded-away older rows from the session log; shown only when
+   *  rows were folded. */
   onLoadOlder?: () => void
   thinkingVisible?: boolean
   /**
@@ -385,8 +394,13 @@ export function MessageList({
    *  raw paths. The real fs cwd, NOT displayCwd: remote URI display forms
    *  can't prefix-match selection paths. */
   sessionCwd?: string | undefined
+  /** 点击 transcript 缩略图（打开共享的大图预览 overlay）。 */
+  onPreviewImage?: (image: TranscriptImage) => void
+  /** Modal preview owns the terminal-image frame budget while open. */
+  suppressImageGraphics?: boolean
 }) {
-  const hiddenCount = rows.length - MAX_RENDERED_ROWS
+  const lang = React.useSyncExternalStore(subscribeLang, getLang)
+  const hiddenCount = rows.length - RENDERED_ROW_CAP
   // The thinking filter runs BEFORE virtualization so window indices line up.
   //
   // Fingerprint memo: every scroll tick re-rendered this pipeline even when
@@ -451,7 +465,10 @@ export function MessageList({
     // text but RENDERS as that same lone `●`. Test the stripped text, or
     // the raw-text check lets the dot through forever.
     const rendersEmptyAssistant = (row: ChatRow): boolean =>
-      row.kind === 'assistant' && row.streaming !== true && stripNarration(row.text ?? '').trim() === ''
+      row.kind === 'assistant' &&
+      row.streaming !== true &&
+      stripNarration(row.text ?? '').trim() === '' &&
+      (row.images?.length ?? 0) === 0
     let hasEmptyAssistant = false
     for (const row of sliced) {
       if (rendersEmptyAssistant(row)) {
@@ -467,7 +484,7 @@ export function MessageList({
       : thinkingVisible
         ? sliced
         : sliced.filter(row => row.kind !== 'reasoning')
-    // CC addMargin: every rendered block gets a 1-row top margin except the
+    // Every rendered block gets a 1-row top margin except the
     // first. Pre-pass over the FULL list so a windowed row keeps the exact
     // spacing it would have in a fully-mounted list.
     const margins = new Map<number, boolean>()
@@ -667,7 +684,7 @@ export function MessageList({
 
   // Cached rail/header preview per user row (see the timeline block for why
   // the length guard exists alongside the id key).
-  const previewCacheRef = React.useRef(new Map<number, { len: number; preview: string }>())
+  const previewCacheRef = React.useRef(new Map<number, { len: number; imageCount: number; lang: Lang; preview: string }>())
 
   const heightOf = (row: ChatRow): number =>
     heightsRef.current.get(row.id) ?? DEFAULT_ROW_HEIGHT
@@ -950,9 +967,9 @@ export function MessageList({
     // (heightsVersion — bumped at every heightsRef mutation), the visible
     // window's content (visGen — bumped when the visibleRows cache
     // rebuilds), the measured header base, or the rows array growing. Key
-    // on those; previews stay in their own id-keyed cache.
+    // on those and the language used by image-only previews.
     const memo = timelineMemoRef.current
-    const memoKey = `${visGenRef.current}:${heightsVersionRef.current}:${base}:${rows.length}:${columns}`
+    const memoKey = `${visGenRef.current}:${heightsVersionRef.current}:${base}:${rows.length}:${columns}:${lang}`
     if (memo === null || memo.key !== memoKey) {
       const previewCache = previewCacheRef.current
       if (previewCache.size > 2000) previewCache.clear()
@@ -976,8 +993,16 @@ export function MessageList({
       for (const row of rows) {
         if (row.kind !== 'user') continue
         let cached = previewCache.get(row.id)
-        if (cached === undefined || cached.len !== row.text.length) {
-          cached = { len: row.text.length, preview: clipPreview(row.text) }
+        const imageCount = row.images?.length ?? 0
+        if (cached === undefined || cached.len !== row.text.length || cached.imageCount !== imageCount || cached.lang !== lang) {
+          cached = {
+            len: row.text.length,
+            imageCount,
+            lang,
+            preview: row.text === '' && imageCount > 0
+              ? t('transcript-image-message', { count: imageCount })
+              : clipPreview(row.text),
+          }
           previewCache.set(row.id, cached)
         }
         const textTop = measuredTops.get(row.id)
@@ -1157,9 +1182,9 @@ export function MessageList({
       {visibleRows
         .slice(start, end)
         .map((row) => {
-        // CC addMargin: pre-pass result keeps windowed rows at full-mount
+        // The pre-pass result keeps windowed rows at full-mount
         // spacing; only the very first row of the whole list has none.
-          const addMargin = margins.get(row.id) === true
+          const marginTopOnTurn = margins.get(row.id) === true
           const tool = row.tool
           const subagent = row.kind === 'subagent' ? row.subagent : undefined
           const job = row.kind === 'job' ? row.job : undefined
@@ -1191,13 +1216,14 @@ export function MessageList({
               rowId={row.id}
               kind={row.kind}
               text={displayText}
+              images={row.images}
               textFull={row.kind === 'reasoning' ? row.text : undefined}
               executionTarget={row.executionTarget}
               selectionAttached={row.selectionAttached}
               streaming={displayStreaming}
               durationMs={row.durationMs}
               time={row.time}
-              addMargin={addMargin}
+              marginTopOnTurn={marginTopOnTurn}
               isSelected={selectedId === row.id}
               isExpanded={expandedRows.has(row.id)}
               expanded={expanded}
@@ -1233,6 +1259,8 @@ export function MessageList({
               onOpenJobs={onOpenJobs}
               onOpenFile={onOpenFile}
               sessionCwd={sessionCwd}
+              onPreviewImage={onPreviewImage}
+              suppressImageGraphics={suppressImageGraphics}
               setRowRef={setRowRef}
             />
           )
@@ -1255,6 +1283,7 @@ type MemoRowProps = {
   rowId: number
   kind: ChatRow['kind']
   text: string
+  images: readonly TranscriptImage[] | undefined
   /** Reasoning rows: the FULL un-revealed text — the live three-line preview
    *  ticker follows the newest arrived content (never the reveal), while the
    *  expanded body shows the revealed slice in `text`. */
@@ -1267,7 +1296,7 @@ type MemoRowProps = {
   streaming: boolean
   durationMs: number | undefined
   time: number | undefined
-  addMargin: boolean
+  marginTopOnTurn: boolean
   isSelected: boolean
   isExpanded: boolean
   expanded: boolean
@@ -1318,6 +1347,8 @@ type MemoRowProps = {
   onOpenSubagent: ((agentId: string) => void) | undefined
   onOpenJobs: (() => void) | undefined
   onOpenFile: ((path: string) => void) | undefined
+  onPreviewImage: ((image: TranscriptImage) => void) | undefined
+  suppressImageGraphics: boolean
   setRowRef: (rowId: number, el: DOMElement | null) => void
 }
 
@@ -1342,6 +1373,7 @@ function TranscriptRow({
   rowId,
   kind,
   text,
+  images,
   textFull,
   executionTarget,
   selectionAttached,
@@ -1349,7 +1381,7 @@ function TranscriptRow({
   streaming,
   durationMs,
   time,
-  addMargin,
+  marginTopOnTurn,
   isSelected,
   isExpanded,
   expanded,
@@ -1384,6 +1416,8 @@ function TranscriptRow({
   onOpenSubagent,
   onOpenJobs,
   onOpenFile,
+  onPreviewImage,
+  suppressImageGraphics,
   setRowRef,
 }: MemoRowProps): React.ReactNode {
   const ref = React.useCallback(
@@ -1426,11 +1460,18 @@ function TranscriptRow({
               })}
             </Text>
           )}
-          <UserPromptMessage
-            text={text}
-            addMargin={addMargin}
-            isSelected={isSelected}
-          />
+          {text !== '' && (
+            <UserPromptMessage
+              text={text}
+              marginTopOnTurn={marginTopOnTurn}
+              isSelected={isSelected}
+            />
+          )}
+          {images !== undefined && (
+            <Box marginTop={text === '' && marginTopOnTurn ? 1 : 0}>
+              <TranscriptImages images={images} onPreview={onPreviewImage} suppressGraphics={suppressImageGraphics} />
+            </Box>
+          )}
         </Box>
       )
     case 'assistant':
@@ -1438,7 +1479,7 @@ function TranscriptRow({
         <Box
           alignItems="flex-start"
           flexDirection="row"
-          marginTop={addMargin ? 1 : 0}
+          marginTop={marginTopOnTurn ? 1 : 0}
           width="100%"
           backgroundColor={background}
           ref={ref}
@@ -1451,6 +1492,7 @@ function TranscriptRow({
               is stripped here: the live working line on the status bar
               already shows it. */}
             <StreamingMarkdown>{stripNarration(text)}</StreamingMarkdown>
+            {images !== undefined && <TranscriptImages images={images} indent={0} onPreview={onPreviewImage} suppressGraphics={suppressImageGraphics} />}
           </Box>
         </Box>
       ) : (
@@ -1472,10 +1514,11 @@ function TranscriptRow({
           )}
           <AssistantTextMessage
             text={stripNarration(text)}
-            addMargin={addMargin}
+            marginTopOnTurn={marginTopOnTurn}
             isSelected={isSelected}
             isExpanded={isExpanded}
           />
+          {images !== undefined && <TranscriptImages images={images} onPreview={onPreviewImage} suppressGraphics={suppressImageGraphics} />}
         </Box>
       )
     case 'reasoning': {
@@ -1488,7 +1531,7 @@ function TranscriptRow({
           <AssistantThinkingMessage
             thinking={text}
             textFull={textFull}
-            addMargin={addMargin}
+            marginTopOnTurn={marginTopOnTurn}
             streaming={streaming}
             preview={streamPreview}
             // Settled rows keep the fold-on-settle default and expand via
@@ -1531,7 +1574,7 @@ function TranscriptRow({
         <Box flexDirection="column" ref={ref}>
           <AssistantToolUseMessage
             tool={tool}
-            addMargin={addMargin}
+            marginTopOnTurn={marginTopOnTurn}
             verbose={isExpanded || expanded}
             isSelected={isSelected}
             isExpanded={isExpanded}
@@ -1545,6 +1588,7 @@ function TranscriptRow({
             onClick={foldOnClick}
             onOpenFile={onOpenFile}
           />
+          {images !== undefined && <TranscriptImages images={images} indent={4} onPreview={onPreviewImage} suppressGraphics={suppressImageGraphics} />}
         </Box>
       )
     }
@@ -1557,11 +1601,11 @@ function TranscriptRow({
     case 'interrupt':
       return (
         <Box marginTop={1} ref={ref}>
-          <InterruptedByUser />
+          <TurnInterruptedRow />
         </Box>
       )
     case 'local':
-    // `!` mode command echo, like CC's UserBashInputMessage.
+      // `!` mode command echo.
       return (
         <Box marginTop={1} backgroundColor={background} ref={ref}>
           <Text color="bashBorder">!{executionTarget ? ` [${executionTarget}]` : ''} {text}</Text>
@@ -1579,7 +1623,7 @@ function TranscriptRow({
       // reveals the full summary.
       return (
         <Box
-          marginTop={addMargin ? 1 : 0}
+          marginTop={marginTopOnTurn ? 1 : 0}
           paddingLeft={2}
           backgroundColor={background}
           ref={ref}
@@ -1604,7 +1648,7 @@ function TranscriptRow({
         <Box flexDirection="column" ref={ref}>
           <SubagentMessage
             subagent={subagent}
-            addMargin={addMargin}
+            marginTopOnTurn={marginTopOnTurn}
             activityFrames={activityFrames}
             isExpanded={isExpanded}
             onClick={openSubagent}
@@ -1617,7 +1661,7 @@ function TranscriptRow({
         <Box flexDirection="column" ref={ref}>
           <JobCard
             job={job}
-            addMargin={addMargin}
+            marginTopOnTurn={marginTopOnTurn}
             onClick={onOpenJobs}
           />
         </Box>
@@ -1639,19 +1683,24 @@ const MemoRow = React.memo(TranscriptRow)
  * The header block pinned above the transcript: the DeepSeek pixel whale
  * with the wordmark, tagline, model/effort and cwd (`LogoV2`), plus the
  * welcome line. It scrolls away with the transcript once the conversation
- * fills the viewport (Claude Code shows its ✦ logo in the same slot).
+ * fills the viewport.
  */
 export function LogoHeader({
   model,
   effort,
   cwd,
   whale = true,
+  whaleIdle = true,
+  working = false,
   skipIntro = false,
 }: {
   model: string
   effort?: string | undefined
   cwd: string
   whale?: boolean
+  /** Idle whale behaviors + working signal (passed through to LogoV2). */
+  whaleIdle?: boolean
+  working?: boolean
   /** Jump straight to the settled header (long-session resume: the ~3.4s
    *  opening animation competes with transcript mount batches). */
   skipIntro?: boolean
@@ -1661,7 +1710,7 @@ export function LogoHeader({
   if (isMinimalMode()) return null
   return (
     <Box flexDirection="column" marginBottom={1}>
-      <LogoV2 model={model} effort={effort} cwd={cwd} whale={whale} skipIntro={skipIntro} />
+      <LogoV2 model={model} effort={effort} cwd={cwd} whale={whale} whaleIdle={whaleIdle} working={working} skipIntro={skipIntro} />
     </Box>
   )
 }
