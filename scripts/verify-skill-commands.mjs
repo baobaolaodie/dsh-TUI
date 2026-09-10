@@ -366,12 +366,19 @@ fire('skills/change')
     }
     const preStepHandlers = handlers.get('agent/pre-step') ?? []
     check('the channel registered an agent/pre-step listener', preStepHandlers.length >= 1, `handlers=${preStepHandlers.length}`)
-    // The loop would hand the claimed batch to the waterfall's `next()`;
-    // replay that call so the channel listener's append is the unit under test.
-    const firePreStep = async messages => preStepHandlers.at(-1)(
-      { agent, messages, turn: 1, step: 1, signal: new AbortController().signal },
-      async () => ({ kind: 'enter', messages }),
-    )
+    // Replay the REAL `agent/pre-step` waterfall instead of calling the last
+    // listener alone (CodeRabbit on PR #849): every registered listener runs in
+    // registration order and each one's `next()` continues into the next
+    // listener, so an earlier listener's after-`next()` transform unwinds LAST
+    // — that reverse-order unwind is exactly what puts the channel's append at
+    // the end of the batch. The base continuation returns the admitted batch,
+    // matching the loop's default decision.
+    const preStepPayload = messages => ({ agent, messages, turn: 1, step: 1, signal: new AbortController().signal })
+    const runPreStepChain = async (payload, index) => {
+      if (index === preStepHandlers.length) return { kind: 'enter', messages: payload.messages }
+      return preStepHandlers[index](payload, () => runPreStepChain(payload, index + 1))
+    }
+    const firePreStep = messages => runPreStepChain(preStepPayload(messages), 0)
 
     // AC-1: the fallback delivers the user's line, args preserved, as exactly
     // ONE followup — the body must not become a turn of its own.
@@ -500,6 +507,46 @@ fire('skills/change')
         && queuedStep.messages.at(-1).content?.[0]?.text.includes('HELP BODY'),
     )
     agent.status = 'idle'
+
+    // CodeRabbit (PR #849): a competing after-`next()` transform registered
+    // AFTER the channel's listener unwinds BEFORE it, so the body must still be
+    // the LAST message of the final batch; a later listener that rejects the
+    // batch must stop the append entirely.
+    const competingOutcome = await descriptor.handler({ agent, rawInput: ' 竞争', signal: undefined })
+    check('waterfall: competing case reports success', competingOutcome?.kind === 'success', JSON.stringify(competingOutcome))
+    check('waterfall: competing case queues one more followup', await settled(() => agent.followups.length === 4))
+    const competingLine = agent.followups[3]
+    const competitorListener = async (payload, next) => {
+      const decision = await next()
+      if (decision.kind === 'reject') return decision
+      return {
+        ...decision,
+        messages: [...decision.messages, { id: 'verify-competing-context', role: 'user', content: [{ type: 'text', text: 'COMPETING-CONTEXT' }], source: { kind: 'plugin', plugin: 'verify-competitor' } }],
+      }
+    }
+    preStepHandlers.push(competitorListener)
+    const competingStep = await firePreStep([competingLine])
+    check(
+      'waterfall: a competing after-next transform cannot push the body off the end',
+      competingStep?.messages?.length === 3
+        && competingStep.messages[0] === competingLine
+        && competingStep.messages[1]?.content?.[0]?.text === 'COMPETING-CONTEXT'
+        && competingStep.messages.at(-1)?.source?.kind === 'skill-invocation'
+        && competingStep.messages.at(-1).content?.[0]?.text.includes('HELP BODY'),
+      JSON.stringify(competingStep?.messages?.map(message => message.source?.kind ?? message.content?.[0]?.text)),
+    )
+    const rejectingListener = async (payload, next) => {
+      await next()
+      return { kind: 'reject' }
+    }
+    preStepHandlers.push(rejectingListener)
+    const rejectingOutcome = await descriptor.handler({ agent, rawInput: ' 拒绝', signal: undefined })
+    check('waterfall: reject case reports success', rejectingOutcome?.kind === 'success', JSON.stringify(rejectingOutcome))
+    check('waterfall: reject case queues one more followup', await settled(() => agent.followups.length === 5))
+    const rejectedStep = await firePreStep([agent.followups[4]])
+    check('waterfall: a rejected batch never receives the appended body', rejectedStep?.kind === 'reject', JSON.stringify(rejectedStep))
+    preStepHandlers.pop()
+    preStepHandlers.pop()
 
     // R3 guard: the fallback must never use the inbox inject/steer lane.
     check('R3: fallback never calls agent.inject', agent.injects.length === 0, `injects=${agent.injects.length}`)
