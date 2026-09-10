@@ -647,7 +647,20 @@ export function PromptInput({
   /** Visible `[Image #N]` labels are presentation only; this sidecar carries
    * the non-reusable capability for the current draft. History/rewind text
    * restored without this map can never bind to a later image by accident. */
-  const draftImagesRef = React.useRef(new Map<string, string>(
+  /**
+   * Lazy init (F-3): evaluated once per mount instead of on every render, so
+   * an idle re-render never re-runs `filterLiveImageBindings` /
+   * `channel.hasStagedImage` (the latter also syncs the channel session).
+   *
+   * Render-phase ref read (F-7) invariant for `draftCacheRef`: it has a single
+   * writer (the caller Chat), which writes a snapshot before this component
+   * mounts and again on its unmount; this mount consumes it right after mount
+   * (the layout effect below nulls the ref), and the mount layout cleanup
+   * re-writes it on unmount. By the time any re-render can run the cache is
+   * null, so this initializer is the only render-time reader and cannot
+   * observe a concurrent mutation.
+   */
+  const [restoredImageBindings] = React.useState(() => new Map<string, string>(
     restoredDraft === null
       ? []
       : filterLiveImageBindings(
@@ -658,6 +671,7 @@ export function PromptInput({
         stageId => channel.hasStagedImage?.(stageId) === true,
       ),
   ))
+  const draftImagesRef = React.useRef(restoredImageBindings)
   const draftImagesGenerationRef = React.useRef(channel.stagedImageGeneration?.() ?? 0)
   /** Session generation fences one agent transcript; revision fences one
    * logical composer draft inside that session. Ordinary typing deliberately
@@ -690,20 +704,31 @@ export function PromptInput({
     draftImagesRef.current.clear()
     clearVimUndo()
   }
-  const stageIdIsRetained = (stageId: string): boolean => {
-    for (const current of draftImagesRef.current.values()) {
-      if (current === stageId) return true
-    }
-    return vimUndoRef.current.some(entry => entry.images.some(image => image.stageId === stageId))
-      || history.current.some(entry => entry.images.some(image => image.stageId === stageId))
-      || historyDraft.current.images.some(image => image.stageId === stageId)
-      || channel.pending.some(item => item.images?.some(image => image.stageId === stageId) === true)
-      // A snapshotted draft is a retention owner like history/vim undo: the
-      // unmount cleanup must NOT revoke capabilities the next mount is about
-      // to restore from the cache. While mounted the cache is consumed
-      // (null), so this line never changes live-draft behavior.
-      || draftCacheRef?.current?.images.some(([, stageIdOfPair]) => stageIdOfPair === stageId) === true
-  }
+  /**
+   * Named retention owners (F-6): a staged capability may still be shown by
+   * more than the live draft, so every owner must be asked before the
+   * capability is revoked. An explicit list keeps the six clauses traceable
+   * (and a future v2 multi-slot owner is a one-line addition).
+   */
+  const stageIdRetainers: ReadonlyArray<(candidate: string) => boolean> = [
+    candidate => {
+      for (const stageIdInDraft of draftImagesRef.current.values()) {
+        if (stageIdInDraft === candidate) return true
+      }
+      return false
+    },
+    candidate => vimUndoRef.current.some(entry => entry.images.some(image => image.stageId === candidate)),
+    candidate => history.current.some(entry => entry.images.some(image => image.stageId === candidate)),
+    candidate => historyDraft.current.images.some(image => image.stageId === candidate),
+    candidate => channel.pending.some(item => item.images?.some(image => image.stageId === candidate) === true),
+    // A snapshotted draft is a retention owner like history/vim undo: the
+    // unmount cleanup must NOT revoke capabilities the next mount is about
+    // to restore from the cache. While mounted the cache is consumed
+    // (null), so this entry never changes live-draft behavior.
+    candidate => draftCacheRef?.current?.images.some(([, stageIdOfPair]) => stageIdOfPair === candidate) === true,
+  ]
+  const stageIdIsRetained = (stageId: string): boolean =>
+    stageIdRetainers.some(retain => retain(stageId))
   const discardUnretainedImages = (stageIds: Iterable<string>): void => {
     for (const stageId of new Set(stageIds)) {
       if (!stageIdIsRetained(stageId)) channel.discardStagedImage(stageId)
@@ -893,6 +918,17 @@ export function PromptInput({
     return () => {
       if (escTimerRef.current) clearTimeout(escTimerRef.current)
       if (hoverLeaveTimerRef.current) clearTimeout(hoverLeaveTimerRef.current)
+      // The layout cleanup above runs first and copies the live image map
+      // into `draftCacheRef`; React StrictMode's simulated remount replays
+      // this same instance's effects, so clearing the map here would strand
+      // the restored bindings (the re-run layout effect consumes the cache).
+      // Fence in-flight stages and release vim-only capabilities, but keep
+      // the live map while the layout snapshot owns it.
+      if (draftCacheRef !== undefined && draftCacheRef.current !== null) {
+        advanceDraftRevision()
+        clearVimUndo()
+        return
+      }
       // An async image read/stage may outlive this component. Revoke its
       // draft lease so it cannot bind an invisible capability after unmount.
       discardDraftImages()
