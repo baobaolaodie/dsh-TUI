@@ -30,6 +30,10 @@
  * - `session-switch` (AC-6): a generation bump while the composer is parked
  *   (the `/resume` select-other, `/new`, `/bg`, attach fence) drops the old
  *   draft text and staged image instead of leaking them into the new session.
+ * - `inflight-stage` (DESIGN D5): an image stage parked inside the channel
+ *   when the composer unmounts is fenced by the unmount revision bump — no
+ *   token, no visible/committable binding, the orphaned capability is
+ *   reclaimed and editing resumes after the round trip.
  *
  * `routed-screens` documents one deliberate limitation: `/settings`,
  * `/resume` and `/tree` cannot be opened with a non-empty draft on this build
@@ -79,7 +83,7 @@ const [
   { Chat },
   { QuestionStore },
   { LOCAL_COMMANDS, completeCommands },
-  { sleep, settled, viewportLines },
+  { settled, viewportLines },
 ] = await Promise.all([
   import('node:stream'),
   import('react'),
@@ -132,10 +136,21 @@ const SHIFT_ENTER = '\x1b[13;2u'
 /**
  * Renderer errors (`logError` -> `process.stderr` with a `[dsh-tui]` prefix)
  * are collected instead of swallowed: an error in any scenario must fail the
- * run even when the screen happens to recover. Forwarded to the real stderr
- * so a failure still shows the original stack.
+ * run even when the screen happens to recover.
+ *
+ * The same interception keeps a second signal (REVIEW F-9): React dev-mode
+ * warnings also reach `console.error` -> `process.stderr` and were previously
+ * ignored. Only the pre-existing `useInsertionEffect` warning is whitelisted
+ * — the unmodified `verify-expand-editor` fixture reproduces it on this repo,
+ * so it is not a signal this change owns. Every other stderr line fails the
+ * scenario that emitted it. Forwarded to the real stderr either way so a
+ * failure still shows the original output.
  */
+const WHITELISTED_STDERR = 'useInsertionEffect must not schedule updates'
 const runtimeErrors: string[] = []
+/** Raw chunks, in write order: the runner attributes a new one to the
+ *  scenario that was running, and the final harness check catches stragglers. */
+const stderrChunks: string[] = []
 const realStderrWrite = process.stderr.write.bind(process.stderr)
 ;(process.stderr as { write: (...args: unknown[]) => unknown }).write = ((
   chunk: unknown,
@@ -143,8 +158,24 @@ const realStderrWrite = process.stderr.write.bind(process.stderr)
 ) => {
   const text = typeof chunk === 'string' ? chunk : String(chunk)
   if (text.includes('[dsh-tui]')) runtimeErrors.push(text.trim())
+  stderrChunks.push(text)
   return (realStderrWrite as (...args: unknown[]) => unknown)(chunk, ...rest)
 }) as typeof process.stderr.write
+
+/** Stderr lines a scenario may NOT produce: renderer errors keep their own
+ *  list (asserted at the end), the known React warning is whitelisted, and
+ *  anything else is a new signal that must fail its owner. */
+function unexpectedStderrLines(chunks: readonly string[]): string[] {
+  return chunks
+    .join('')
+    .split('\n')
+    .map(line => line.trim())
+    .filter(line =>
+      line !== ''
+      && !line.includes('[dsh-tui]')
+      && !line.includes(WHITELISTED_STDERR),
+    )
+}
 
 class VerifyFailure extends Error {
   readonly scenario: string
@@ -211,14 +242,29 @@ const noopUnsubscribe = (): (() => void) => () => {}
 function makeChannel(options: {
   subagents?: readonly unknown[]
   rows?: readonly unknown[]
+  /** Parks `stageComposerImage` so one scenario can hold an image stage in
+   *  flight across an unmount (DESIGN D5 / `inflight-stage`). */
+  stageGate?: () => Promise<void>
 } = {}) {
   const listeners = new Set<() => void>()
   const state = {
     agentBindingGeneration: 0,
+    /** Staged-image session epoch, mirroring the real channel: it advances
+     *  whenever the capability map is cleared (`composer-images.ts:131-155`),
+     *  so a generation bump and a #823 clear both revoke the capabilities
+     *  through the same epoch instead of a dead `stagedImageGeneration: () => 0`
+     *  (F-11). */
+    stagedImageEpoch: 0,
     staged: new Map<string, StubStagedImage>(),
     nextStage: 1,
     submitted: [] as Array<{ text: string; images: readonly unknown[] }>,
     clearCalls: 0,
+    /** Seam-level observations: on the real channel these effects surface as
+     *  renders or notices; recording them lets a scenario wait on an event
+     *  instead of a fixed pacing window (F-10). */
+    stageCalls: 0,
+    discarded: [] as string[],
+    notifyLog: [] as string[],
     pluginScene: undefined as { id: string } | undefined,
     subagents: options.subagents ?? EMPTY_LIST,
     treePending: new Promise<null>(() => {}),
@@ -279,7 +325,9 @@ function makeChannel(options: {
     clear() {
       state.clearCalls += 1
     },
-    notify: () => {},
+    notify: (message: string) => {
+      state.notifyLog.push(String(message))
+    },
     listModels: () => Promise.resolve([]),
     listSessions: () => Promise.resolve([]),
     deleteSession: () => Promise.resolve(true),
@@ -289,14 +337,17 @@ function makeChannel(options: {
     mcpStatus: () => EMPTY_LIST,
     pushLocal: () => {},
     commandCompletions: (input: string) => completeCommands(input),
-    stagedImageGeneration: () => 0,
+    stagedImageGeneration: () => state.stagedImageEpoch,
     stagedImage: (stageId: string) => state.staged.get(stageId),
     hasStagedImage: (stageId: string) => state.staged.has(stageId),
     discardStagedImage: (stageId: string) => {
+      state.discarded.push(stageId)
       state.staged.delete(stageId)
     },
     stagedImageLimits: () => ({ maxImageBytes: 1_000_000, maxImagesPerMessage: 8 }),
     stageComposerImage: async () => {
+      state.stageCalls += 1
+      if (options.stageGate !== undefined) await options.stageGate()
       const stageId = `stage-${state.nextStage++}`
       state.staged.set(stageId, { id: stageId, path: pastedImagePath })
       return { stageId }
@@ -319,13 +370,20 @@ function makeChannel(options: {
       state.pluginScene = undefined
       channel.bump()
     },
-    /** Simulate `/resume` selecting another session, `/new`, `/bg`, attach. */
+    /** Simulate `/resume` selecting another session, `/new`, `/bg`, attach:
+     *  the real channel's generation change syncs the session and revokes the
+     *  staged capabilities before the new generation is observable
+     *  (`composer-images.ts` syncSession -> clearStagedImages). */
     bumpGeneration() {
       state.agentBindingGeneration += 1
+      state.stagedImageEpoch += 1
+      state.staged.clear()
       channel.bump()
     },
-    /** Simulate #823's channel-side staged-image cleanup. */
+    /** Simulate #823's channel-side staged-image cleanup: capabilities go,
+     *  epoch advances, agent generation stays (composer-images.ts:257-259). */
     clearStagedImages() {
+      state.stagedImageEpoch += 1
       state.staged.clear()
       channel.bump()
     },
@@ -418,11 +476,17 @@ function inputRange(app: Harness): { top: number; bottom: number } | null {
  * The composer box: top border, content row(s), bottom border. Comparing this
  * slice before/after a round trip is the text + newline-structure assertion
  * (the transcript and hint rows outside it are not part of the draft).
+ *
+ * Trailing cell padding is stripped: it is a renderer frame artifact (a row
+ * can be read while the renderer is still filling its remaining cells), not
+ * draft content — an observed edit-state run failed on padding alone
+ * (T-FIX-02 F-10 stability hardening). The border rows stay full width, so a
+ * real box/width change still fails.
  */
 function inputBlock(app: Harness): string[] | null {
   const range = inputRange(app)
   if (range === null) return null
-  return screen(app).slice(range.top, range.bottom + 1)
+  return screen(app).slice(range.top, range.bottom + 1).map(row => row.trimEnd())
 }
 
 /** First composer content row (`❯ …`) of the main view. */
@@ -593,12 +657,20 @@ function pasteText(app: Harness, text: string): void {
   app.stdin.write(`${BRACKET_PASTE_START}${text}${BRACKET_PASTE_END}`)
 }
 
-/** Type a slash command and run it. The wait pins the composer text first:
- *  the suggestion overlay's key-ready state has no standalone observable. */
+/**
+ * Type a slash command and run it. Both waits are observable anchors: the
+ * composer row proves the text committed, and the completion card proves the
+ * absolutely-positioned overlay owns Enter (the earlier fixed 200ms pacing
+ * window had no anchor; F-10).
+ */
 async function runCommand(scenario: string, app: Harness, command: string): Promise<void> {
   app.stdin.write(command)
   await waitFor(scenario, `composer to show ${command}`, () => draftText(app) === command)
-  await sleep(200) // 固定窗:pacing 命令补全浮层收键就绪，无可观测纯文本条件
+  await waitFor(
+    scenario,
+    `command completion card to own Enter for ${command}`,
+    () => screenHas(app, '命令 · 共') && screenHas(app, `❯ ${command.slice(1)}`),
+  )
   app.stdin.write('\r')
 }
 
@@ -1102,8 +1174,16 @@ async function scenarioIntentionalClear(): Promise<string> {
     await waitFor(scenario, 'draft before Esc', () => composerHas(app, 'esc-me'))
     app.stdin.write(ESC)
     await waitFor(scenario, 'single Esc clears the small draft', () => draftText(app) === '')
+    // The first empty-input Esc arms the double-tap and emits the rewind
+    // notice; waiting for that notice proves the tap registered before the
+    // second one is sent (the fixed 150ms pacing window had no anchor; F-10).
+    const tapsBefore = app.channel.state.notifyLog.length
     app.stdin.write(ESC)
-    await sleep(150) // 固定窗:pacing 双击间隔（第二击必须落在 3s 窗口内）
+    await waitFor(
+      scenario,
+      'empty-input Esc to arm the rewind double-tap',
+      () => app.channel.state.notifyLog.length > tapsBefore,
+    )
     app.stdin.write(ESC)
     await waitFor(scenario, 'empty-input double Esc opens the rewind picker', () => screenHas(app, SCREEN_MARK.rewind), 8000)
     app.stdin.write(ESC)
@@ -1205,7 +1285,19 @@ async function scenarioSessionSwitch(): Promise<string> {
     app.stdin.write(ESC)
     await waitForMain(scenario, app, SCREEN_MARK.dashboard)
 
-    assertTrue(scenario, 'stale capability: token text stays visible as lazy text', composerHas(app, STAGED_IMAGE_TOKEN))
+    // The renderer can commit the remounted composer one frame before its
+    // restored content row is blitted (the T-FIX-01 group run caught exactly
+    // this as a flake), so wait on the observable predicate before asserting
+    // it instead of reading the frame immediately (F-10).
+    const staleTokenRestored = await settled(
+      () => composerHas(app, STAGED_IMAGE_TOKEN),
+      { timeoutMs: 8000 },
+    )
+    assertTrue(
+      scenario,
+      'stale capability: token text stays visible as lazy text',
+      staleTokenRestored,
+    )
     const staleChip = tokenIsChip(app, STAGED_IMAGE_TOKEN)
     assertTrue(scenario, `stale capability: token is not a bound chip (${staleChip.detail})`, !staleChip.ok)
     app.stdin.write('\r')
@@ -1214,6 +1306,92 @@ async function scenarioSessionSwitch(): Promise<string> {
     fences.push('hasStagedImage fence (DESIGN D3 / #823)')
 
     summary = `\nPASS  ${scenario}  fences=${fences.length}  [${fences.join('; ')}]`
+  } finally {
+    app.unmount()
+  }
+  return summary
+}
+
+/**
+ * AC-6 / DESIGN D5: a stage that is still in flight when the composer
+ * unmounts must be fenced by the unmount revision bump. The full-screen
+ * round trip is driven with the stage parked inside the channel seam
+ * (`stageGate`) and released only while the composer is behind the
+ * dashboard: the late continuation must not insert a token, must not mint a
+ * visible or committable binding, and must reclaim the otherwise-unreachable
+ * capability instead of leaving it orphaned; editing resumes afterwards.
+ */
+async function scenarioInflightStage(): Promise<string> {
+  const scenario = 'inflight-stage'
+  let releaseStage: (() => void) | undefined
+  const stageGate = new Promise<void>(resolve => { releaseStage = resolve })
+  const app = await mountChat({ channel: makeChannel({ stageGate: () => stageGate }) })
+  const checks: string[] = []
+  let summary = ''
+  try {
+    await waitFor(scenario, 'composer to mount', () => inputBlock(app) !== null, 8000)
+
+    app.stdin.write('inflight draft')
+    await waitFor(scenario, 'draft before the image paste', () => composerHas(app, 'inflight draft'))
+
+    // Bracketed paste of a real image path: the paste handler captures the
+    // draft lease synchronously and the continuation parks inside
+    // `channel.stageComposerImage`, so the stage never settles on its own.
+    pasteText(app, pastedImagePath)
+    await waitFor(
+      scenario,
+      'image stage to reach the channel seam (still unsettled)',
+      () => app.channel.state.stageCalls === 1,
+      8000,
+    )
+    assertTrue(scenario, 'no token while the stage is in flight', !composerHas(app, STAGED_IMAGE_TOKEN))
+    assertEqual(scenario, 'no capability while the stage is in flight', 0, app.channel.state.staged.size)
+
+    // Open the full-screen view (PromptInput unmounts: snapshot + revision
+    // fence) and only THEN let the parked stage settle.
+    app.stdin.write(CTRL_A)
+    await waitFor(scenario, 'dashboard to park the composer mid-stage', () => dashboardVisible(app), 8000)
+    assertTrue(scenario, 'composer is unmounted while the stage settles', !composerMounted(app))
+    const discardedBefore = app.channel.state.discarded.length
+    const noticesBefore = app.channel.state.notifyLog.length
+    releaseStage!()
+    // The fenced continuation reclaims the capability and emits no
+    // `input-image-pasted` notice; without the unmount revision bump it
+    // instead binds the token into the dead instance and notifies.
+    const continuationSettled = await settled(
+      () => app.channel.state.discarded.length > discardedBefore
+        || app.channel.state.notifyLog.length > noticesBefore,
+      { timeoutMs: 8000 },
+    )
+    const newNotices = app.channel.state.notifyLog.slice(noticesBefore)
+    assertTrue(
+      scenario,
+      `unmounted continuation is fenced (settled=${continuationSettled}, orphaned=${app.channel.state.staged.size}, notices=${JSON.stringify(newNotices)})`,
+      continuationSettled
+        && app.channel.state.discarded.length === discardedBefore + 1
+        && newNotices.length === 0,
+    )
+
+    // Return to the main view: the text draft is restored, with no token, no
+    // chip and nothing committable.
+    app.stdin.write(ESC)
+    await waitForMain(scenario, app, SCREEN_MARK.dashboard)
+    const textRestored = await settled(() => draftText(app) === 'inflight draft', { timeoutMs: 8000 })
+    assertTrue(scenario, 'draft text is restored after the round trip', textRestored)
+    assertNoImageToken(scenario, 'in-flight fence', app)
+    const chip = tokenIsChip(app, STAGED_IMAGE_TOKEN)
+    assertTrue(scenario, `in-flight token is not a visible binding (${chip.detail})`, !chip.ok)
+    assertEqual(scenario, 'fenced stage leaves no orphaned capability', 0, app.channel.state.staged.size)
+
+    app.stdin.write('\r')
+    await waitFor(scenario, 'draft to submit', () => app.channel.state.submitted.length === 1, 8000)
+    assertEqual(scenario, 'submission carries the typed draft', 'inflight draft', app.channel.state.submitted[0]!.text)
+    assertEqual(scenario, 'submission carries no image binding', 0, app.channel.state.submitted[0]!.images.length)
+
+    app.stdin.write('next line')
+    await waitFor(scenario, 'typing works after the fenced trip', () => composerHas(app, 'next line'), 8000)
+    checks.push('fenced-in-flight-stage', 'no-visible-binding', 'no-committable-binding', 'editing-resumed')
+    summary = `\nPASS  ${scenario}  checks=${checks.length}  [${checks.join('; ')}]`
   } finally {
     app.unmount()
   }
@@ -1236,12 +1414,38 @@ try {
     ['edit-state', scenarioEditState],
     ['intentional-clear', scenarioIntentionalClear],
     ['session-switch', scenarioSessionSwitch],
+    ['inflight-stage', scenarioInflightStage],
   ]
   for (const [name, run] of runners) {
     if (selected.length > 0 && !selected.includes(name)) continue
+    const stderrStart = stderrChunks.length
     results.push(await run())
+    // F-9: a React warning (or any other stderr signal) emitted by this
+    // scenario fails THIS scenario — only the verified pre-existing warning
+    // is tolerated. The final check below catches stragglers between runs.
+    const unexpected = unexpectedStderrLines(stderrChunks.slice(stderrStart))
+    if (unexpected.length > 0) {
+      throw new VerifyFailure(
+        name,
+        'unexpected stderr output (React warnings are triaged, not ignored)',
+        [],
+        unexpected,
+      )
+    }
   }
   assertEqual('harness', 'renderer errors across scenarios', [], runtimeErrors)
+  assertEqual('harness', 'unexpected stderr across scenarios', [], unexpectedStderrLines(stderrChunks))
+  // Positive control for the F-9 triage itself: a new warning must be
+  // flagged while the verified pre-existing line stays whitelisted.
+  assertEqual(
+    'harness',
+    'stderr triage flags new warnings and tolerates the whitelisted one',
+    [['Warning: some new React warning'], []],
+    [
+      unexpectedStderrLines(['Warning: some new React warning\n']),
+      unexpectedStderrLines([`${WHITELISTED_STDERR}.\n`]),
+    ],
+  )
   console.log(results.join('\n'))
 } catch (error) {
   if (error instanceof VerifyFailure) {
