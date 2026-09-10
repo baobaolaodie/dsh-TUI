@@ -183,7 +183,9 @@ const MSG = {
       profileNewer: v => `profile is newer — align the launcher:  npm install -g ${PACKAGE}@${v}`,
       profileOlder: v => `profile is older — align it:  dsh plugin --profile ${PROFILE} add ${PACKAGE}@${v}`,
       keySet: 'set',
-      keyMissing: 'not set — interactive launch reads DEEPSEEK_API_KEY',
+      keySetEnv: 'set (environment)',
+      keySetStore: 'set (DSH credential store)',
+      keyMissing: 'not set — neither DEEPSEEK_API_KEY nor a DSH credential-store ref',
       missing: 'missing',
     },
     zh: {
@@ -194,7 +196,9 @@ const MSG = {
       profileNewer: v => `profile 较新——对齐启动器：  npm install -g ${PACKAGE}@${v}`,
       profileOlder: v => `profile 较旧——对齐它：  dsh plugin --profile ${PROFILE} add ${PACKAGE}@${v}`,
       keySet: '已设置',
-      keyMissing: '未设置——交互启动读取 DEEPSEEK_API_KEY',
+      keySetEnv: '已设置（环境变量）',
+      keySetStore: '已设置（DSH 凭据库）',
+      keyMissing: '未设置——环境变量与 DSH 凭据库中都没有 DEEPSEEK_API_KEY',
       missing: '缺失',
     },
   },
@@ -271,6 +275,30 @@ if (subcommand === 'help' || subcommand === '--help' || subcommand === '-h') {
   console.log(msg('helpText'))
   process.exit(0)
 }
+/**
+ * Whether the DSH credential store declares a reference by this name.
+ *
+ * The launcher stays dependency-free, so the YAML is read as text: only the
+ * top-level `refs:` block maps reference names to stored secrets, and matching
+ * the bare name anywhere else (grants, payloads) would false-positive. Reports
+ * presence only — the value is never read, formatted, or printed. Mirrored by
+ * the in-TUI `/doctor` in src/utils/credentials.ts; the two must not diverge.
+ * @param home - The DSH home directory that holds `.credentials.yaml`.
+ * @param name - Reference name to look for (e.g. `DEEPSEEK_API_KEY`).
+ * @returns True when a `refs` entry with that name exists.
+ */
+const credentialRefDeclared = (home, name) => {
+  try {
+    const text = readFileSync(join(home, '.credentials.yaml'), 'utf8')
+    const block = /^refs:[ \t]*\r?\n((?:[ \t]+\S.*(?:\r?\n|$))*)/mu.exec(text)
+    if (block === null) return false
+    const escaped = name.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')
+    return new RegExp(`^[ \t]+${escaped}[ \t]*:`, 'mu').test(block[1])
+  } catch {
+    return false
+  }
+}
+
 // ─── 子命令：doctor ──────────────────────────────────────────────────────────
 // 启动前环境诊断——针对「TUI 起不来」的故障域（装不上、update 后版本不
 // 同步、密钥没配），与 TUI 内 /doctor 的会话内诊断互补。零 lib 依赖、
@@ -316,10 +344,17 @@ if (subcommand === 'doctor') {
       }
     }
   }
-  // truthiness 而非 !== undefined：空字符串的 key 同样发不了请求，且 TUI 内
-  // /doctor（channel.doctorInfo）按 truthiness 报告——两个 doctor 不许分叉。
-  const keySet = Boolean(process.env.DEEPSEEK_API_KEY)
-  report(keySet, 'DEEPSEEK_API_KEY', keySet ? L.keySet : L.keyMissing)
+  // truthiness 而非 !== undefined：空字符串的 key 同样发不了请求。TUI 内
+  // /doctor（channel.doctorInfo）用同一判定——两个 doctor 不许分叉。
+  // 只看环境变量会误报：dsh 在启动时才把凭据库里的 ref 解析进会话，而
+  // doctor 跑在 dsh 之前，此时环境变量通常仍是空的。
+  const keyFromEnv = Boolean(process.env.DEEPSEEK_API_KEY)
+  const keyFromStore = credentialRefDeclared(dshHome, 'DEEPSEEK_API_KEY')
+  report(
+    keyFromEnv || keyFromStore,
+    'DEEPSEEK_API_KEY',
+    keyFromEnv ? L.keySetEnv : keyFromStore ? L.keySetStore : L.keyMissing,
+  )
   for (const candidate of [join(homedir(), '.dsh-tui', 'cordis.yml'), join(profileDir, 'cordis.patch.yml')]) {
     report(existsSync(candidate), 'config', `${candidate}${existsSync(candidate) ? '' : `  ${L.missing}`}`)
   }
