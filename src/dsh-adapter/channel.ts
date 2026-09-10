@@ -110,7 +110,7 @@ import { createLocalWorkspaceRuntime, getHostWorkspaceRuntime, type TuiWorkspace
 export type { SubagentState } from './subagents.js'
 
 import { isSubagentToolName, parseJobOutputId, toolCommandOf, BACKGROUND_START_ACK, todoPanelItems } from './channel/projection-helpers.js'
-/** Buffer below the context window at which CC warns (autoCompact.ts). */
+/** Token buffer below the context window at which the context-low warning fires. */
 const CONTEXT_WARNING_BUFFER_TOKENS = 20_000
 
 /**

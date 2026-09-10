@@ -72,6 +72,11 @@
       ],
       "webAppDisablesBeyondTui": [],
       "insertsSharedWithWebApp": []
+    },
+    "0.1.5-rc.1": {
+      "disablesBeyondWebApp": [],
+      "webAppDisablesBeyondTui": [],
+      "insertsSharedWithWebApp": []
     }
   }
 }
