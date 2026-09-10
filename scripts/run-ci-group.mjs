@@ -630,6 +630,12 @@ const GROUPS = {
 // 允许、tool/result 落定后孪生弹出/渲染时徽标必须补上（弹出时 + 读取
 // 当前条时重跑活跃判定）。
     ["verify-approval-source-badge", ['node', '--import', 'tsx/esm', 'scripts/verify-approval-source-badge.tsx']],
+// 单行超长文本折叠回归（用户反馈：单行超长文本默认整行渲染，铺成上千视觉
+// 行拖慢转录）：折叠阈值常量 1000 字符、行边界不被改写、短文本零分配快路径；
+// 真实 MessageList 下 user 消息 / assistant 正文 / 工具卡标题（单行超长命令）
+// 与正文都出折叠标记且裁掉的尾巴不在屏上；Ctrl+O 逃生门恢复原文；
+// reasoning 行不折叠（自带三行预览）。
+    ["verify-long-line-fold", ['node', '--import', 'tsx/esm', 'scripts/verify-long-line-fold.tsx']],
   ],
   'flaky-observation': [
 // resize 时间稳定性（借鉴 Codex 的 resize 漂移维度）：落定后不得
