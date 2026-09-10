@@ -10,20 +10,54 @@
 import assert from 'node:assert/strict'
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
-import { delimiter, join } from 'node:path'
+import { delimiter, dirname, join } from 'node:path'
 import { createRequire } from 'node:module'
 import xterm from '@xterm/headless'
+import { resolveWindowsShim } from '../lib/types/utils/externalEditor.js'
 import { settled } from './lib/term-test.mjs'
 
-if (process.platform === 'win32') throw new Error('this installed-profile probe currently requires a POSIX PTY')
+const isWin = process.platform === 'win32'
+/**
+ * Resolve an installed launcher through PATH. POSIX npm publishes a symlink to
+ * the package's JS entry; Windows publishes `dsh.cmd` / `dsh-tui.cmd` shims
+ * plus an extensionless sh script, so walk PATHEXT and keep the shim path.
+ */
 const executable = name => {
+  if (isWin) {
+    const { command } = resolveWindowsShim(name)
+    if (!existsSync(command)) throw new Error(`missing launcher: ${name}`)
+    return realpathSync(command)
+  }
   const path = (process.env.PATH ?? '').split(delimiter).map(dir => join(dir, name)).find(existsSync)
   if (path === undefined) throw new Error(`missing launcher: ${name}`)
   return realpathSync(path)
 }
+/** The installed package's JS entry: on Windows the npm prefix keeps it beside the shim. */
+const packageEntry = (shim, scope, name, ...rest) =>
+  isWin ? join(dirname(shim), 'node_modules', scope, name, ...rest) : shim
 const dsh = executable('dsh')
-const launcher = executable('dsh-tui')
-const pty = createRequire(dsh)('node-pty')
+const launcherShim = executable('dsh-tui')
+// Spawn the JS entry rather than the `.cmd` shim: node-pty would have to route
+// it through cmd.exe and re-quote the payload. The shim itself is covered by
+// scripts/verify-launcher.mjs; this probe is about the installed profile.
+const launcher = packageEntry(launcherShim, '@deepseek-harness-tui', 'dsh-tui', 'bin', 'dsh-tui.js')
+const dshEntry = packageEntry(dsh, '@deepseek-ai', 'dsh', 'lib', 'bin.js')
+/**
+ * node-pty is a native dependency of the installed dsh, not of this repo.
+ * DSH_TUI_NODE_PTY points at a built node-pty directory (the layer holding its
+ * package.json) for hosts where neither anchor resolves.
+ */
+const pty = (() => {
+  const override = process.env.DSH_TUI_NODE_PTY
+  for (const anchor of override === undefined ? [dshEntry, launcher] : [override]) {
+    try {
+      return createRequire(anchor)('node-pty')
+    } catch {
+      // Try the next anchor.
+    }
+  }
+  throw new Error('cannot resolve node-pty from the installed dsh; set DSH_TUI_NODE_PTY to a built node-pty directory')
+})()
 const sourceHome = process.env.DSH_HOME ?? join(homedir(), '.dsh')
 const profile = join(sourceHome, 'profiles', 'dsh-tui')
 const root = mkdtempSync(join(tmpdir(), 'dsh-tui-startup-'))
@@ -33,9 +67,11 @@ mkdirSync(targetProfile, { recursive: true, mode: 0o700 })
 for (const name of ['package.json', 'cordis.yml', 'cordis.patch.yml']) {
   if (existsSync(join(profile, name))) cpSync(join(profile, name), join(targetProfile, name))
 }
-symlinkSync(join(profile, 'node_modules'), join(targetProfile, 'node_modules'), 'dir')
+// Junctions need no elevation on Windows; directory symlinks do.
+const linkKind = isWin ? 'junction' : 'dir'
+symlinkSync(join(profile, 'node_modules'), join(targetProfile, 'node_modules'), linkKind)
 const fallback = join(sourceHome, 'profiles', 'node_modules')
-if (existsSync(fallback)) symlinkSync(fallback, join(targetHome, 'profiles', 'node_modules'), 'dir')
+if (existsSync(fallback)) symlinkSync(fallback, join(targetHome, 'profiles', 'node_modules'), linkKind)
 
 const env = {
   ...process.env,
@@ -106,3 +142,8 @@ try {
   }
   terminal.dispose()
 }
+
+// A ConPTY handle can keep the event loop alive after the child has exited, so
+// end the probe explicitly rather than waiting for the loop to drain (a pass
+// would otherwise hang instead of reporting its status to the caller).
+process.exit(passed ? 0 : 1)
