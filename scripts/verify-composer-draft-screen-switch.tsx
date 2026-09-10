@@ -689,6 +689,12 @@ async function runDraftEntry(
     before.block !== null && before.block.join('\n').includes(draftMarker),
   )
   await enter()
+  // CR #847: wait on the SAME predicate the assertion checks — the restored
+  // composer row can land a frame after the screen closes, so waiting only for
+  // `composerMounted` could read a half-restored state and report a false
+  // failure on a valid round trip.
+  const same = (): boolean => JSON.stringify(composerState(app)) === JSON.stringify(before)
+  await settled(same, { timeoutMs: 8000 })
   const after = composerState(app)
   assertSameComposerState(scenario, label, before, after)
 }
@@ -1416,6 +1422,18 @@ try {
     ['session-switch', scenarioSessionSwitch],
     ['inflight-stage', scenarioInflightStage],
   ]
+  // CR #847: a typo'd VERIFY_COMPOSER_SCENARIOS name would otherwise select
+  // zero runners and let the script exit 0 with empty results.
+  const known = new Set(runners.map(([name]) => name))
+  const unknown = selected.filter(name => !known.has(name))
+  if (unknown.length > 0) {
+    throw new VerifyFailure(
+      'harness',
+      'unknown VERIFY_COMPOSER_SCENARIOS entries (expected a subset of the runner names)',
+      [...known],
+      unknown,
+    )
+  }
   for (const [name, run] of runners) {
     if (selected.length > 0 && !selected.includes(name)) continue
     const stderrStart = stderrChunks.length
