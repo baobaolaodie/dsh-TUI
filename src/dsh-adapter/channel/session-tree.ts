@@ -52,7 +52,7 @@ async function readTree(): Promise<SessionTreeData | null> {
       } catch {
         // A listing failure degrades the tree to the live session only.
       }
-      // Same cwd scoping as /resume (Claude Code's project dimension): forks
+      // Same cwd scoping as /resume (the project dimension): forks
       // inherit cwd, so the family never crosses projects — and the match is
       // the project-aware one /resume uses, so a pre-upgrade subdirectory
       // path, Windows separators, or a case variant on one header cannot

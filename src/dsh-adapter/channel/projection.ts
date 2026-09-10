@@ -484,10 +484,10 @@ export function createChannelProjection(state: ProjectionState, deps: Projection
     switch (event.type) {
       case 'user/message': {
         // Compaction checkpoint: `source = { kind: 'plugin', plugin:
-        // 'compact' }` (dsh-compact's COMPACT_CHECKPOINT_SOURCE). CC shows
-        // the framed summary after /compact; render it as a Divider title +
-        // a summary row that defaults folded (`compact` kind) instead of
-        // skipping it like other injected context.
+        // 'compact' }` (dsh-compact's COMPACT_CHECKPOINT_SOURCE). Render the
+        // framed summary after /compact as a Divider title + a summary row
+        // that defaults folded (`compact` kind) instead of skipping it like
+        // other injected context.
         if (
           event.data.source.kind === 'plugin' &&
           event.data.source.plugin === 'compact'
@@ -903,8 +903,8 @@ export function createChannelProjection(state: ProjectionState, deps: Projection
         }
         if (reason.kind === 'aborted' || reason.kind === 'interrupted') {
           // `Agent.cancel()` closes the turn as `aborted`; `interrupted`
-          // only appears for crash-orphaned turns. Claude Code renders both
-          // user-interruption paths as a distinct dim row.
+          // only appears for crash-orphaned turns. Both user-interruption
+          // paths render as a distinct dim row.
           appendRow({
             id: deps.rowIds.value,
             kind: 'interrupt',
@@ -928,7 +928,7 @@ export function createChannelProjection(state: ProjectionState, deps: Projection
       }
       case 'request/context':
         // Adapter-advertised context capacity; drives the context-low
-        // warning (CC's TokenWarning) when the route reports one.
+        // warning when the route reports one.
         if (event.data.contextWindow !== undefined) {
           state.contextWindow = event.data.contextWindow
         }
