@@ -150,9 +150,16 @@ const GROUPS = {
 // 时间线 rail 回归：rail 覆盖全部轮次（含折叠轮），高亮锚定视口顶、
 // ▲/▼ 目标不越过 maxScroll。
     ["verify-timeline-rail", ['node', '--import', 'tsx/esm', 'scripts/verify-timeline-rail.tsx']],
+// 多行 user 的置顶摘要不得向转录左侧出血；宽/窄终端均保留滚动锚定。
+    ['verify-sticky-anchor', ['node', '--import', 'tsx/esm', 'scripts/verify-sticky-anchor.tsx']],
+    ['verify-sticky-anchor-narrow', ['node', '--import', 'tsx/esm', 'scripts/verify-sticky-anchor.tsx'], { DSH_TEST_COLUMNS: '60' }],
 // 恢复历史会话落点回归：/resume 后最新消息末行必须可见且可达
 // （scrollToBottom 补画完成后的锚定终态），不再落屏外。
     ["repro-resume-position", ['node', '--import', 'tsx/esm', 'scripts/repro-resume-position.tsx']],
+// 全屏转录键盘翻页回归：PgUp/PgDn 一次一页、到底按 at-bottom 契约重粘；
+// help 浮层让位、问询面板不让位（面板在转录下方且不消费这对键）、inline
+// 模式不接管（历史在终端原生 scrollback）、窄终端行为一致。
+    ["verify-transcript-paging", ['node', 'scripts/verify-transcript-paging.mjs']],
   ],
   'input-terminal': [
 // 按键解析回归（issue #110）：Option+Enter（ESC CR）精确/合并/分块
@@ -393,6 +400,11 @@ const GROUPS = {
     ["verify-channel-owner-lifecycle", ['node', '--import', 'tsx/esm', 'scripts/verify-channel-owner-lifecycle.ts']],
     ["verify-channel-router-lifecycle", ['node', '--import', 'tsx/esm', 'scripts/verify-channel-router-lifecycle.ts']],
     ["verify-reports-metadata",  ['node', '--import', 'tsx/esm', 'scripts/verify-reports-metadata.ts']],
+// ChannelUi 读投影边界：会话事件日志（traceEvents）必须零拷贝直通——它每次
+// append 都换新的快照数组，走 detached 投影会 O(events) 重建整条数组，而
+// Chat 每次渲染都读它（长会话 44 万事件实测每帧上百毫秒）。同时钉住 rows
+// 仍然是被投影的冻结副本，修复不得拆掉 detached 契约。
+    ["verify-channel-trace-read", ['node', '--import', 'tsx/esm', 'scripts/verify-channel-trace-read.ts']],
 // channel 层回归：发送链（submit/steer/撤回/打断重投）、compact 折叠、
 // goal/todo 事件回放。曾因不在 CI 而随接口演进静默失效（0.3.6 的
 // installModelSelection、#34 的投递异步化都没被它们拦下），挂进来
@@ -439,6 +451,8 @@ const GROUPS = {
 // 丢上下文"事故根因）；persistence 类失败与通用失败分开提示。
     ["verify-compact-switch", ['node', '--import', 'tsx/esm', 'scripts/verify-compact-switch.tsx']],
     ["verify-live-session", ['node', '--import', 'tsx/esm', 'scripts/verify-live-session.ts']],
+    ["verify-session-v3", ['node', '--import', 'tsx/esm', 'scripts/verify-session-v3.ts']],
+    ["verify-session-tree-generations", ['node', '--import', 'tsx/esm', 'scripts/verify-session-tree-generations.ts']],
 // 裸 ● 空行回归：纯思考/纯工具步骤（无文本块）的 assistant/message
 // 不得创建空 assistant 行，否则思考块折叠后转录里多出一个只有
 // ● 前缀、内容为空的行。
