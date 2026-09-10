@@ -74,9 +74,7 @@
       "insertsSharedWithWebApp": []
     },
     "0.1.5-rc.1": {
-      "disablesBeyondWebApp": [
-        "tool-str-replace-editor"
-      ],
+      "disablesBeyondWebApp": [],
       "webAppDisablesBeyondTui": [],
       "insertsSharedWithWebApp": []
     }
