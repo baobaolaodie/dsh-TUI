@@ -552,6 +552,10 @@ export function Chat({
   const [themeName, setTheme] = useTheme()
   const { rows: terminalRows } = useTerminalSize()
   const [showAllMessages, setShowAllMessages] = React.useState(false)
+  /** Scope the fold to this question: an aborted ask can promote its queued
+   *  successor without ever publishing an idle (null) snapshot. */
+  const [minimizedQuestionKey, setMinimizedQuestionKey] = React.useState<string | null>(null)
+  const questionMinimized = questionSnapshot !== null && minimizedQuestionKey === questionSnapshot.key
   /** Fold state for the GoalTodoPanel todo section (ctrl/cmd+q or click). */
   const [todoCollapsed, setTodoCollapsed] = React.useState(false)
   const [thinkingVisible, setThinkingVisible] = React.useState(true)
@@ -729,6 +733,9 @@ export function Chat({
   /** Subagent dashboard (Ctrl+A): displays active/completed subagents. */
   const [subagentDashboardOpen, setSubagentDashboardOpen] = React.useState(false)
   const [jobsPanelOpen, setJobsPanelOpen] = React.useState(false)
+  // MessageList forwards these open handlers to every memoized row. Their
+  // identities must survive token/metrics updates, including for tool rows.
+  const openJobsPanel = React.useCallback(() => setJobsPanelOpen(true), [])
   /** Detail view for a specific subagent (opened from dashboard). */
   const [subagentDetailId, setSubagentDetailId] = React.useState<string | null>(null)
   /**
@@ -770,18 +777,20 @@ export function Chat({
   const loadedContextVisible = channel.rows.length === 0 && channel.loadedContext !== undefined
   /** Startup context panel: collapsed by default, toggled with Ctrl+P. */
   const [loadedContextOpen, setLoadedContextOpen] = React.useState(false)
-  /**
-   * The context panel changes the height of the main-screen transcript by a
-   * large amount. In inline mode that invalidates the renderer's previous
-   * scrollback/layout correspondence; asking it to repaint from the physical
-   * viewport prevents the collapsed frame from reusing stale blank cells.
-   */
   const toggleLoadedContext = React.useCallback(() => {
     setLoadedContextOpen(previous => !previous)
+  }, [])
+  const renderedLoadedContextOpen = React.useRef(loadedContextOpen)
+  React.useLayoutEffect(() => {
+    if (renderedLoadedContextOpen.current === loadedContextOpen) return
+    renderedLoadedContextOpen.current = loadedContextOpen
+    // Reanchor after the new panel geometry commits. Requesting it in the
+    // key handler lets a pending paint consume it on the old tall layout,
+    // leaving the collapsed summary stranded outside the physical viewport.
     const ink = instances.get(process.stdout) ?? instances.values().next().value
     ink?.invalidatePrevFrame()
     ink?.reanchorViewport()
-  }, [])
+  }, [loadedContextOpen])
 
   /**
    * Click-to-act targets: the Ink instance's hyperlink-open callback (wired
@@ -2683,6 +2692,11 @@ export function Chat({
     if (settingsOpen) return
     // Subagent dashboard or detail scene: it owns the keyboard while open.
     if (subagentDashboardOpen || subagentDetailId !== null) return
+    // The `/jobs` panel replaces the conversation too, so it owns Esc (close)
+    // and k (kill) while open. Unguarded, Esc meant to CLOSE the panel also
+    // reached the chat:cancel branch below whenever a turn was in flight —
+    // dismissing the panel and killing the turn with one key.
+    if (jobsPanelOpen) return
     // A plugin scene (dsh-tui-scenes) or the trajectory scene owns the whole
     // screen while open: every key belongs to it. Unguarded, an Esc meant to
     // CLOSE the scene also reached the chat:cancel branch below whenever a
@@ -2768,7 +2782,16 @@ export function Chat({
     // keyboard while one is pending (the panel's own useInput handles
     // ↑/↓/Space/Tab/Enter/Esc; the prompt input is suspended, so nothing
     // else should see these keys).
-    if (questionSnapshot !== null || approvalSnapshot !== null || dialogSnapshot !== null) return
+    if (approvalSnapshot !== null || dialogSnapshot !== null) return
+    if (questionSnapshot !== null) {
+      // Only transcript navigation belongs here. The mounted questionnaire
+      // owns fold/expand keys, including when it interrupts another screen.
+      if (questionMinimized && !isSticky && (isPlainReturnInput(input, key) || key.end)) {
+        handle?.scrollToBottom()
+        event.stopImmediatePropagation()
+      }
+      return
+    }
     const returnCandidate = isPlainReturnInput(input, key)
     const returnNow = Date.now()
     const plainReturn = returnCandidate && returnNow - lastModalEnterAtRef.current >= 80
@@ -3488,6 +3511,11 @@ export function Chat({
       onBack={questionSnapshot.canGoBack
         ? draft => questionStore.backCurrent(draft)
         : undefined}
+      collapsed={questionMinimized}
+      onExpand={() => setMinimizedQuestionKey(null)}
+      onToggleFold={() => setMinimizedQuestionKey(previous =>
+        previous === questionSnapshot.key ? null : questionSnapshot.key)}
+      fullscreen={fullscreen}
     />
   ) : null
   const interruptPanel = approvalPanelNode ?? questionPanelNode
@@ -3833,8 +3861,8 @@ export function Chat({
           newSinceRowId={isSticky ? null : lastSeenRowIdRef.current}
           onUnseenCount={setUnseenCount}
           onTimeline={setTimeline}
-          onOpenSubagent={(agentId) => setSubagentDetailId(agentId)}
-          onOpenJobs={() => setJobsPanelOpen(true)}
+          onOpenSubagent={setSubagentDetailId}
+          onOpenJobs={openJobsPanel}
           onOpenFile={openFileActions}
           onPreviewImage={openImagePreview}
           suppressImageGraphics={activePreview !== null}
