@@ -724,6 +724,11 @@ export function MessageList({
   const relBottom = Math.max(scrollTop, scrollTop + pending) + viewport + OVERSCAN_LINES - base
   let start = 0
   while (start < visibleRows.length && offsets[start] + heightOf(visibleRows[start]) <= relTop) start++
+  // Resize invalidates cached heights, so a manual scrollTop can overshoot
+  // the entire estimated list. Keep its last row mounted to re-measure:
+  // an empty window has no measurement wakeup and collapses scrollHeight,
+  // leaving the transcript blank and the gutter believing nothing scrolls.
+  if (start === visibleRows.length && start > 0) start--
   let end = start
   while (end < visibleRows.length && offsets[end] < relBottom) end++
   if (sticky || !scrollHandle) end = visibleRows.length
@@ -891,14 +896,10 @@ export function MessageList({
       end = Math.max(end, idx + 1)
     }
   }
-  // The newest failed tool call carries the trajectory footnote
-  // (failureHint). Virtualization must not unmount it: before the window
-  // clamp the row was always mounted, now keep mounting it explicitly while
-  // the hint is live (verify-trace-scene's footnote check).
-  if (failureHintRowId !== undefined && failureHintRowId !== null) {
-    const idx = visibleRows.findIndex(row => row.id === failureHintRowId)
-    if (idx !== -1) start = Math.min(start, idx)
-  }
+  // The failure footnote is row content, not a seek request. Pinning its
+  // row also mounted EVERY later tool card until the trajectory was opened,
+  // defeating virtualization for the rest of a tool-heavy conversation.
+  // It reappears when scrolled into view; only forceMountRowId widens for a seek.
   const topPad = offsets[start] ?? 0
   const mountedBottom = end < visibleRows.length ? offsets[end] : total
   const bottomPad = total - mountedBottom

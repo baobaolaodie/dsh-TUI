@@ -42,6 +42,7 @@ import type { CommandRuntime } from '@deepseek-ai/dsh-commands'
 import {
   createUserMessage,
   ReasoningEffortId,
+  type UserMessage,
 } from '@deepseek-ai/dsh-llm'
 import { SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
 import { randomUUID } from 'node:crypto'
@@ -347,7 +348,7 @@ function createChannelWithOwner(
   const inputDelivery = createInputDelivery(ctx, owner, binding, () => state,
     (...args) => notify(...args), trackPending, untrackPending, composer,
     () => currentSelection, (messageId, info) => selectionAttachments.remember(messageId, info))
-  const { dispatchUserText, deliverUserText, withDecisionPending, clearStagedImages } = inputDelivery
+  const { dispatchUserText, deliverUserText, retireAttachment, withDecisionPending, clearStagedImages } = inputDelivery
   /**
    * The `tui/session-switch` decision event (pi's `session_before_switch`),
    * fired before `/new` or `/resume` replaces the live session (rewind has
@@ -601,7 +602,10 @@ function createChannelWithOwner(
     cwd: () => state.cwd,
     setCommands(commands) { state.commandList = commands; state.emit() },
     commandDescriptions: name => commandTrees?.descriptions(name),
-    deliverUserText,
+    // Attached-context pass-through (T03 consumes the third parameter in the
+    // fallback branch): the skill catalog never loses the FIFO/decision fence.
+    deliverUserText: (text: string, placement: 'followup', attach?: UserMessage) =>
+      deliverUserText(text, placement, [], attach),
   })
   const skillViewOptions = skillCatalog.viewOptions
   const skillRegistryFor = skillCatalog.registryFor
@@ -784,6 +788,7 @@ function createChannelWithOwner(
     subagents: subagentProjection,
     agentView,
     messageObserver,
+    retireAttachment,
   })
   const bindAgent = bindingEvents.bind
 
