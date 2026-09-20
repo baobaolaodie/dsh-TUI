@@ -111,9 +111,11 @@ export type SelectionSnapshot = {
   isEmpty: boolean
   /**
    * Protocol 2: the editor buffer's OWN text for the selection (unsaved
-   * edits included), exactly what the user saw when selecting. Absent from
-   * protocol-1 pushes — then the submit path falls back to reading the file
-   * from disk, which can differ from the editor for unsaved buffers.
+   * edits included), exactly what the user saw when selecting. Always
+   * present from a v2 extension (the handshake gates on a v2 ack, so an
+   * older extension never gets connected); a missing/empty value only
+   * occurs on a degenerate push and falls back to reading the file from
+   * disk, which can differ from the editor for unsaved buffers.
    */
   text?: string
   /** Protocol 2: the editor document version the text came from. */
@@ -296,8 +298,8 @@ export function parseSelectionChanged(message: unknown): SelectionSnapshot | und
     return undefined
   }
   if (typeof isEmpty !== 'boolean') return undefined
-  // Protocol 2 optional fields: absent from protocol-1 pushes, tolerated so
-  // an older extension still works in the coordinates-only mode.
+  // Protocol 2 optional fields. A v2 extension always sends text; the
+  // fallback when it is missing is the disk read (see SelectionSnapshot).
   const text = payload.text
   const documentVersion = payload.documentVersion
   const snapshot: SelectionSnapshot = { path, startLine, endLine, isEmpty }

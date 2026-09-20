@@ -46,6 +46,26 @@ export function escapeSnippetAttr(value: string): string {
 }
 
 /**
+ * Format the attached-file block from an ALREADY-SLICED body: cap it like
+ * @-mention attachments (same MENTION_MAX_FILE_CHARS policy, same visible
+ * truncation marker) and count the lines the MODEL actually receives —
+ * the truncated body, not the request (review round 3).
+ */
+function cappedSelectionBlock(path: string, sliced: string): { text: string; lines: number } | undefined {
+  if (sliced === '') return undefined
+  let body = sliced
+  let attached = sliced
+  if (body.length > MENTION_MAX_FILE_CHARS) {
+    attached = body.slice(0, MENTION_MAX_FILE_CHARS)
+    body = `${attached}\n[… truncated]`
+  }
+  return {
+    text: `<attached-file path="${escapeSnippetAttr(path)}" selection>\n${body}\n</attached-file>`,
+    lines: attached.split('\n').length,
+  }
+}
+
+/**
  * Build the `<attached-file path="…" selection>` block for an IDE selection:
  * coordinates arrive 0-based inclusive from the extension and convert to
  * sliceLines' 1-based; an endLine past EOF clamps to the last line (the model
@@ -66,23 +86,8 @@ export function buildSelectionBlock(
     selection.startLine + 1,
     selection.endLine + 1,
   )
-  if (sliced === undefined || sliced === '') return undefined
-  // Capped like @-mention attachments: a huge selection would otherwise
-  // exceed the context window. Same policy as expandMentions
-  // (MENTION_MAX_FILE_CHARS), with the same visible truncation marker so the
-  // model knows the tail was cut. `lines` counts what the model actually
-  // received — the truncated body, not the full selection (maintainer review
-  // round 3: the count used to report the pre-truncation total).
-  let body = sliced
-  let attached = sliced
-  if (body.length > MENTION_MAX_FILE_CHARS) {
-    attached = body.slice(0, MENTION_MAX_FILE_CHARS)
-    body = `${attached}\n[… truncated]`
-  }
-  return {
-    text: `<attached-file path="${escapeSnippetAttr(selection.path)}" selection>\n${body}\n</attached-file>`,
-    lines: attached.split('\n').length,
-  }
+  if (sliced === undefined) return undefined
+  return cappedSelectionBlock(selection.path, sliced)
 }
 
 /**
@@ -106,7 +111,13 @@ export async function attachIdeSelection(
 ): Promise<SelectionAttachment | undefined> {
   if (selection === undefined || selection.isEmpty) return undefined
   if (selection.text !== undefined) {
-    const block = buildSelectionBlock(selection, selection.text)
+    // Protocol 2: `text` is the editor's OWN text for the selection
+    // (document.getText(selection)) — the ABSOLUTE document coordinates ride
+    // along for the badge/indicator, but they must NOT slice this string:
+    // it already contains exactly the selected lines, so anything not
+    // starting at line 0 would be mis-cut or dropped entirely (review
+    // round 4). Attach it verbatim with the shared size cap.
+    const block = cappedSelectionBlock(selection.path, selection.text)
     if (block === undefined) return undefined
     blocks.push({ type: 'text', text: block.text })
     return { lines: block.lines, path: selection.path }

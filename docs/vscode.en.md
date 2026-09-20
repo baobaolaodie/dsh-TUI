@@ -15,11 +15,14 @@ integrated terminal** (xterm.js). This page covers two ways to use it:
    start; for when you do not want the extension.
 
 > Version note: `dsh-tui` on this page refers to this repository (the TUI
-> plugin, currently **0.9.0**; 0.7.0+ recommended); `dsh-tui-vscode` refers
-> to the companion extension (currently **0.5.1**). The two version and
-> release independently. See the
+> plugin); `dsh-tui-vscode` refers to the companion extension. The two
+> version and release independently. See the
 > [baobaolaodie/dsh-tui-vscode](https://github.com/baobaolaodie/dsh-tui-vscode)
-> README for the extension's full documentation.
+> README for the extension's full documentation. **The selection channel
+> requires an extension that speaks protocol v2** (a dsh-tui-vscode build
+> including `feat/mentions-ide-adapter` plus the protocol-v2 changes; the
+> Marketplace 0.5.1 does not have it yet — with an older extension the
+> feature stays silently disabled and everything else is unaffected).
 
 ## Option 1: the dsh-tui-vscode companion extension (recommended)
 
@@ -64,6 +67,16 @@ With a dsh-tui build that includes the IDE selection channel, the extension runs
 
 ![IDE selection channel: live footer badge and transcript indicator](../screenshots/ide-selection-badge.png)
 
+**Protocol & versions**: after connecting, the TUI sends `ide/hello`
+(token + protocolVersion) and the extension answers `ide/hello_ack`
+(protocolVersion + workspaceFolders) only when the token validates — the
+link counts as established only after a valid v2 ack; a wrong token is
+silently dropped. `selection_changed` then carries absolute 0-based
+inclusive line numbers plus the editor buffer's own selection text; lock
+discovery only ever dials windows whose workspace covers the session
+directory and stays silently disabled without a match. Both ends of the
+protocol must ship at the same version.
+
 ### Prerequisites
 
 - VS Code >= 1.90;
@@ -91,7 +104,7 @@ Or build from source:
 git clone https://github.com/baobaolaodie/dsh-tui-vscode.git
 cd dsh-tui-vscode
 npm install
-npm run package && code --install-extension dsh-tui-vscode-0.5.1.vsix --force
+npm run package && code --install-extension dsh-tui-vscode-<version>.vsix --force
 # or: npm run install:local
 ```
 

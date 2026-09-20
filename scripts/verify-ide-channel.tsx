@@ -498,6 +498,7 @@ async function main(): Promise<void> {
     check('无匹配：start 不抛错', threw === undefined)
     check('无匹配：connected=false（不连别的 workspace 的 IDE）', channel.connected === false)
     let foreignHello = false
+    // 固定窗:pacing 负事件兜底窗口——pickLockCandidates 对不匹配 cwd 同步返回 []，start 在 targets.length===0 处无拨号直接返回，断言本身确定性，400ms 仅防御实现回归
     await Promise.race([foreignFixture.helloPromise.then(() => { foreignHello = true }), sleep(400)])
     check('无匹配：从未向外国 lock 发起 hello', foreignHello === false)
     channel.stop()
@@ -596,17 +597,15 @@ async function main(): Promise<void> {
     check('selectionBlock: isEmpty=true → undefined',
       build({ path: 'src/a.ts', startLine: 0, endLine: 0, isEmpty: true }, FIVE_LINE_CONTENT) === undefined)
 
-    // loopback 端到端：第 6 节 env 直连收到的真实快照（非空那条）构造出合法块；
-    // isEmpty 清空后 selection getter 已为 undefined，消费守卫不产块。
+    // loopback 端到端（复审轮 4 修正假绿）：真实快照钉的是「绝对坐标 + 选区
+    // 自身 text」的扩展语义；块的构造在 8b 用 attach（text 分支）端到端验证，
+    // 这里只钉快照字段——此前用磁盘 FIVE_LINE_CONTENT 重建，掩盖了
+    // 「按绝对行号切 text」的 P1。
     const liveSnapshot = seenLive[0]
-    const fromLive = liveSnapshot === undefined
-      ? undefined
-      : build(liveSnapshot, FIVE_LINE_CONTENT)
-    check('selectionBlock: loopback 真实快照构造 <attached-file … selection> 块',
+    check('selectionBlock: loopback 真实快照携带选区自身 text 与坐标',
       liveSnapshot !== undefined
-      && fromLive !== undefined
-      && fromLive.text.startsWith('<attached-file path="src/a.ts" selection>')
-      && fromLive.lines === 3)
+        && liveSnapshot.startLine === 2 && liveSnapshot.endLine === 4
+        && liveSnapshot.text === 'fa.ts\nfb.ts\nfc.ts')
     check('selectionBlock: isEmpty 清空后 selection getter 为 undefined（消费守卫不产块）',
       liveCleared)
 
@@ -667,6 +666,66 @@ async function main(): Promise<void> {
         attached !== undefined && attached.lines === 2 && attached.path === 'src/unsaved.ts'
         && fsTouched === false
         && blocks[0]?.text === '<attached-file path="src/unsaved.ts" selection>\neditor view\nwith unsaved edits\n</attached-file>')
+    }
+    {
+      // 复审轮 4 回归（曾为 P1）：text 是选区自身文本，绝对行号不得参与
+      // 切片——startLine>0 / 深处选区 / 坐标越界都必须原样附加成功。
+      const boobyFs: FsLike = {
+        resolve: async () => { throw new Error('fs must not be touched') },
+        stat: async () => { throw new Error('fs must not be touched') },
+        readText: async () => { throw new Error('fs must not be touched') },
+      }
+      const mkBlocks = () => [] as Array<{ type: string; text: string }>
+      const mid = await attach(
+        mkBlocks(), '/repo',
+        { path: 'src/mid.ts', startLine: 5, endLine: 7, isEmpty: false, text: 'a\nb\nc' },
+        boobyFs,
+      )
+      check('attach·v2 回归：startLine=5 的选区 text 原样附加 3 行（不再按绝对行号错切）',
+        mid !== undefined && mid.lines === 3
+        && (await attach(mkBlocks(), '/repo', { path: 'p', startLine: 5, endLine: 7, isEmpty: false, text: 'a\nb\nc' }, undefined)) !== undefined)
+      const deep = await attach(
+        mkBlocks(), '/repo',
+        { path: 'src/deep.ts', startLine: 120, endLine: 122, isEmpty: false, text: 'L120\nL121\nL122' },
+        boobyFs,
+      )
+      check('attach·v2 回归：坐标远超 text 行数（120+）仍附加完整 text（旧实现静默丢块）',
+        deep !== undefined && deep.lines === 3 && deep.path === 'src/deep.ts')
+      const single = await attach(
+        mkBlocks(), '/repo',
+        { path: 'one.ts', startLine: 41, endLine: 41, isEmpty: false, text: 'only line' },
+        boobyFs,
+      )
+      check('attach·v2 回归：单行选区（start=end=41）附加 1 行',
+        single !== undefined && single.lines === 1)
+      const { MENTION_MAX_FILE_CHARS: CAP } = await import('../src/dsh-adapter/channel/mentions.js') as { MENTION_MAX_FILE_CHARS: number }
+      const bigText = ('y'.repeat(200) + '\n').repeat(300)
+      const bigBlocks = mkBlocks()
+      const big = await attach(
+        bigBlocks, '/repo',
+        { path: 'big.ts', startLine: 9, endLine: 308, isEmpty: false, text: bigText },
+        boobyFs,
+      )
+      check('attach·v2 回归：超大 text 按 cap 截断，lines=实收行数',
+        big !== undefined && big.lines === bigText.slice(0, CAP).split('\n').length
+        && bigBlocks[0]?.text.includes('[… truncated]'))
+      const blocksProbe = mkBlocks()
+      const body = await attach(
+        blocksProbe, '/repo',
+        { path: 'src/deep.ts', startLine: 120, endLine: 122, isEmpty: false, text: 'L120\nL121\nL122' },
+        boobyFs,
+      )
+      check('attach·v2 回归：正文就是 text 本身（首行保留、无错位）',
+        body !== undefined && blocksProbe[0]?.text === '<attached-file path="src/deep.ts" selection>\nL120\nL121\nL122\n</attached-file>')
+      // loopback 端到端（原 fromLive 假绿的替代）：第 6 节真实推送快照
+      // startLine=2 但 text 只有选区 3 行——attach 必须原样附加全部 3 行。
+      const liveBlocks = mkBlocks()
+      const liveAttach = seenLive[0] === undefined ? undefined : await attach(
+        liveBlocks, '/repo', seenLive[0]!, boobyFs,
+      )
+      check('attach·loopback 端到端：真实推送快照（startLine=2, text=3 行）原样附加',
+        liveAttach !== undefined && liveAttach.lines === 3
+        && liveBlocks[0]?.text === '<attached-file path="src/a.ts" selection>\nfa.ts\nfb.ts\nfc.ts\n</attached-file>')
     }
     {
       const calls: string[] = []

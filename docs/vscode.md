@@ -10,11 +10,12 @@ dsh-TUI 是终端程序：它把 ANSI 写进 PTY、从 PTY 读按键，因此任
    一键启动、恢复上次会话和恢复指定会话。扩展已上架 VS Code Marketplace。
 2. **内置集成终端直接运行** —— 零安装，秒级可用，适合不想装扩展的场景。
 
-> 版本说明：本页中的 `dsh-tui` 指本仓库（TUI 插件，当前 **0.9.0**，建议
-> 0.7.0+）；`dsh-tui-vscode` 指 companion 扩展（当前 **0.5.1**）。两者版本
-> 独立、各自发布。扩展的完整说明见其仓库
+> 版本说明：本页中的 `dsh-tui` 指本仓库（TUI 插件）；`dsh-tui-vscode` 指
+> companion 扩展。两者版本独立、各自发布；扩展的完整说明见其仓库
 > [baobaolaodie/dsh-tui-vscode](https://github.com/baobaolaodie/dsh-tui-vscode)
-> 的 README。
+> 的 README。**选区通道要求扩展支持协议 v2**（dsh-tui-vscode 含
+> `feat/mentions-ide-adapter` + 协议 v2 改动的版本； Marketplace 上的
+> 0.5.1 尚未包含——旧扩展下该功能静默不启用，其余功能不受影响）。
 
 ## 方式一：companion 扩展 dsh-tui-vscode（推荐）
 
@@ -54,6 +55,13 @@ CLI），没有 webview 或 xterm 模拟层。它不改动 TUI 核心渲染链�
 
 ![IDE 选区通道：footer 实时徽标与 transcript 指示行](../screenshots/ide-selection-badge.png)
 
+**协议与版本**：连接后 TUI 先发 `ide/hello`（token + protocolVersion），
+扩展验证通过才回 `ide/hello_ack`（protocolVersion + workspaceFolders）——
+只有收到合法 v2 ACK 才算连接建立，token 不对会被静默断开。此后
+`selection_changed` 携带绝对行号（0-based 含端）与编辑器缓冲区自身的
+选区文本；lock 发现只连 workspace 覆盖会话目录的窗口，无匹配即静默
+禁用。协议两端需同版本发布。
+
 ### 前置条件
 
 - VS Code ≥ 1.90；
@@ -77,7 +85,7 @@ CLI），没有 webview 或 xterm 模拟层。它不改动 TUI 核心渲染链�
 git clone https://github.com/baobaolaodie/dsh-tui-vscode.git
 cd dsh-tui-vscode
 npm install
-npm run package && code --install-extension dsh-tui-vscode-0.5.1.vsix --force
+npm run package && code --install-extension dsh-tui-vscode-<version>.vsix --force
 # 或一步到位：npm run install:local
 ```
 
