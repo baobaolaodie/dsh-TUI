@@ -262,9 +262,10 @@ const GROUPS = {
 // 转录拉进不可选取区。真实 Chat 树 + SGR 拖选注入，静息/上滚阅读+
 // 流式并发/流式结束后三场景断言 OSC 52 携带完整选中文本。
     ["repro-drag-select-streaming", ['node', '--import', 'tsx/esm', 'scripts/repro-drag-select-streaming.tsx']],
-// 草稿跨整屏视图保留回归（#846，PR #847 入口级矩阵）：真实入口往返——
-// Ctrl+A/Ctrl+T、11 个路由入口、编辑态（折叠块/全屏编辑器/vim 模式与
-// insert-normal 子模式）、主动清空 4 路径、会话切换栅栏、在途 staging 围栏。
+// 草稿编辑态跨整屏往返回归（#846 增量，PR #942）：真实 Chat 往返——
+// 折叠块/全屏编辑器/vim 模式与 insert-normal 子模式随快照往返、空输入
+// 框保留模式态、staged 图片绑定可提交。文本/光标/归属基础往返由本组
+// 的 verify-composer-draft-handoff 覆盖，完整 8 场景矩阵见 PR #942 历史。
     ["verify-composer-draft-screen-switch", ['node', '--import', 'tsx/esm', 'scripts/verify-composer-draft-screen-switch.tsx']],
   ],
   'session-workspace': [
