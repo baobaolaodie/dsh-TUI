@@ -18,7 +18,19 @@
  *
  * Protocol constants here are a cross-repo contract (the extension's server
  * side implements the mirror); changing them requires updating both ends
- * plus ADR-001 (DESIGN §9.5).
+ * plus ADR-001 (DESIGN §9.5). Protocol version 2:
+ * - Handshake: the client's first frame is
+ *   `{"method":"ide/hello","params":{"token","protocolVersion"}}`; the
+ *   server validates the token and answers
+ *   `{"method":"ide/hello_ack","params":{"protocolVersion",
+ *   "workspaceFolders"}}`. The client is connected only after a valid ack —
+ *   a wrong token closes the socket and the client tries its next
+ *   candidate.
+ * - Notifications: `{"method":"selection_changed","params":{path,
+ *   startLine, endLine, isEmpty, text, documentVersion}}` — coordinates are
+ *   0-based, and `text` carries the editor buffer's own selection text
+ *   (unsaved edits included); the TUI attaches that text verbatim and only
+ *   falls back to reading the file from disk for protocol-1 pushes.
  */
 
 import { readdirSync, readFileSync } from 'node:fs'
@@ -32,6 +44,16 @@ export const IDE_TOKEN_ENV = 'DSH_TUI_IDE_TOKEN'
 
 /** Handshake frame the client must send as its very first message. */
 const HELLO_METHOD = 'ide/hello'
+/**
+ * Ack frame a protocol-2 server must answer with once the hello token is
+ * validated. Until it arrives the client is NOT connected: a server that
+ * rejects the token just closes, and the client moves on to the next
+ * candidate instead of mistaking an open socket for an authenticated one
+ * (maintainer review round 3).
+ */
+const HELLO_ACK_METHOD = 'ide/hello_ack'
+/** Wire protocol this client speaks; hello_ack carries the server's value. */
+export const IDE_PROTOCOL_VERSION = 2
 /** Selection notification method broadcast by the extension. */
 const SELECTION_METHOD = 'selection_changed'
 /** Total connection budget across all candidates, in milliseconds. */
@@ -77,7 +99,7 @@ export type LockEntry = {
   pid: number
 }
 
-/** Coordinate snapshot carried by a `selection_changed` notification. */
+/** Snapshot carried by a `selection_changed` notification. */
 export type SelectionSnapshot = {
   /** Workspace-relative or absolute file path, as the extension reports it. */
   path: string
@@ -87,6 +109,42 @@ export type SelectionSnapshot = {
   endLine: number
   /** True when the editor selection collapsed to nothing. */
   isEmpty: boolean
+  /**
+   * Protocol 2: the editor buffer's OWN text for the selection (unsaved
+   * edits included), exactly what the user saw when selecting. Absent from
+   * protocol-1 pushes — then the submit path falls back to reading the file
+   * from disk, which can differ from the editor for unsaved buffers.
+   */
+  text?: string
+  /** Protocol 2: the editor document version the text came from. */
+  documentVersion?: number
+}
+
+/**
+ * Validate an inbound `ide/hello_ack` frame. Returns the server's protocol
+ * version and workspace folders, or undefined for anything else — wrong
+ * method, malformed envelope, or a version this client does not speak (both
+ * ends ship together, so a mismatch is a foreign server and must not be
+ * treated as connected).
+ */
+export function parseHelloAck(message: unknown): {
+  protocolVersion: number
+  workspaceFolders: string[]
+} | undefined {
+  if (message === null || typeof message !== 'object') return undefined
+  const record = message as Record<string, unknown>
+  if (record.method !== HELLO_ACK_METHOD) return undefined
+  const params = record.params
+  if (params === null || typeof params !== 'object' || Array.isArray(params)) return undefined
+  const payload = params as Record<string, unknown>
+  const version = payload.protocolVersion
+  const folders = payload.workspaceFolders
+  if (typeof version !== 'number' || !Number.isSafeInteger(version)) return undefined
+  if (version !== IDE_PROTOCOL_VERSION) return undefined
+  if (!Array.isArray(folders) || !folders.every(folder => typeof folder === 'string')) {
+    return undefined
+  }
+  return { protocolVersion: version, workspaceFolders: folders }
 }
 
 /**
@@ -155,10 +213,14 @@ function isProcessAlive(pid: number): boolean {
 }
 
 /**
- * Scan a lock directory and order the candidates: locks whose
- * workspaceFolders contain the session cwd come first, everything else
- * after; ties keep directory order (stable sort). Malformed locks are
- * skipped. Never throws — an unreadable directory degrades to an empty list.
+ * Scan a lock directory and return the candidates whose workspaceFolders
+ * actually CONTAIN the session cwd, most-specific root first; ties keep
+ * directory order (stable sort). Malformed and stale locks are skipped, and
+ * an unmatched lock is NOT a candidate at all — dialing another workspace's
+ * IDE would attach that project's selections here (maintainer review round 3:
+ * "unmatched trails every match" used to make start() connect to an
+ * unrelated window when nothing matched). Never throws — an unreadable
+ * directory degrades to an empty list.
  *
  * `pid` is part of the lock contract and reserved for future disambiguation
  * (DESIGN R5); matching currently relies on workspaceFolders only.
@@ -197,17 +259,16 @@ export function pickLockCandidates(lockDir: string, cwd: string, pid?: number): 
         : cwdNorm === root || cwdNorm.startsWith(`${root}/`)
       if (hits && root.length > matchLength) matchLength = root.length
     }
+    // No workspace folder covers the session cwd → not a candidate. Keeping
+    // unmatched locks "for later" is how a foreign project's selections ended
+    // up attachable here (see the doc comment above).
+    if (matchLength === 0) continue
     entries.push({ entry, matchLength })
   }
   // Most-specific-first: a `/repo` workspace lock must precede the root `/`
-  // fallback when both match the same cwd (coderabbit review), while
-  // unmatched locks trail every match.
+  // fallback when both match the same cwd (coderabbit review).
   return entries
-    .sort(
-      (left, right) =>
-        Number(right.matchLength > 0) - Number(left.matchLength > 0)
-        || right.matchLength - left.matchLength,
-    )
+    .sort((left, right) => right.matchLength - left.matchLength)
     .map(item => item.entry)
 }
 
@@ -235,7 +296,16 @@ export function parseSelectionChanged(message: unknown): SelectionSnapshot | und
     return undefined
   }
   if (typeof isEmpty !== 'boolean') return undefined
-  return { path, startLine, endLine, isEmpty }
+  // Protocol 2 optional fields: absent from protocol-1 pushes, tolerated so
+  // an older extension still works in the coordinates-only mode.
+  const text = payload.text
+  const documentVersion = payload.documentVersion
+  const snapshot: SelectionSnapshot = { path, startLine, endLine, isEmpty }
+  if (typeof text === 'string' && text !== '') snapshot.text = text
+  if (typeof documentVersion === 'number' && Number.isSafeInteger(documentVersion)) {
+    snapshot.documentVersion = documentVersion
+  }
+  return snapshot
 }
 
 type SelectionListener = (snapshot: SelectionSnapshot) => void
@@ -264,14 +334,27 @@ export class IdeChannel {
   private state: 'idle' | 'connecting' | 'connected' | 'disconnected' = 'idle'
   private current: SelectionSnapshot | undefined = undefined
   /** Bumped on every connect attempt and on stop(): in-flight dials check it
-   *  in `finish`, so a stopped channel can never be revived by a late onopen
-   *  (maintainer review round 2 — stop() must cancel pending dials). */
+   *  in `finish` and the discovery loop checks it before every next dial, so
+   *  a stopped channel can neither be revived by a late onopen/ack nor keep
+   *  dialing further candidates (maintainer review rounds 2–3). */
   private generation = 0
+  /** Env/lockDir of the last start(), reused by rebind() so a cwd change
+   *  rediscovers against the same environment it originally connected in. */
+  private startEnv: NodeJS.ProcessEnv = process.env
+  private startLockDir: string = ideLockDir()
+  /** Workspace folders the connected server reported in hello_ack. */
+  private ackedWorkspaceFolders: string[] | undefined = undefined
   private readonly listeners = new Set<SelectionListener>()
 
   /** True only while the loopback link is up. */
   get connected(): boolean {
     return this.state === 'connected'
+  }
+
+  /** Workspace folders the connected server acked with, or undefined while
+   *  not connected (test/introspection seam for the cwd-coverage rule). */
+  get workspaceFolders(): string[] | undefined {
+    return this.ackedWorkspaceFolders
   }
 
   /** Latest non-empty selection, or undefined (never consumed-clearing). */
@@ -303,6 +386,14 @@ export class IdeChannel {
   ): Promise<void> {
     if (this.state !== 'idle') return
     this.generation++
+    // Operation token for the WHOLE discovery loop (maintainer review round
+    // 3): stop()/rebind() bump the generation; dials in flight check it in
+    // `finish`, and the loop below checks it before every next dial — a stop
+    // mid-discovery cancels the entire start, not just the one dial it
+    // interrupted (later candidates used to still connect after a stop).
+    const operation = this.generation
+    this.startEnv = env
+    this.startLockDir = lockDir
     const targets: IdeChannelConfig[] = []
     const direct = envDirect(env)
     if (direct !== undefined) targets.push(direct)
@@ -318,18 +409,35 @@ export class IdeChannel {
     for (const target of targets) {
       const remaining = deadline - Date.now()
       if (remaining <= 0) break
-      if (await this.tryConnect(target, remaining)) return
+      if (operation !== this.generation) return
+      if (await this.tryConnect(target, remaining, operation)) return
     }
-    this.state = 'disconnected'
+    if (operation === this.generation) this.state = 'disconnected'
   }
 
   /** Drop the link (if any) and mark the channel disconnected. Cancels any
    *  dial still pending: the generation bump invalidates its finish, and the
-   *  pending socket is aborted so a late onopen can never re-connect. */
+   *  pending socket is aborted so a late onopen/ack can never re-connect. */
   stop(): void {
     this.generation++
     this.teardown()
     this.state = 'disconnected'
+  }
+
+  /**
+   * Re-target the channel after the session cwd changed (/workspace, /resume
+   * adopting another session, ...). The old link belongs to the old
+   * workspace — a selection pushed there must never attach into the new one
+   * — so drop it (clearing the live selection) and rediscover against the
+   * new cwd with the env/lockDir start() was last given (maintainer review
+   * round 3: clearing the cached selection used to keep the stale link, and
+   * the terminal-on-disconnect design meant a plain stop() could never
+   * reconnect; rebind() is the one sanctioned way back to idle).
+   */
+  async rebind(cwd: string): Promise<void> {
+    this.stop()
+    this.state = 'idle'
+    await this.start(this.startEnv, this.startLockDir, cwd)
   }
 
   private teardown(): void {
@@ -364,14 +472,19 @@ export class IdeChannel {
   }
 
   /**
-   * Dial one candidate and perform the token handshake. Resolves true only
-   * when the socket is OPEN and `ide/hello` has been sent; anything slower
-   * than `timeoutMs` or any error resolves false and cleans up.
+   * Dial one candidate and complete the token handshake. Resolves true only
+   * when the server answered `ide/hello_ack` with a matching protocol
+   * version — an OPEN socket alone proves nothing: a wrong-token server
+   * accepts the WS upgrade and then closes, and treating open as connected
+   * used to strand the client on a rejected candidate (maintainer review
+   * round 3). Anything slower than `timeoutMs`, any error, or any first
+   * frame that is not a valid v2 ack resolves false and cleans up.
    */
-  private tryConnect(target: IdeChannelConfig, timeoutMs: number): Promise<boolean> {
+  private tryConnect(target: IdeChannelConfig, timeoutMs: number, operation: number): Promise<boolean> {
     return new Promise(resolve => {
       let settled = false
-      const gen = this.generation
+      let helloSent = false
+      const gen = operation
       let socket: WebSocket
       try {
         socket = new WebSocket(`ws://127.0.0.1:${target.port}`)
@@ -383,21 +496,20 @@ export class IdeChannel {
       // via the generation guard) — cancel the CONNECTING socket to unblock
       // the promise instead of letting it spin until the budget ends.
       this.pendingSocket = socket
-      const finish = (opened: boolean) => {
+      const finish = (connected: boolean) => {
         if (settled) return
         settled = true
         clearTimeout(timer)
-        // A stop() between dial and open bumped the generation: this dial
+        this.detach(socket)
+        // A stop() between dial and ack bumped the generation: this dial
         // belongs to a cancelled session — drop it, never become connected.
         if (gen !== this.generation) {
-          this.detach(socket)
           this.abort(socket)
           resolve(false)
           return
         }
         if (this.pendingSocket === socket) this.pendingSocket = null
-        if (!opened) {
-          this.detach(socket)
+        if (!connected) {
           this.abort(socket)
           resolve(false)
           return
@@ -410,11 +522,33 @@ export class IdeChannel {
       const timer = setTimeout(() => finish(false), timeoutMs)
       socket.onopen = () => {
         try {
-          socket.send(JSON.stringify({ method: HELLO_METHOD, params: { token: target.token } }))
-          finish(true)
+          socket.send(JSON.stringify({
+            method: HELLO_METHOD,
+            params: { token: target.token, protocolVersion: IDE_PROTOCOL_VERSION },
+          }))
+          helloSent = true
         } catch {
           finish(false)
         }
+      }
+      socket.onmessage = event => {
+        if (!helloSent || settled) return
+        let parsed: unknown
+        try {
+          parsed = JSON.parse(String(event.data))
+        } catch {
+          finish(false)
+          return
+        }
+        const ack = parseHelloAck(parsed)
+        // Both ends ship together: a first frame that is not a valid v2 ack
+        // (wrong version, wrong method, garbage) fails this candidate.
+        if (ack === undefined) {
+          finish(false)
+          return
+        }
+        this.ackedWorkspaceFolders = ack.workspaceFolders
+        finish(true)
       }
       socket.onerror = () => finish(false)
       socket.onclose = () => finish(false)
@@ -443,6 +577,7 @@ export class IdeChannel {
     this.socket = null
     this.detach(socket)
     this.state = 'disconnected'
+    this.ackedWorkspaceFolders = undefined
     // A dead connection's selection is stale: clear the cached snapshot and
     // tell subscribers — the badge and submit auto-attach must not keep
     // using whatever was selected before the disconnect.

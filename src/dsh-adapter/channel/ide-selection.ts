@@ -1,8 +1,9 @@
 /**
  * IDE selection consumption: turn a live editor-selection snapshot into the
- * model-facing `<attached-file … selection>` block. The loopback link carries
- * coordinates only — the file is resolved and read here, at submit time, and
- * every failure mode is silent (an IDE-side extra must never block a send).
+ * model-facing `<attached-file … selection>` block. Protocol 2 pushes carry
+ * the editor buffer's own selection text — that is attached verbatim; the
+ * disk read below remains only as the protocol-1 fallback, and every failure
+ * mode is silent (an IDE-side extra must never block a send).
  *
  * The block builder never goes through text parsing (unlike `@`-mentions):
  * selection paths may contain spaces no tokenizer could survive. It reuses
@@ -69,14 +70,18 @@ export function buildSelectionBlock(
   // Capped like @-mention attachments: a huge selection would otherwise
   // exceed the context window. Same policy as expandMentions
   // (MENTION_MAX_FILE_CHARS), with the same visible truncation marker so the
-  // model knows the tail was cut.
+  // model knows the tail was cut. `lines` counts what the model actually
+  // received — the truncated body, not the full selection (maintainer review
+  // round 3: the count used to report the pre-truncation total).
   let body = sliced
+  let attached = sliced
   if (body.length > MENTION_MAX_FILE_CHARS) {
-    body = `${body.slice(0, MENTION_MAX_FILE_CHARS)}\n[… truncated]`
+    attached = body.slice(0, MENTION_MAX_FILE_CHARS)
+    body = `${attached}\n[… truncated]`
   }
   return {
     text: `<attached-file path="${escapeSnippetAttr(selection.path)}" selection>\n${body}\n</attached-file>`,
-    lines: sliced.split('\n').length,
+    lines: attached.split('\n').length,
   }
 }
 
@@ -86,6 +91,12 @@ export function buildSelectionBlock(
  * attach — no selection, or an unresolvable/unreadable file. The caller
  * passes the ENQUEUE-time snapshot (and its fs handle) so a selection made
  * after submit can never attach to the wrong message.
+ *
+ * Protocol 2 carries the editor buffer's own `text` (unsaved edits
+ * included): when present it is attached VERBATIM and the filesystem is not
+ * touched — reading the disk copy would hand the model a version the user
+ * never saw (maintainer review round 3). The disk read remains only as the
+ * protocol-1 fallback.
  */
 export async function attachIdeSelection(
   blocks: MentionExpansion['blocks'],
@@ -94,6 +105,12 @@ export async function attachIdeSelection(
   fs: MentionFs | undefined,
 ): Promise<SelectionAttachment | undefined> {
   if (selection === undefined || selection.isEmpty) return undefined
+  if (selection.text !== undefined) {
+    const block = buildSelectionBlock(selection, selection.text)
+    if (block === undefined) return undefined
+    blocks.push({ type: 'text', text: block.text })
+    return { lines: block.lines, path: selection.path }
+  }
   if (fs === undefined) return undefined
   try {
     const absolute = isAbsolute(selection.path) ? selection.path : join(cwd, selection.path)
@@ -108,6 +125,45 @@ export async function attachIdeSelection(
   } catch {
     return undefined
   }
+}
+
+/**
+ * Derive the transcript indicator from the DURABLE user-message content:
+ * the `<attached-file path="…" selection>` block the submit path appended is
+ * part of the persisted event, so a replayed session can rebuild the
+ * "Selected N lines from <file>" line even though the in-memory
+ * message-id → attachment map starts empty (maintainer review round 3: the
+ * session log is the source of truth — the indicator must not depend on
+ * process-local state).
+ */
+export function replaySelectionAttachment(
+  content: readonly unknown[] | undefined,
+): SelectionAttachment | undefined {
+  if (content === undefined) return undefined
+  for (const block of content) {
+    if (block === null || typeof block !== 'object') continue
+    const text = (block as { type?: unknown; text?: unknown }).text
+    if ((block as { type?: unknown }).type !== 'text' || typeof text !== 'string') continue
+    const opened = /^<attached-file path="([^"]+)" selection>\n/.exec(text)
+    if (opened === null) continue
+    let closed = text.slice(opened[0].length)
+    if (closed.endsWith('</attached-file>')) closed = closed.slice(0, -'</attached-file>'.length)
+    // The builder writes `body\n</attached-file>` — strip the newline the
+    // close tag rode on, or every body counts one phantom line.
+    if (closed.endsWith('\n')) closed = closed.slice(0, -1)
+    const lines = closed.split('\n').length
+    return {
+      lines: closed.endsWith('\n[… truncated]') ? lines - 1 : lines,
+      // Reverse escapeSnippetAttr so the replayed indicator shows the path
+      // exactly as the live one did (`&` first so entities are not re-baked).
+      path: opened[1]!
+        .replace(/&lt;/g, '<')
+        .replace(/&gt;/g, '>')
+        .replace(/&quot;/g, '"')
+        .replace(/&amp;/g, '&'),
+    }
+  }
+  return undefined
 }
 
 /**

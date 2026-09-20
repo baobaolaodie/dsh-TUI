@@ -324,24 +324,25 @@ function createChannelWithOwner(
     state.emit()
   })
   /**
-   * Invalidate the live selection when the session's working directory
+   * Re-target the IDE selection link when the session's working directory
    * changes (/resume adopts the persisted header cwd, /workspace switches to
    * another directory, a background session is adopted): a selection made in
    * the OLD workspace would otherwise stay projected — the badge shows it and
-   * the next submit resolves its RELATIVE path against the NEW cwd, attaching
-   * the wrong file.
+   * the next submit attaches the wrong file — and the OLD link would keep
+   * pushing the old window's selections into the new workspace.
    *
-   * Deliberately does NOT stop()/start() the IdeChannel: its state machine is
-   * terminal-on-disconnect by design, so a stop-then-start can never
-   * reconnect and silently kills the whole channel. In the primary env-direct
-   * launch the same VS Code window keeps pushing snapshots after the switch,
-   * so clearing the value is enough — the next snapshot repopulates it for
-   * the new workspace.
+   * rebind() drops the link and rediscovers against the new cwd (env-direct
+   * reconnects to the same spawned server; lock scan only ever returns
+   * candidates whose workspaceFolders cover the new cwd). Callers set
+   * state.cwd BEFORE this runs, so it reads the fresh value (maintainer
+   * review round 3: this used to only clear the cached selection and keep
+   * the stale connection alive).
    */
   const resetIdeSelection = (): void => {
     currentSelection = undefined
     state.selection = undefined
     state.emit()
+    void ideChannel.rebind(state.cwd).catch(() => {})
   }
   const selectionAttachments = createSelectionAttachments()
   const composer = createComposerImages(ctx, owner, { generation: () => state.agentBindingGeneration })
@@ -546,11 +547,15 @@ function createChannelWithOwner(
     },
     releaseContributions() {
       // Owner cleanup is exhaustive, but it can report an external cleanup
-      // failure. The local emitter is outside that owner and must still stop.
-      try { owner.dispose() } finally { emitter.dispose() }
-      // The IDE loopback link is outside the owner too: without this the
-      // socket outlives teardown and keeps delivering selection frames.
-      ideChannel.stop()
+      // failure. The emitter and the IDE loopback link are both OUTSIDE the
+      // owner and must still stop no matter which earlier step throws — a
+      // bare trailing ideChannel.stop() used to be skipped whenever
+      // owner.dispose() threw, leaking the socket (maintainer review round 3).
+      try {
+        owner.dispose()
+      } finally {
+        try { emitter.dispose() } finally { ideChannel.stop() }
+      }
     },
     traceEvents() {
       // Immutable per-append snapshot (dsh-session caches the frozen array);

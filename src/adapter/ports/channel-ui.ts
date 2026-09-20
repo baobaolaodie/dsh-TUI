@@ -18,8 +18,9 @@ export interface ChannelUi {
   readonly version: number
   readonly rows: readonly ChatRow[]
   /** Live editor selection from the IDE channel (undefined = no IDE / no
-   *  selection / link dropped). Coordinates only; the submit path resolves
-   *  and reads the file on demand. */
+   *  selection / link dropped). Protocol-2 pushes carry the editor buffer's
+   *  own text; the submit path attaches it verbatim and only falls back to
+   *  reading the file from disk for protocol-1 pushes. */
   readonly selection: ChannelSelection | undefined
   readonly status: AgentStatus | 'starting' | 'disposed'
   readonly sessionTitle: string

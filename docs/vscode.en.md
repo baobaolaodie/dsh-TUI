@@ -56,11 +56,11 @@ integration.
 
 ### IDE selection channel
 
-With a dsh-tui build that includes the IDE selection channel, the extension runs a loopback WebSocket server and writes a lock file; dsh-tui connects via injected env vars when launched from the extension (manually launched sessions discover it by scanning the lock). Afterwards:
+With a dsh-tui build that includes the IDE selection channel, the extension runs a loopback WebSocket server and writes a lock file (directory 0700, file 0600); dsh-tui connects via injected env vars when launched from the extension (manually launched sessions discover it by scanning the lock — only windows whose workspace covers the session directory are ever dialed; with no match the integration stays silently disabled and a foreign project is never connected). Afterwards:
 
 - Selecting code in the editor instantly shows a `⧉ N lines selected` badge under the TUI prompt (it disappears when the selection clears);
-- Submitting a message attaches only the selected lines to the model context, with a `⧉ Selected N lines from <relative path>` indicator above the user bubble;
-- Selection pushes carry coordinates only (no text) — the TUI reads file content on demand; without an IDE or on disconnect everything degrades silently with zero impact on the rest of the TUI.
+- Submitting a message attaches only the selected lines to the model context, with a `⧉ Selected N lines from <relative path>` indicator above the user bubble (resuming the session after a restart still rebuilds that indicator);
+- Selection pushes carry the editor buffer's OWN text — unsaved edits are attached exactly as you see them on screen; oversized selections are capped and marked with the same policy as @-mentions. Without an IDE or on disconnect everything degrades silently with zero impact on the rest of the TUI.
 
 ![IDE selection channel: live footer badge and transcript indicator](../screenshots/ide-selection-badge.png)
 

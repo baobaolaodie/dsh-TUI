@@ -1,10 +1,11 @@
 /** Host-owned in-process Channel contract. No runtime or upstream imports. */
 
 
-/** Live editor selection projection (IDE selection channel): coordinates
- *  only — the TUI resolves and reads the file itself. Structurally mirrors
- *  the adapter's SelectionSnapshot without importing from the adapter layer
- *  (this port takes no runtime or upstream imports). */
+/** Live editor selection projection (IDE selection channel): the editor
+ *  buffer's own text when the IDE pushed it (protocol 2 — unsaved edits
+ *  included), plus the coordinates. Structurally mirrors the adapter's
+ *  SelectionSnapshot without importing from the adapter layer (this port
+ *  takes no runtime or upstream imports). */
 export interface ChannelSelection {
   /** Workspace-relative or absolute file path, as the extension reports it. */
   readonly path: string
@@ -14,6 +15,14 @@ export interface ChannelSelection {
   readonly endLine: number
   /** True when the editor selection collapsed to nothing. */
   readonly isEmpty: boolean
+  /**
+   * Protocol 2: the editor buffer's own text for the selection, exactly
+   * what the user saw. The submit path attaches it verbatim; when absent
+   * (protocol-1 push) it falls back to reading the file from disk.
+   */
+  readonly text?: string
+  /** Protocol 2: the editor document version the text came from. */
+  readonly documentVersion?: number
 }
 
 /** What one consumed selection contributed to a submitted message, recorded

@@ -46,11 +46,11 @@ CLI），没有 webview 或 xterm 模拟层。它不改动 TUI 核心渲染链�
 
 ### IDE 选区通道
 
-搭配 dsh-tui ≥ 含 IDE 选区通道的版本，扩展会在本机起一个 loopback WebSocket 服务并写入 lock 文件；dsh-tui 启动时通过环境变量直连（手动启动的会话则扫描 lock 自动发现）。此后：
+搭配 dsh-tui ≥ 含 IDE 选区通道的版本，扩展会在本机起一个 loopback WebSocket 服务并写入 lock 文件（目录 0700、文件 0600）；dsh-tui 启动时通过环境变量直连（手动启动的会话则扫描 lock 自动发现——只连 workspace 覆盖当前会话目录的窗口，没有匹配就静默禁用，绝不连别的项目）。此后：
 
 - 编辑器选中代码 → TUI prompt 下方**实时**出现 `⧉ N lines selected` 徽标（清空选区即消失）；
-- 提交消息 → 选中行按坐标切片自动附加进模型上下文，transcript 用户消息上方渲染「⧉ Selected N lines from <相对路径>」指示行；
-- 选区推送只含坐标（不含文本），文件内容由 TUI 按需读取；无 IDE / 断连时静默降级，TUI 其余功能零影响。
+- 提交消息 → 选中行自动附加进模型上下文，transcript 用户消息上方渲染「⧉ Selected N lines from <相对路径>」指示行（重启后 resume 仍能重建该指示行）；
+- 选区推送携带**编辑器缓冲区自己的文本**——未保存的修改也会如实附加（附加的就是你屏幕上看到的）；超大选区按与 @-引用相同的上限截断并标记。无 IDE / 断连时静默降级，TUI 其余功能零影响。
 
 ![IDE 选区通道：footer 实时徽标与 transcript 指示行](../screenshots/ide-selection-badge.png)
 

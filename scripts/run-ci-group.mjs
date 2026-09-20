@@ -439,6 +439,11 @@ const GROUPS = {
     ["verify-submit", ['node', '--import', 'tsx/esm', 'scripts/verify-submit.mjs']],
     ["verify-compact", ['node', '--import', 'tsx/esm', 'scripts/verify-compact.mjs']],
     ["verify-channel-goal-todo", ['node', '--import', 'tsx/esm', 'scripts/verify-channel-goal-todo.mjs']],
+// IDE 选区通道回归（PR #562）：纯函数（env 直连/lock 扫描与 workspace
+// 匹配过滤/hello_ack 解析/selection_changed 校验）、无 IDE 静默降级、
+// loopback 对连（token 握手 ACK、错误 token 换下一候选、断连清空）、
+// 选区消费（text 优先/磁盘回退/截断计数/replay 指示回扫）。
+    ["verify-ide-channel", ['node', '--import', 'tsx/esm', 'scripts/verify-ide-channel.tsx']],
     ["verify-whale-toggle", ['node', '--import', 'tsx/esm', 'scripts/verify-whale-toggle.mjs']],
 // 开屏鲸鱼三选一（classic 组合开场/heart/sleep）：帧表完整性（22 帧
 // 含 heart/sleep 新调色）、序列合法性（standard 起止/纯自家行为帧、

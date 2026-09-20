@@ -39,7 +39,7 @@ async function waitFor(ready: () => boolean, timeoutMs: number): Promise<boolean
   const deadline = Date.now() + timeoutMs
   while (Date.now() < deadline) {
     if (ready()) return true
-    await sleep(20)
+    await sleep(20) // 固定窗:pacing 20ms 轮询采样间隔，等待的是外部 fixture 推送无本地锚点可 settle
   }
   return ready()
 }
@@ -107,7 +107,7 @@ function encodeTextFrame(text: string): Buffer {
   return Buffer.concat([header, payload])
 }
 
-function startWsFixture(token: string): Promise<WsFixture> {
+function startWsFixture(token: string, workspaceFolders: string[] = ['/fixture-ws']): Promise<WsFixture> {
   return new Promise(resolveFixture => {
     let socketRef: Socket | null = null
     let buffer = Buffer.alloc(0)
@@ -119,7 +119,17 @@ function startWsFixture(token: string): Promise<WsFixture> {
       if (socket === null || socket.destroyed) return
       socket.write(encodeTextFrame(JSON.stringify({
         method: 'selection_changed',
-        params: { path: 'src/a.ts', startLine: 2, endLine: 4, isEmpty },
+        params: {
+          path: 'src/a.ts',
+          startLine: 2,
+          endLine: 4,
+          isEmpty,
+          // Protocol 2: the editor buffer's own text — 3 selected lines here,
+          // deliberately DIFFERENT from any on-disk fixture so a test can
+          // prove the attach path used the pushed text, not a disk read.
+          text: isEmpty ? '' : 'fa.ts\nfb.ts\nfc.ts',
+          documentVersion: 7,
+        },
       })))
     }
 
@@ -154,12 +164,21 @@ function startWsFixture(token: string): Promise<WsFixture> {
           const params = record.params !== null && typeof record.params === 'object'
             ? record.params as Record<string, unknown>
             : null
-          helloResolve({
-            token: typeof params?.token === 'string' ? params.token : '',
-          })
+          const received = typeof params?.token === 'string' ? params.token : ''
+          helloResolve({ token: received })
+          // Protocol 2 server semantics: a wrong token gets NO ack — the
+          // socket is dropped (mirrors the extension's IdeServer).
+          if (received !== token) {
+            socket.destroy()
+            return
+          }
+          socket.write(encodeTextFrame(JSON.stringify({
+            method: 'ide/hello_ack',
+            params: { protocolVersion: 2, workspaceFolders },
+          })))
           // 握手完成后推一条非空选区，稍后再推一条空选区（验证清空路径）
           sendSelection(false)
-          void sleep(50).then(() => sendSelection(true))
+          void sleep(50).then(() => sendSelection(true)) // 固定窗:pacing 空选区第二条推送的间隔，无状态锚点可 settle
         }
       })
     })
@@ -218,9 +237,10 @@ async function main(): Promise<void> {
   writeFileSync(join(lockDir, '43333.lock'), '{ broken json !!!')
   const picked = mod.pickLockCandidates(lockDir, '/repo/a', process.pid)
   check('pickLockCandidates: 坏 JSON lock 被跳过（不出现在候选中）',
-    picked.length === 2 && picked.every(c => c.token !== ''))
-  check('pickLockCandidates: workspace 匹配者排第一', picked[0]?.token === 't-a')
-  check('pickLockCandidates: 不匹配者仍在候选中', picked.some(c => c.token === 't-other'))
+    picked.length === 1 && picked[0]?.token === 't-a')
+  check('pickLockCandidates: workspace 匹配者入选', picked[0]?.token === 't-a')
+  check('pickLockCandidates: 不匹配 workspace 的 lock 不再是候选（维护者复审 #3：否则会连上别的窗口）',
+    !picked.some(c => c.token === 't-other'))
   check('pickLockCandidates: 不存在的 lock 目录 → 空数组（不抛错）',
     JSON.stringify(mod.pickLockCandidates(join(tmpRoot, 'no-such-dir'), '/', process.pid)) === '[]')
 
@@ -261,11 +281,11 @@ async function main(): Promise<void> {
   writeFileSync(join(boundaryDir, '45555.lock'),
     JSON.stringify({ port: 45555, token: 't-sub', workspaceFolders: ['/repo/a'], pid: process.pid }))
   const pickedBoundary = mod.pickLockCandidates(boundaryDir, '/repo/abc', process.pid)
-  check('pickLockCandidates: /repo/a 声明不匹配 /repo/abc 会话（前缀边界）',
-    pickedBoundary[0]?.token === 't-z-z')
+  check('pickLockCandidates: /repo/a 声明不匹配 /repo/abc 会话（前缀边界 + 无匹配即无候选）',
+    pickedBoundary.length === 0)
   check('pickLockCandidates: 精确等于 workspace 根仍匹配', (() => {
     const computed = mod.pickLockCandidates(boundaryDir, '/repo/a', process.pid)
-    return computed[0]?.token === 't-sub'
+    return computed.length === 1 && computed[0]?.token === 't-sub'
   })())
 
   // stop 阻断在途拨号（维护者复审 #2）：stop() 必须递增 generation 并清空
@@ -307,6 +327,49 @@ async function main(): Promise<void> {
     mod.parseSelectionChanged({ method: 'selection_changed', params: { path: 'a.ts', startLine: -1, endLine: 0, isEmpty: false } }) === undefined)
   check('parseSelectionChanged: 空 path → undefined',
     mod.parseSelectionChanged({ method: 'selection_changed', params: { path: '', startLine: 0, endLine: 0, isEmpty: false } }) === undefined)
+
+  // ── 4b. parseHelloAck（协议 v2 握手 ACK）+ selection_changed 的 v2 可选字段 ──
+  {
+    const ack = mod.parseHelloAck({
+      method: 'ide/hello_ack',
+      params: { protocolVersion: 2, workspaceFolders: ['/repo/a', '/repo/b'] },
+    })
+    check('parseHelloAck: 合法 v2 ACK → 版本 + workspaceFolders',
+      ack !== undefined && ack.protocolVersion === 2
+      && JSON.stringify(ack.workspaceFolders) === '["/repo/a","/repo/b"]')
+    check('parseHelloAck: 非 hello_ack 方法 → undefined',
+      mod.parseHelloAck({ method: 'selection_changed', params: {} }) === undefined)
+    check('parseHelloAck: 版本不匹配（3）→ undefined（两端同步发布，异版本即异服务）',
+      mod.parseHelloAck({ method: 'ide/hello_ack', params: { protocolVersion: 3, workspaceFolders: [] } }) === undefined)
+    check('parseHelloAck: 版本缺失/非整数 → undefined',
+      mod.parseHelloAck({ method: 'ide/hello_ack', params: { workspaceFolders: [] } }) === undefined
+      && mod.parseHelloAck({ method: 'ide/hello_ack', params: { protocolVersion: 2.5, workspaceFolders: [] } }) === undefined)
+    check('parseHelloAck: workspaceFolders 缺失/非字符串数组 → undefined',
+      mod.parseHelloAck({ method: 'ide/hello_ack', params: { protocolVersion: 2 } }) === undefined
+      && mod.parseHelloAck({ method: 'ide/hello_ack', params: { protocolVersion: 2, workspaceFolders: ['/a', 3] } }) === undefined)
+    check('parseHelloAck: 缺 params / 非 object → undefined',
+      mod.parseHelloAck({ method: 'ide/hello_ack' }) === undefined
+      && mod.parseHelloAck('nope') === undefined)
+
+    const v2 = mod.parseSelectionChanged({
+      method: 'selection_changed',
+      params: { path: 'a.ts', startLine: 0, endLine: 2, isEmpty: false, text: 'l1\nl2\nl3', documentVersion: 9 },
+    })
+    check('parseSelectionChanged: v2 text/documentVersion 透传',
+      v2 !== undefined && v2.text === 'l1\nl2\nl3' && v2.documentVersion === 9)
+    const v1 = mod.parseSelectionChanged({
+      method: 'selection_changed',
+      params: { path: 'a.ts', startLine: 0, endLine: 2, isEmpty: false },
+    })
+    check('parseSelectionChanged: v1 推送（无 text 字段）仍合法且不带 text',
+      v1 !== undefined && v1.text === undefined && v1.documentVersion === undefined)
+    const badText = mod.parseSelectionChanged({
+      method: 'selection_changed',
+      params: { path: 'a.ts', startLine: 0, endLine: 2, isEmpty: false, text: 42, documentVersion: 'x' },
+    })
+    check('parseSelectionChanged: 类型不合法的 text/documentVersion 被丢弃（坐标仍有效）',
+      badText !== undefined && badText.text === undefined && badText.documentVersion === undefined)
+  }
 
   // ── 5. 无 IDE 场景：静默降级 ───────────────────────────────────────────────
   const degraded = new mod.IdeChannel()
@@ -361,10 +424,14 @@ async function main(): Promise<void> {
     )
     check('loopback·env 直连：ide/hello 携带正确 token 到达服务端',
       (await envFixture.helloPromise).token === 'tok-env')
-    check('loopback·env 直连：握手后 connected=true', channel.connected)
+    check('loopback·env 直连：hello_ack 后才算 connected（协议 v2）', channel.connected)
+    check('loopback·env 直连：ACK 的 workspaceFolders 可查询',
+      JSON.stringify(channel.workspaceFolders) === '["/fixture-ws"]')
     const gotSelection = await waitFor(() => seen.length >= 1, 2000)
     check('loopback·env 直连：selection_changed 到达 listener',
       gotSelection && seen[0]?.path === 'src/a.ts' && seen[0]?.startLine === 2 && seen[0]?.endLine === 4)
+    check('loopback·env 直连：v2 推送携带编辑器缓冲区 text 与 documentVersion',
+      gotSelection && seen[0]?.text === 'fa.ts\nfb.ts\nfc.ts' && seen[0]?.documentVersion === 7)
     check('loopback·env 直连：非空选区反映在 selection getter', channel.selection !== undefined)
     const cleared = await waitFor(() => channel.selection === undefined, 2000)
     check('loopback·env 直连：isEmpty=true 清空 selection getter', cleared)
@@ -377,6 +444,65 @@ async function main(): Promise<void> {
     check('loopback·env 直连：stop 后 connected=false', channel.connected === false)
   }
   envFixture.close()
+
+  // ── 6b. 错误 token 的候选被放弃 → 继续尝试下一候选（维护者复审 #3）─────
+  // env 直连指向一个期望别的 token 的服务端：WS 能升级但收不到
+  // hello_ack（服务端直接断开）。客户端不得把「socket 打开」当「已认证」，
+  // 必须落到下一候选（这里用 lock 发现路径的 fixture 兜底连上）。
+  {
+    const wrongTokenFixture = await startWsFixture('tok-right')
+    const fallbackFixture = await startWsFixture('tok-lock2')
+    const dir = join(tmpRoot, 'wrong-token')
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(join(dir, `${fallbackFixture.port}.lock`), JSON.stringify({
+      port: fallbackFixture.port,
+      token: 'tok-lock2',
+      workspaceFolders: ['/repo/fallback'],
+      pid: process.pid,
+    }))
+    const channel = new mod.IdeChannel()
+    await channel.start(
+      { DSH_TUI_IDE_PORT: String(wrongTokenFixture.port), DSH_TUI_IDE_TOKEN: 'tok-wrong' },
+      dir,
+      '/repo/fallback',
+    )
+    check('错误 token：错误候选确实收到了 hello（token 不对）',
+      (await wrongTokenFixture.helloPromise).token === 'tok-wrong')
+    check('错误 token：未被拒候选冒充 connected，而是落到 lock 候选连上',
+      channel.connected && (await fallbackFixture.helloPromise).token === 'tok-lock2')
+    channel.stop()
+    wrongTokenFixture.close()
+    fallbackFixture.close()
+  }
+
+  // ── 6c. 无 workspace 匹配的 lock 不连接（维护者复审 #3）──────────────────
+  // 会话 cwd 不在任何 lock 的 workspaceFolders 下：不得回退去连别的
+  // workspace 的 IDE（那会把别的项目的选区附进来），而是静默禁用。
+  {
+    const foreignFixture = await startWsFixture('tok-foreign')
+    const dir = join(tmpRoot, 'no-match')
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(join(dir, `${foreignFixture.port}.lock`), JSON.stringify({
+      port: foreignFixture.port,
+      token: 'tok-foreign',
+      workspaceFolders: ['/somewhere-else'],
+      pid: process.pid,
+    }))
+    const channel = new mod.IdeChannel()
+    let threw: unknown
+    try {
+      await channel.start({}, dir, '/repo/a')
+    } catch (error) {
+      threw = error
+    }
+    check('无匹配：start 不抛错', threw === undefined)
+    check('无匹配：connected=false（不连别的 workspace 的 IDE）', channel.connected === false)
+    let foreignHello = false
+    await Promise.race([foreignFixture.helloPromise.then(() => { foreignHello = true }), sleep(400)])
+    check('无匹配：从未向外国 lock 发起 hello', foreignHello === false)
+    channel.stop()
+    foreignFixture.close()
+  }
 
   // ── 7. loopback 对连 · lock 发现路径（端到端集成 pickLockCandidates）────────
   const lockFixture = await startWsFixture('tok-lock')
@@ -400,6 +526,32 @@ async function main(): Promise<void> {
     check('loopback·lock 发现：selection_changed 到达 listener',
       got && seen[0]?.path === 'src/a.ts' && seen[0]?.startLine === 2 && seen[0]?.endLine === 4)
     channel.stop()
+
+    // ── 7b. rebind：cwd 变更后真正重绑 IDE（维护者复审 #3）─────────────────
+    // 会话 cwd 从 /repo/a 切到 /repo/b：旧连接（fixture A）必须被丢弃，
+    // 重新按新 cwd 发现并连上 fixture B —— 而不是保留 A 的旧链路。
+    const fixtureA = await startWsFixture('tok-a', ['/repo/a'])
+    const fixtureB = await startWsFixture('tok-b', ['/repo/b'])
+    const rebindDir = join(tmpRoot, 'rebind')
+    mkdirSync(rebindDir, { recursive: true })
+    writeFileSync(join(rebindDir, `${fixtureA.port}.lock`),
+      JSON.stringify({ port: fixtureA.port, token: 'tok-a', workspaceFolders: ['/repo/a'], pid: process.pid }))
+    writeFileSync(join(rebindDir, `${fixtureB.port}.lock`),
+      JSON.stringify({ port: fixtureB.port, token: 'tok-b', workspaceFolders: ['/repo/b'], pid: process.pid }))
+    const rebindCh = new mod.IdeChannel()
+    await rebindCh.start({}, rebindDir, '/repo/a')
+    check('rebind：初始按 /repo/a 连上 fixture A',
+      rebindCh.connected && (await fixtureA.helloPromise).token === 'tok-a')
+    check('rebind：A 的 workspaceFolders 来自 ACK',
+      JSON.stringify(rebindCh.workspaceFolders) === '["/repo/a"]')
+    await rebindCh.rebind('/repo/b')
+    check('rebind：rebind(/repo/b) 后连上 fixture B',
+      rebindCh.connected && (await fixtureB.helloPromise).token === 'tok-b')
+    check('rebind：重绑后 workspaceFolders 换成 B 的',
+      JSON.stringify(rebindCh.workspaceFolders) === '["/repo/b"]')
+    rebindCh.stop()
+    fixtureA.close()
+    fixtureB.close()
   }
   lockFixture.close()
 
@@ -479,6 +631,99 @@ async function main(): Promise<void> {
       capped !== undefined
         && capped.text.includes('[… truncated]')
         && capped.text.length < huge.length + 400)
+    const { MENTION_MAX_FILE_CHARS } = await import('../src/dsh-adapter/channel/mentions.js') as {
+      MENTION_MAX_FILE_CHARS: number
+    }
+    check('selectionBlock: 截断后 lines = 模型实收行数（维护者复审 #3，不再报截断前总数）',
+      capped !== undefined
+        && capped.lines === huge.slice(0, MENTION_MAX_FILE_CHARS).split('\n').length
+        && capped.lines < huge.split('\n').length - 1)
+
+    // ── 8b. attachIdeSelection：v2 text 优先、不读盘；v1 才走磁盘 ──────────
+    type FsLike = { resolve(p: string): Promise<string>; stat(p: string): Promise<{ type: string }>; readText(p: string): Promise<string> }
+    const attach = (selectionMod as {
+      attachIdeSelection: (
+        blocks: Array<{ type: string; text: string }>,
+        cwd: string,
+        selection: { path: string; startLine: number; endLine: number; isEmpty: boolean; text?: string },
+        fs: FsLike | undefined,
+      ) => Promise<{ lines: number; path: string } | undefined>
+    }).attachIdeSelection
+    {
+      let fsTouched = false
+      const boobyFs: FsLike = {
+        resolve: async () => { fsTouched = true; throw new Error('fs must not be touched') },
+        stat: async () => { fsTouched = true; throw new Error('fs must not be touched') },
+        readText: async () => { fsTouched = true; throw new Error('fs must not be touched') },
+      }
+      const blocks: Array<{ type: string; text: string }> = []
+      const attached = await attach(
+        blocks,
+        '/repo',
+        { path: 'src/unsaved.ts', startLine: 0, endLine: 1, isEmpty: false, text: 'editor view\nwith unsaved edits' },
+        boobyFs,
+      )
+      check('attach·v2：编辑器 text 原样附加且完全不触碰文件系统',
+        attached !== undefined && attached.lines === 2 && attached.path === 'src/unsaved.ts'
+        && fsTouched === false
+        && blocks[0]?.text === '<attached-file path="src/unsaved.ts" selection>\neditor view\nwith unsaved edits\n</attached-file>')
+    }
+    {
+      const calls: string[] = []
+      const diskFs: FsLike = {
+        resolve: async p => { calls.push(`resolve:${p}`); return p },
+        stat: async p => { calls.push(`stat:${p}`); return { type: 'file' } },
+        readText: async p => { calls.push(`read:${p}`); return 'disk line1\ndisk line2' },
+      }
+      const blocks: Array<{ type: string; text: string }> = []
+      const attached = await attach(
+        blocks,
+        '/repo',
+        { path: 'src/legacy.ts', startLine: 0, endLine: 1, isEmpty: false },
+        diskFs,
+      )
+      check('attach·v1：无 text 时回退磁盘读取（相对路径按 cwd 解析）',
+        attached !== undefined && attached.lines === 2
+        && calls.some(c => c === `resolve:${join('/repo', 'src/legacy.ts')}`)
+        && blocks[0]?.text.includes('disk line1'))
+      const skipped = await attach([], '/repo', undefined, diskFs)
+      check('attach：无选区/空选区 → undefined 且不读盘', skipped === undefined && calls.length === 3)
+    }
+
+    // ── 8c. replaySelectionAttachment：指示行从持久化事件回扫重建 ──────────
+    const replay = (selectionMod as {
+      replaySelectionAttachment: (
+        content: ReadonlyArray<unknown> | undefined,
+      ) => { lines: number; path: string } | undefined
+    }).replaySelectionAttachment
+    check('replay：普通块 → {lines, path} 与提交时记忆一致',
+      (() => {
+        const r = replay([{ type: 'text', text: normal?.text ?? '' }])
+        return r !== undefined && r.lines === normal?.lines && r.path === 'src/my file.ts'
+      })())
+    check('replay：截断块的 lines 与截断后计数一致（排除省略标记行）',
+      (() => {
+        const r = replay([{ type: 'text', text: capped?.text ?? '' }])
+        return r !== undefined && r.lines === capped?.lines && r.path === 'huge.ts'
+      })())
+    check('replay：转义路径还原成原始字符（&amp; 等逆向）',
+      (() => {
+        const r = replay([{ type: 'text', text: evil?.text ?? '' }])
+        return r !== undefined && r.path === 'a&b"c<d>e.ts' && r.lines === 1
+      })())
+    check('replay：普通用户文本块（非选区）→ undefined',
+      replay([{ type: 'text', text: 'just a question' }]) === undefined)
+    check('replay：无选区块的多块内容 → undefined',
+      replay([{ type: 'text', text: 'q' }, { type: 'image', source: '' } as unknown]) === undefined)
+    check('replay：undefined 内容 → undefined', replay(undefined) === undefined)
+    check('replay：选区块排在后面的内容也能命中',
+      (() => {
+        const r = replay([
+          { type: 'text', text: 'why is this wrong?' },
+          { type: 'text', text: normal?.text ?? '' },
+        ])
+        return r !== undefined && r.lines === 3 && r.path === 'src/my file.ts'
+      })())
   }
 
   // ── 8.4. POSIX 根归一化（coderabbit review C-1）──

@@ -3,6 +3,7 @@ import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import type { ContentBlock, StreamChunk } from '@deepseek-ai/dsh-llm'
 import type { ChannelState, ChannelGoal, ChatRow, ToolCallView, ToolResultView, ToolsRegistryLike } from './types.js'
 import type { SelectionAttachment } from '../../adapter/ports/channel-view.js'
+import { replaySelectionAttachment } from './ide-selection.js'
 import type { InputConvergence } from './input-actions.js'
 import type { BackgroundJobStore } from '../jobs.js'
 import type { TuiRendererHost } from '../renderers.js'
@@ -549,7 +550,14 @@ export function createChannelProjection(state: ProjectionState, deps: Projection
         if (text || images.length > 0) {
           // IDE selection indicator: the delivery path remembered what this
           // message attached; the durable event carries the same message id.
+          // On replay (session resumed in a NEW process) the in-memory map
+          // starts empty, so the indicator falls back to the durable content
+          // itself — the `<attached-file … selection>` block IS part of the
+          // persisted event, and the session log is the source of truth
+          // (maintainer review round 3: the indicator used to vanish after a
+          // restart because nothing re-derived it from the event).
           const selectionAttached = deps.selectionAttached(event.data.id)
+            ?? replaySelectionAttachment(event.data.content)
           appendRow({
             id: deps.rowIds.value,
             kind: 'user',
