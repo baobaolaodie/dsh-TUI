@@ -602,12 +602,15 @@ export function PromptInput({
     draftCache.current = null
     if (!isUsableDraftSnapshot(snapshot, String(channel.agentId), resolveBindingGeneration(channel))) return
     const text = snapshot.value
-    // Carried edit state, restored ahead of the text so the caret about to be
-    // put back can never drag the fold block around: the chip, the fullscreen
-    // editor and the vim mode/submode come back with the draft — and they come
-    // back even with NO text, because they are modes rather than content. The
-    // transient state around them — editor scroll, vim undo stack, selection —
-    // does not.
+    // Carried edit state, restored ahead of the text: the chip, the
+    // fullscreen editor and the vim mode/submode come back with the draft —
+    // and they come back even with NO text, because they are modes rather
+    // than content. Fold ranges are safe by the CAPTURE invariant, not by
+    // restore order: a snapshot's block, when set, always sits inside the
+    // snapshot's own text (setInput keeps or drops it atomically), and at
+    // mount the caret is 0 so updateFoldBlock's caret-drag clamp cannot fire
+    // here. The transient state around them — editor scroll, vim undo stack,
+    // selection — does not come back.
     updateFoldBlock(snapshot.foldBlock)
     expandedRef.current = snapshot.expanded
     setExpanded(snapshot.expanded)

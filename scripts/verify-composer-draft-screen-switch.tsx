@@ -198,6 +198,8 @@ function makeChannel() {
      *  whenever the capability map is cleared (`composer-images.ts:131-155`). */
     stagedImageEpoch: 0,
     staged: new Map<string, StubStagedImage>(),
+    /** Stage ids the channel discarded (Ctrl+C revoke / Chat unmount release). */
+    discarded: [] as string[],
     nextStage: 1,
     submitted: [] as Array<{ text: string; images: readonly unknown[] }>,
     clearCalls: 0,
@@ -278,6 +280,7 @@ function makeChannel() {
     stagedImage: (stageId: string) => state.staged.get(stageId),
     hasStagedImage: (stageId: string) => state.staged.has(stageId),
     discardStagedImage: (stageId: string) => {
+      state.discarded.push(stageId)
       state.staged.delete(stageId)
     },
     stagedImageLimits: () => ({ maxImageBytes: 1_000_000, maxImagesPerMessage: 8 }),
@@ -360,7 +363,20 @@ async function mountChat(): Promise<Harness> {
       patchConsole: false,
     },
   )
-  return { term, stdin, channel, questions, unmount: () => instance.unmount() }
+  // Idempotent: the unmount-release phase unmounts mid-scenario and the
+  // finally block unmounts again — a second call must be a no-op.
+  let unmounted = false
+  return {
+    term,
+    stdin,
+    channel,
+    questions,
+    unmount: () => {
+      if (unmounted) return
+      unmounted = true
+      instance.unmount()
+    },
+  }
 }
 
 const screen = (app: Harness): string[] => viewportLines(app.term, ROWS)
@@ -673,6 +689,37 @@ async function scenarioEditState(): Promise<string> {
     )
     assertEqual(scenario, 'submission carried exactly one staged image', 1, submission.images.length)
     phases.push('submit-binding')
+
+    // ── Phase D: Chat unmount releases the snapshot-owned staged image ────
+    // While a draft waits in the slot for the composer to remount, the
+    // snapshot is the only owner of its staged capabilities. If Chat itself
+    // goes away (leaving the TUI from a full-screen view), nothing would
+    // ever restore or discard them — the unmount effect must release them
+    // (hasStagedImage guard, idempotent) instead of leaving them for the
+    // session's 128-entry FIFO to evict.
+    app.stdin.write('release probe ')
+    await waitFor(scenario, 'phase D head text', () => composerHas(app, 'release probe'))
+    pasteText(app, pastedImagePath)
+    await waitFor(scenario, 'phase D staged image token', () => composerHas(app, STAGED_IMAGE_TOKEN), 8000)
+    const stageIdD = [...app.channel.state.staged.keys()].at(-1)!
+    assertTrue(scenario, 'phase D capability alive before parking', app.channel.hasStagedImage(stageIdD))
+    app.stdin.write(CTRL_A)
+    await waitFor(scenario, 'dashboard to park the composer', () => dashboardVisible(app), 8000)
+    assertTrue(scenario, 'composer unmounted behind the dashboard', !composerMounted(app))
+    app.unmount()
+    assertEqual(
+      scenario,
+      'Chat unmount releases the snapshot-owned staged image',
+      false,
+      app.channel.hasStagedImage(stageIdD),
+    )
+    assertEqual(
+      scenario,
+      'release recorded for the discarded stage id',
+      true,
+      app.channel.state.discarded.includes(stageIdD),
+    )
+    phases.push('unmount-release')
 
     summary = `\nPASS  ${scenario}  phases=${phases.length}  [${phases.join('; ')}]`
   } finally {
