@@ -264,8 +264,10 @@ const GROUPS = {
     ["repro-drag-select-streaming", ['node', '--import', 'tsx/esm', 'scripts/repro-drag-select-streaming.tsx']],
 // 草稿编辑态跨整屏往返回归（#846 增量，PR #942）：真实 Chat 往返——
 // 折叠块/全屏编辑器/vim 模式与 insert-normal 子模式随快照往返、空输入
-// 框保留模式态、staged 图片绑定可提交。文本/光标/归属基础往返由本组
-// 的 verify-composer-draft-handoff 覆盖，完整 8 场景矩阵见 PR #942 历史。
+// 框保留模式态、Chat 卸载释放快照独占的 staged 图片、staged 绑定可提交。
+// 文本/光标/归属基础往返在 session-workspace 组的
+// verify-composer-draft-handoff；在途 staging 围栏在 verify:build 链的
+// verify-image-preview。完整 8 场景矩阵见 PR #942 历史。
     ["verify-composer-draft-screen-switch", ['node', '--import', 'tsx/esm', 'scripts/verify-composer-draft-screen-switch.tsx']],
   ],
   'session-workspace': [

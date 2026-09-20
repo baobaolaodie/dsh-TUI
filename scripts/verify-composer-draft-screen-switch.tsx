@@ -3,8 +3,10 @@
  * Regression for the composer-draft EDIT STATE (#846 follow-up, PR #942):
  * the draft snapshot's carried modes — fold block, fullscreen editor, vim
  * mode/submode — must survive a full-screen round trip, including on an
- * EMPTY composer (modes are user choices, not content), and a staged
- * `[Image #N]` binding must stay committable after the trip.
+ * EMPTY composer (modes are user choices, not content), a staged
+ * `[Image #N]` binding must stay committable after the trip, and Chat's own
+ * unmount must release the staged capabilities only the waiting snapshot
+ * still owns.
  *
  * Drives the REAL `Chat` + `PromptInput` through fake stdin and a headless
  * xterm (same harness as the investigation driver
@@ -14,10 +16,12 @@
  *
  * Maintainer trim note: the PR originally shipped an 8-scenario entry matrix
  * (ctrl-a/ctrl-t/no-draft/routed-screens/intentional-clear/session-switch/
- * inflight-stage). Text/caret/empty/ownership round trips are already pinned
- * by `verify-composer-draft-handoff` in this group, so this file keeps only
- * `edit-state` — the coverage unique to the snapshot's new fields. The full
- * matrix lives in the PR's review history for anyone who needs to re-run it.
+ * inflight-stage). Text/caret/empty/ownership round trips are pinned by
+ * `verify-composer-draft-handoff` (session-workspace group), the in-flight
+ * staging fence by `verify-image-preview` (verify:build chain), so this file
+ * keeps only `edit-state` — the coverage unique to the snapshot's new fields
+ * plus the Chat unmount release. The full matrix lives in the PR's review
+ * history for anyone who needs to re-run it.
  *
  * Run from the checkout root:
  *   node --import tsx/esm scripts/verify-composer-draft-screen-switch.tsx
@@ -706,6 +710,14 @@ async function scenarioEditState(): Promise<string> {
     app.stdin.write(CTRL_A)
     await waitFor(scenario, 'dashboard to park the composer', () => dashboardVisible(app), 8000)
     assertTrue(scenario, 'composer unmounted behind the dashboard', !composerMounted(app))
+    // Attribution lock (CodeRabbit): while parked, the capability is still
+    // held and nothing has released it yet — so the release observed after
+    // unmount() can only come from Chat's own teardown effect.
+    assertTrue(
+      scenario,
+      'phase D capability alive and unreleased while parked',
+      app.channel.hasStagedImage(stageIdD) && !app.channel.state.discarded.includes(stageIdD),
+    )
     app.unmount()
     assertEqual(
       scenario,
