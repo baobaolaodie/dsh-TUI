@@ -85,6 +85,10 @@ const GROUPS = {
 // /settings 设置屏回归（issue #165）：开屏、staged 编辑、revision 栅栏
 // 保存、密钥走 credentials、Esc 返回会话。
     ["repro-settings", ['node', '--import', 'tsx/esm', 'scripts/repro-settings.tsx']],
+// /settings 长页滚动回归：focus-follow 窗口只钉焦点行会裁掉不可聚焦的
+// 卡片边框行——下滚到底丢 ╰──╯、上滚到顶丢 ╭─ 标题；窗口必须贴住列表
+// 物理边界（根页/group 子页/极小视口下焦点永不被钉边挤出）。
+    ["verify-settings-scroll", ['node', '--import', 'tsx/esm', 'scripts/verify-settings-scroll.tsx']],
     ["repro-inline-scrollback", ['node', '--import', 'tsx/esm', 'scripts/repro-inline-scrollback.tsx']],
     ["repro-inline-thirdparty", ['node', '--import', 'tsx/esm', 'scripts/repro-inline-thirdparty.tsx']],
 // 安全回归：OSC 出口控制字符剥离 + 超链接 scheme 门禁（安全审查
@@ -258,6 +262,13 @@ const GROUPS = {
 // 转录拉进不可选取区。真实 Chat 树 + SGR 拖选注入，静息/上滚阅读+
 // 流式并发/流式结束后三场景断言 OSC 52 携带完整选中文本。
     ["repro-drag-select-streaming", ['node', '--import', 'tsx/esm', 'scripts/repro-drag-select-streaming.tsx']],
+// 草稿编辑态跨整屏往返回归（#846 增量，PR #942）：真实 Chat 往返——
+// 折叠块/全屏编辑器/vim 模式与 insert-normal 子模式随快照往返、空输入
+// 框保留模式态、Chat 卸载释放快照独占的 staged 图片、staged 绑定可提交。
+// 文本/光标/归属基础往返在 session-workspace 组的
+// verify-composer-draft-handoff；在途 staging 围栏在 verify:build 链的
+// verify-image-preview。完整 8 场景矩阵见 PR #942 历史。
+    ["verify-composer-draft-screen-switch", ['node', '--import', 'tsx/esm', 'scripts/verify-composer-draft-screen-switch.tsx']],
   ],
   'session-workspace': [
 // 审批服务配置回归（issue #49 尾巴）：裸组合 cordis.yml 必须挂载
