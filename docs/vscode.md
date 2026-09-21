@@ -13,9 +13,8 @@ dsh-TUI 是终端程序：它把 ANSI 写进 PTY、从 PTY 读按键，因此任
 > 版本说明：本页中的 `dsh-tui` 指本仓库（TUI 插件）；`dsh-tui-vscode` 指
 > companion 扩展。两者版本独立、各自发布；扩展的完整说明见其仓库
 > [baobaolaodie/dsh-tui-vscode](https://github.com/baobaolaodie/dsh-tui-vscode)
-> 的 README。**选区通道要求扩展支持协议 v2**（dsh-tui-vscode 含
-> `feat/mentions-ide-adapter` + 协议 v2 改动的版本； Marketplace 上的
-> 0.5.1 尚未包含——旧扩展下该功能静默不启用，其余功能不受影响）。
+> 的 README。**选区通道要求扩展支持协议 v2**（**dsh-tui-vscode ≥ 0.7.0**）——
+> 更旧的扩展下该功能静默不启用，其余功能不受影响。
 
 ## 方式一：companion 扩展 dsh-tui-vscode（推荐）
 

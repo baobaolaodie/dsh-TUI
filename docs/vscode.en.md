@@ -19,10 +19,9 @@ integrated terminal** (xterm.js). This page covers two ways to use it:
 > version and release independently. See the
 > [baobaolaodie/dsh-tui-vscode](https://github.com/baobaolaodie/dsh-tui-vscode)
 > README for the extension's full documentation. **The selection channel
-> requires an extension that speaks protocol v2** (a dsh-tui-vscode build
-> including `feat/mentions-ide-adapter` plus the protocol-v2 changes; the
-> Marketplace 0.5.1 does not have it yet — with an older extension the
-> feature stays silently disabled and everything else is unaffected).
+> requires an extension that speaks protocol v2** (**dsh-tui-vscode >= 0.7.0**);
+> with an older extension the feature stays silently disabled and everything
+> else is unaffected.
 
 ## Option 1: the dsh-tui-vscode companion extension (recommended)
 
