@@ -53,6 +53,9 @@ Keys and commands: [Interaction and commands](docs/interaction.en.md). Everythin
 
 ## Featured & Listed
 
+Among the community plugins recommended by the **official lead of DeepSeek
+Harness**, dsh-TUI is the first.
+
 Featured by the **DeepSeek Harness official WeChat account**, listed in the
 [dshfind](https://dshfind.com/en/plugins/ccch1mneyyy/dsh-TUI) plugin
 directory, and ranked **#7 on [GitHub Trending](https://trendshift.io/repositories/146168)
@@ -168,7 +171,7 @@ Full guide: [Session migration](docs/migrate.en.md).
 
 ## Keybindings & Mouse
 
-`Enter` send · `Tab` complete · `Ctrl+Enter` interrupt and send · `Alt+Up` recall the last message · `Esc` dismiss, double-`Esc` rewinds · `Ctrl+O` details · `Ctrl+R` history · `Ctrl+V` paste · `Ctrl+Shift+E` fullscreen draft editor · `?` shortcuts · `←` background the session.
+`Enter` send · `Tab` complete · `Ctrl+Enter` interrupt and send · `Alt+Up` recall the last message · `Esc` dismiss, double-`Esc` rewinds · `Ctrl+O` details · `Ctrl+R` history (`↑`/`↓` and `Ctrl+R` are scoped to the current project) · `Ctrl+V` paste · `Ctrl+Shift+E` fullscreen draft editor · `?` shortcuts · `←` background the session.
 
 While the model is working: `Enter` steers, `Tab` queues a follow-up, `Ctrl+Enter` interrupts and sends.
 
