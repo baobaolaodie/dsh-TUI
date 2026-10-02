@@ -48,10 +48,8 @@ export function createChannelProjection(state: ProjectionState, deps: Projection
   let streaming: ChatRow | undefined
   /** The in-progress reasoning row; `undefined` when no reasoning is streaming. */
   let reasoning: ChatRow | undefined
-  /** Reasoning rows sealed by an assistant/message this turn. They stay
-   *  `streaming: true` — expanded in the transcript — until turn/end folds
-   *  them (WebUI AssistantMarkdown keepOpen parity: thinking holds open
-   *  through the whole in-flight turn, tool-call steps included). */
+  /** Reasoning rows sealed this turn. Full mode keeps them expanded until
+   *  turn/end without leaving their streaming spinner active. */
   const sealedReasoning: ChatRow[] = []
   /** Wall-clock start of the current reasoning row (durationMs on settle). */
   let reasoningStart = 0
@@ -261,6 +259,7 @@ export function createChannelProjection(state: ProjectionState, deps: Projection
       ) {
         reasoning = lastReasoningRow.row
         reasoning.streaming = true
+        reasoning.thinkingOpen = false
         touchRow(reasoning)
         const sealedIdx = sealedReasoning.indexOf(reasoning)
         if (sealedIdx !== -1) sealedReasoning.splice(sealedIdx, 1)
@@ -280,7 +279,7 @@ export function createChannelProjection(state: ProjectionState, deps: Projection
     return reasoning
   }
 
-  /** Fold the live reasoning preview the moment the model moves PAST
+  /** Settle live reasoning the moment the model moves PAST
    *  thinking — the answer's first text token or a tool call — not at
    *  `assistant/message` (end of step). A long reply pushes the thinking
    *  block into terminal scrollback long before the message seals, and
@@ -288,13 +287,14 @@ export function createChannelProjection(state: ProjectionState, deps: Projection
    *  so a late fold leaves a stale unfolded preview frozen above the
    *  window — the user scrolls up and the thinking looks "not folded".
    *  Folding while the block still sits in the live window keeps the
-   *  shrink inside the diff engine's reachable region. Preview mode only
-   *  (`full` holds every block open until turn settle by design). */
-  const foldLiveReasoning = (where: string): void => {
-    if (reasoning === undefined || state.thinkingFold !== 'preview') return
+   *  shrink inside the diff engine's reachable region. Full mode keeps the
+   *  settled block open separately, so its spinner can stop immediately. */
+  const settleLiveReasoning = (where: string): void => {
+    if (reasoning === undefined) return
     const duration = Math.max(0, Date.now() - reasoningStart)
     reasoning.durationMs = duration
     reasoning.streaming = false
+    reasoning.thinkingOpen = state.thinkingFold === 'full'
     touchRow(reasoning)
     sealedReasoning.push(reasoning)
     reasoning = undefined
@@ -305,10 +305,11 @@ export function createChannelProjection(state: ProjectionState, deps: Projection
     if (streaming !== undefined) { streaming.streaming = false; touchRow(streaming) }
     streaming = undefined
     const folded = sealedReasoning.length + (reasoning !== undefined ? 1 : 0)
-    for (const row of sealedReasoning) { row.streaming = false; touchRow(row) }
+    for (const row of sealedReasoning) { row.streaming = false; row.thinkingOpen = false; touchRow(row) }
     sealedReasoning.length = 0
     if (reasoning !== undefined) {
       reasoning.streaming = false
+      reasoning.thinkingOpen = false
       reasoning.durationMs = Math.max(0, Date.now() - reasoningStart)
       touchRow(reasoning)
     }
@@ -458,9 +459,9 @@ export function createChannelProjection(state: ProjectionState, deps: Projection
     if (chunk.type === 'text-delta') {
       if (chunk.text) {
         // Fold the thinking preview while it is still in the live
-        // window (see foldLiveReasoning) — before this text grows the
+        // window (see settleLiveReasoning) — before this text grows the
         // transcript and pushes the block into scrollback.
-        foldLiveReasoning('first text token')
+        settleLiveReasoning('first text token')
         const key = stepKey(turn, step)
         const row = assistantRowsByStep.get(key) ?? ensureStreaming(seq)
         assistantRowsByStep.set(key, row)
@@ -549,30 +550,28 @@ export function createChannelProjection(state: ProjectionState, deps: Projection
             appendRow({ id: deps.rowIds.value, kind: 'compact', text: summary })
             deps.rowIds.value += 1
           }
-          // The surface replace drops the whole pre-compact history: reset
-          // the context accounting NOW so the status bar (ctx bar, tokens,
-          // context-low warning) drops immediately instead of waiting for
-          // the next request's usage event.
-          const removed =
-            state.contextSegments.prompt +
-            state.contextSegments.assistant +
-            state.contextSegments.thinking +
-            state.contextSegments.tools
-          const summaryTokens = estimateTokens(summary)
-          state.tokens.input = Math.max(0, state.tokens.input - removed) + summaryTokens
+          // The checkpoint replaces the whole pre-compact surface. Occupancy
+          // needs no rewriting here: the official token meter folds this same
+          // event and reprices the surface by its logged shadow price, so the
+          // channel's `contextOccupancy` drops the moment the checkpoint lands
+          // (the projection's change feed republishes the footer). The old
+          // chars/4 rewrite below was a worse estimate of a number the host
+          // already knows: it ignored the retained tail the official
+          // `compaction-basic` keeps (default `retainRatio` 0.16), ignored the
+          // tool catalog, and could not see the summary's real size.
+          //
+          // The SEGMENTED bar keeps its own heuristic composition (system +
+          // the summary prompt): it describes what the surface is made of,
+          // never the occupancy total.
           state.contextSegments = {
             system: state.contextSegments.system,
-            prompt: summaryTokens,
+            prompt: estimateTokens(summary),
             assistant: 0,
             thinking: 0,
             tools: 0,
           }
-          state.lastUsage = {
-            input: state.contextSegments.system + summaryTokens,
-            output: 0,
-            cacheRead: 0,
-            cacheWrite: 0,
-          }
+          // The latch must release: compaction is the remediation for a low
+          // context, so the warning has to be able to fire again afterwards.
           deps.resetContextWarning()
           break
         }
@@ -709,14 +708,15 @@ export function createChannelProjection(state: ProjectionState, deps: Projection
         streaming = undefined
         if (reasoning !== undefined) {
           // Backstop fold: reasoning whose step ended with no text token
-          // and no tool call (foldLiveReasoning handles those earlier —
+          // and no tool call (settleLiveReasoning handles those earlier —
           // while the block is still in the repaintable live window;
           // here a long reply may already have pushed it into scrollback,
           // where the shrink cannot be repainted). `full` mode
           // (/settings opt-in) keeps the block expanded until turn settle
           // — settleStreaming folds the sealed rows then.
           reasoning.durationMs = Math.max(0, Date.now() - reasoningStart)
-          if (state.thinkingFold === 'preview') reasoning.streaming = false
+          reasoning.streaming = false
+          reasoning.thinkingOpen = state.thinkingFold === 'full'
           touchRow(reasoning)
           sealedReasoning.push(reasoning)
           logForDebugging(`thinking: step sealed (${reasoning.durationMs}ms), expanded until turn/end`)
@@ -840,8 +840,8 @@ export function createChannelProjection(state: ProjectionState, deps: Projection
         }
         // Reasoning that led to a tool call is done thinking — fold the
         // preview now, before the tool card grows the transcript past it
-        // (see foldLiveReasoning).
-        foldLiveReasoning('tool call')
+        // (see settleLiveReasoning).
+        settleLiveReasoning('tool call')
         const card: ChatRow = {
           id: deps.rowIds.value,
           kind: 'tool',
@@ -985,11 +985,15 @@ export function createChannelProjection(state: ProjectionState, deps: Projection
           tpsTurnDecodeTokens = 0
           tpsTurnSampled = false
         }
+        // Occupancy is evaluated on EVERY turn end, not only a completed one:
+        // the request that overflowed the window is exactly the one whose turn
+        // ends as an error (it writes no successful usage sample at all), and
+        // an aborted turn has still grown the surface. Replay drains a resumed
+        // session's history through the projector; its totals describe the
+        // past, not a live context-low state.
+        if (!replaying) deps.checkContextWarning()
         const reason = event.data.reason
         if (reason.kind === 'completed') {
-          // Replay drains a resumed session's history through the projector;
-          // its totals describe the past, not a live context-low state.
-          if (!replaying) deps.checkContextWarning()
           break
         }
         if (reason.kind === 'aborted' || reason.kind === 'interrupted') {
