@@ -58,8 +58,8 @@ export const SETTING_DEFINITIONS = {
     label: 'Companion skin',
     descriptions: { zh: '宠物皮肤' },
     group: 'splash',
-    hint: 'Look of the companion panel pet (enable the panel by adding \'companion\' to sidePanel.panels): deepy (default, the deepy whale kit), whale (the same layered pixel whale as the splash) or whaleGirl (the user-provided whale-girl sticker pack, 22 animations). Applies immediately.',
-    hintDescriptions: { zh: '伙伴面板里宠物的外形（面板需在 sidePanel.panels 里加入 companion 启用）：deepy（默认，deepy 小鲸鱼素材包）、whale（与开屏同款的分层像素鲸鱼）或 whaleGirl（用户提供的鲸娘表情包，22 个动画）。立即生效。' },
+    hint: 'Also picks the splash (header) art: deepy/whaleGirl replace the pixel whale and the maid portrait, whale keeps the original header. Look of the companion panel pet (enable the panel by adding \'companion\' to sidePanel.panels): deepy (default, the deepy whale kit), whale (the same layered pixel whale as the splash) or whaleGirl (the user-provided whale-girl sticker pack, 22 animations). Applies immediately.',
+    hintDescriptions: { zh: '同时决定开屏（标题）艺术槽：deepy/whaleGirl 会取代像素鲸鱼与女仆娘立绘，whale 保持原路径。伙伴面板里宠物的外形（面板需在 sidePanel.panels 里加入 companion 启用）：deepy（默认，deepy 小鲸鱼素材包）、whale（与开屏同款的分层像素鲸鱼）或 whaleGirl（用户提供的鲸娘表情包，22 个动画）。立即生效。' },
     kind: 'select',
     options: [
       { value: 'deepy', label: 'Deepy', descriptions: { zh: 'Deepy 小鲸鱼' } },
@@ -500,8 +500,8 @@ export const SETTING_DEFINITIONS = {
     label: 'Maid portrait',
     descriptions: { zh: '女仆娘立绘' },
     group: 'splash',
-    hint: 'Swap the header splash\'s pixel whale for the author-designed maid portrait, rendered FIRST as a real raster through the terminal image protocols (Kitty/Sixel); terminals without graphics support fall back to the character-art maid.',
-    hintDescriptions: { zh: '把开屏头部的像素鲸鱼换成项目作者绘制的女仆娘立绘，最优先走终端图像协议（Kitty/Sixel）的真图渲染；终端不支持时回落到字符画版女仆娘。' },
+    hint: 'No effect while Companion skin is deepy or whaleGirl; set it to whale to use this. Swaps the header splash\'s pixel whale for the author-designed maid portrait, rendered FIRST as a real raster through the terminal image protocols (Kitty/Sixel); terminals without graphics support fall back to the character-art maid.',
+    hintDescriptions: { zh: '宠物皮肤为 deepy/whaleGirl 时不生效；设为 whale 才用立绘。生效后把开屏头部的像素鲸鱼换成项目作者绘制的女仆娘立绘，最优先走终端图像协议（Kitty/Sixel）的真图渲染；终端不支持时回落到字符画版女仆娘。' },
     kind: 'boolean',
   },
   'whaleIdle': {
