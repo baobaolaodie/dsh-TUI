@@ -4,6 +4,9 @@
  *   from a definition (settingField(key)), and every definition is used;
  * - the editable Config keys derived from the definitions are Config fields
  *   and still include every key of the hand-written list they replaced;
+ * - the two settings that decide the header splash art cross-reference each
+ *   other in their hints (`companion.skin` owns the slot, `whaleGirl` only
+ *   takes effect under it), so the precedence is readable from either row;
  * - scripts/gen-settings-json.mjs validates the definitions (both
  *   languages, option labels, sorted keys) against the compiled lib.
  * Run: node --import tsx/esm scripts/verify-settings-definitions.ts
@@ -73,6 +76,30 @@ assert.deepEqual(
   [],
   'every built-in setting names a group',
 )
+
+// The splash-art precedence is a contract between two settings: the companion
+// skin picks the slot, and the maid portrait only takes effect while the skin
+// is `whale`. Whoever reads either /settings row must find that rule in that
+// row's own hint, so both hints name the other side plus both values. Only
+// these stable substrings are asserted — the wording may be compressed again
+// for the hint budget, and no sentence length is frozen here (L-025).
+const assertHintCrossReference = (key: 'companion.skin' | 'whaleGirl', lang: 'en' | 'zh', topic: string, values: readonly string[]): void => {
+  const definition = SETTING_DEFINITIONS[key]
+  const hint = (lang === 'zh' ? definition.hintDescriptions?.zh : definition.hint) ?? ''
+  const label = lang === 'zh' ? `${key} hintDescriptions.zh` : `${key} hint`
+  assert.notEqual(hint, '', `${label} is present`)
+  assert.ok(hint.includes(topic), `${label} explains ${topic}: ${JSON.stringify(hint)}`)
+  for (const value of values) {
+    // The value must appear as a whole token: a bare `whale` must not be
+    // satisfied by the `whaleGirl` token sitting next to it. Split instead of
+    // building a regex, so a value can never be read as a pattern.
+    assert.ok(hint.split(/[^A-Za-z0-9_]+/).includes(value), `${label} names the value ${value}: ${JSON.stringify(hint)}`)
+  }
+}
+assertHintCrossReference('companion.skin', 'en', 'splash', ['whale', 'whaleGirl'])
+assertHintCrossReference('companion.skin', 'zh', '开屏', ['whale', 'whaleGirl'])
+assertHintCrossReference('whaleGirl', 'en', 'Companion skin', ['whale', 'deepy'])
+assertHintCrossReference('whaleGirl', 'zh', '宠物皮肤', ['whale', 'deepy'])
 
 const generated = spawnSync(process.execPath, [`${root}scripts/gen-settings-json.mjs`, '--check'], { encoding: 'utf8' })
 assert.equal(generated.status, 0, `settings.json generation fails:\n${generated.stderr}`)
