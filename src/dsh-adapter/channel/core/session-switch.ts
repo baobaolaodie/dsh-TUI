@@ -25,6 +25,7 @@ import type { AgentEvent } from '../../../agent/events.js'
 import { formatSessionRef } from '../../../agent/refs.js'
 import type { AgentSession } from '../../../agent/session.js'
 import { t } from '../../../i18n.js'
+import { WORKING_GATE_NOTICES } from '../../../commands.js'
 import { mountFailureText } from '../../../sessions/resumeFailure.js'
 import { releaseMount, reserveMount, reserveNewSession, type MountReservation } from '../../../sessionMounts.js'
 import { dispatchTuiDecision, dispatchTuiNotification, normalizeCancelDecision } from '../../extension-events.js'
@@ -233,7 +234,7 @@ export function createSessionSwitch(ctx: Context, deps: {
     const targetDisplayCwd = target?.displayCwd
     const current = (): boolean => deps.owner.current() && binding.isCurrent(adoption)
     if (state.working) {
-      notify(t('new-session-while-working'), { color: 'warning' })
+      notify(t(WORKING_GATE_NOTICES.new), { color: 'warning' })
       return false
     }
     if (!opener.available()) return false
@@ -318,7 +319,7 @@ export function createSessionSwitch(ctx: Context, deps: {
     const current = (): boolean => deps.owner.current() && binding.isCurrent(adoption)
     const state = deps.state()
     if (state.working) {
-      notify(t(kind === 'rewind' ? 'rewind-while-working' : 'resume-while-working'), { color: 'warning' })
+      notify(t(kind === 'rewind' ? WORKING_GATE_NOTICES.rewind : WORKING_GATE_NOTICES.resume), { color: 'warning' })
       return { ok: false, reason: 'working' }
     }
     if (parkedInputRefused(false)) return { ok: false, reason: 'cancelled' }

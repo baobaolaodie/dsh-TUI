@@ -88,6 +88,7 @@ const BOLD_GLYPHS: GlyphTable = {
   L: ['██····', '██····', '██····', '██····', '██▄▄▄▄'],
   U: ['██··██', '██··██', '██··██', '██··██', '·▀▄▄▀·'],
   O: ['·▄▀▀▄·', '██··██', '██··██', '██··██', '·▀▄▄▀·'],
+  X: ['██··██', '·████·', '··██··', '·████·', '██··██'],
 }
 const BOLD_FALLBACK: GlyphRows = ['▄▄▄▄▄▄', '██··██', '██··██', '██··██', '▀▀▀▀▀▀']
 
@@ -113,6 +114,7 @@ const CLASSIC_GLYPHS: GlyphTable = {
   L: ['█····', '█····', '█····', '█····', '█▄▄▄▄'],
   U: ['█···█', '█···█', '█···█', '█···█', '·▀▄▀·'],
   O: ['·▄▀▄·', '█···█', '█···█', '█···█', '·▀▄▀·'],
+  X: ['█···█', '·█·█·', '··█··', '·█·█·', '█···█'],
 }
 const CLASSIC_FALLBACK: GlyphRows = ['▄▄▄▄▄', '█···█', '█···█', '█···█', '▀▀▀▀▀']
 
@@ -137,6 +139,7 @@ const SLAB_GLYPHS: GlyphTable = {
   L: ['█····', '█····', '█····', '█····', '█████'],
   U: ['█···█', '█···█', '█···█', '█···█', '·███·'],
   O: ['·███·', '█···█', '█···█', '█···█', '·███·'],
+  X: ['█···█', '·█·█·', '··█··', '·█·█·', '█···█'],
 }
 const SLAB_FALLBACK: GlyphRows = ['▄▄▄▄▄', '█···█', '█···█', '█···█', '▀▀▀▀▀']
 
@@ -163,6 +166,7 @@ const SHADOW_GLYPHS: GlyphTable = {
   L: ['·██╗······', '·██║······', '·██║······', '·███████╗·', '·╚══════╝·'],
   U: ['██╗···██╗·', '██║···██║·', '██║···██║·', '╚██████╔╝·', '·╚═════╝··'],
   O: ['·██████╗··', '██╔═══██╗·', '██║···██║·', '╚██████╔╝·', '·╚═════╝··'],
+  X: ['██╗···██╗·', '╚██╗·██╔╝·', '·╚████╔╝··', '·██╔═██╗··', '██╔╝·╚██╗·'],
   I: ['···██╗····', '···██║····', '···██║····', '···██║····', '···╚═╝····'],
   M: ['███╗··███╗', '████╗████║', '██╔███╗██║', '██║·╚═╝██║', '╚═╝····╚═╝'],
   W: ['██╗····██╗', '██║····██║', '██║███╗██║', '╚███╔███╔╝', '·╚══╝╚══╝·'],
@@ -355,16 +359,29 @@ const font = (id: SplashFontId, face: FaceData): SplashFont => {
  * @param font - 基准字体。
  * @param top - 上排词。
  * @param bottom - 下排词。
- * @param options - `wide`：取中间档可行解（品牌词 CLAUDE/CODE 用——紧解挤、
- *   最宽解空旷，中间档舒展而不散；见 `solveTagline` 的 wide 注释）。
+ * @param options - `wide`：取中间档可行解（等宽契约的舒展档）；
+ *   `uniform`：两行同字距（品牌词用——等宽契约靠两行字距互补达成，
+ *   字数差大的词对间隙观感不一致；同字距后对齐由渲染层按形态处理）。
  * @returns 换词后的字体描述符。
  */
 export function withTagline(
   font: SplashFont,
   top: string,
   bottom: string,
-  options?: { readonly wide?: boolean },
+  options?: { readonly wide?: boolean; readonly uniform?: boolean },
 ): SplashFont {
+  if (options?.uniform === true) {
+    // 同字距档（品牌词用，用户点名「两行间隙一致」）：两行共用一个字距，
+    // 不再拉伸等宽。块宽以基准词对（字体表 DEEPSEEK/HARNESS 紧解的宽行）
+    // 为预算——品牌标题的占位与默认档一致，字距在预算内取最大（舒展）。
+    // 对齐交给渲染层：居中形态窄行补半差、钉左形态两行左缘对齐。
+    const budget = Math.max(paintedWidth(font, font.tagline.top, font.tagline.topKerning),
+      paintedWidth(font, font.tagline.bottom, font.tagline.bottomKerning))
+    const wider = paintedWidth(font, top, 1) >= paintedWidth(font, bottom, 1) ? top : bottom
+    let kerning = 1
+    while (kerning < MAX_KERNING && paintedWidth(font, wider, kerning + 1) <= budget) kerning += 1
+    return { ...font, tagline: { top, bottom, topKerning: kerning, bottomKerning: kerning, bottomIndent: 0 } }
+  }
   return { ...font, tagline: { top, bottom, ...solveTagline(font.glyphWidth, top, bottom, options?.wide === true ? 'wide' : 'tight') } }
 }
 

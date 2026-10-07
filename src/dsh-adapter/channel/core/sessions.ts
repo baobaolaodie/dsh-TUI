@@ -15,6 +15,7 @@ import type { SessionCatalog } from '../../../agent/backend.js'
 import { formatSessionRef } from '../../../agent/refs.js'
 import type { AgentSession } from '../../../agent/session.js'
 import { t, type I18nKey } from '../../../i18n.js'
+import { WORKING_GATE_NOTICES } from '../../../commands.js'
 import { occupancyOf, readSessionOwners } from '../../../sessionMounts.js'
 import type { ChannelActionDelegates } from '../action-readiness.js'
 import type { ChannelOwner } from '../owner.js'
@@ -130,7 +131,7 @@ export function createCoreSessionActions(deps: {
       try {
         await remove(sessionId, rowOf(sessionId)?.cwd)
       } catch (error) {
-        failed('session-delete-failed', error)
+        failed(deps.catalog?.deleteAction === 'archive' ? 'session-archive-failed' : 'session-delete-failed', error)
         return false
       }
       deps.prefs?.forget(sessionId)
@@ -159,7 +160,7 @@ export function createCoreSessionActions(deps: {
       const fork = caps().fork
       if (fork === undefined) { unavailable('fork'); return false }
       if (deps.state().working) {
-        notify(t('fork-while-working'), { color: 'warning' })
+        notify(t(WORKING_GATE_NOTICES.fork), { color: 'warning' })
         return false
       }
       let forked: { readonly sessionId: string }
@@ -190,7 +191,7 @@ export function createCoreSessionActions(deps: {
         return null
       }
       if (deps.state().working) {
-        notify(t('rewind-while-working'), { color: 'warning' })
+        notify(t(WORKING_GATE_NOTICES.rewind), { color: 'warning' })
         return null
       }
       const kind = mode === 'files' ? 'files' : mode === 'both' ? 'both' : 'conversation'

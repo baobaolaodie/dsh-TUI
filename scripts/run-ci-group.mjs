@@ -81,6 +81,16 @@ const GROUPS = {
 // 提问面板全应用布局回归：短/长高录、activity tick 差分、resize 风暴。
     ["verify-askpanel-layout", ['node', '--import', 'tsx/esm', 'scripts/verify-askpanel-layout.tsx']],
     ["repro-toolcards", ['node', '--import', 'tsx/esm', 'scripts/repro-toolcards.tsx']],
+// 运行中工具的实时输出（tool.output）：有界尾部（200 行 / 16 KiB、丢弃计数、代理对边界）、
+// 共享投影器（追加、未知/已落定/子代理/问卷调用忽略、结果到达即清除）、卡片（最新 5 行
+// dim、全屏 8 行、省略头、ANSI/回车进度/制表符清洗、按显示宽度截断 CJK 与超长行），
+// 以及真实 Chat 的 inline/fullscreen × 80/40 列端到端（卡片随尾部增高、不压下一行）。
+    ["verify-tool-live-output", ['node', '--import', 'tsx/esm', 'scripts/verify-tool-live-output.tsx']],
+// 带真实行号的 unified patch（ToolFileDiff.patch）：Codex 无文件头 hunk 与带头形状一致、
+// 多 hunk / 新增 / 删除 / 原文 add/delete / 计数不符（宽松回退）/ 不可读（原样行）、
+// 单文件统计行与多文件路径行（移动、新文件/已删除）；unified 卡（80/40 列、CJK、超长行、
+// 8 行折叠）与双栏（强制 split@80、auto@120）的逐栏行号；旧 old/new 分支不变。
+    ["verify-diff-patch", ['node', '--import', 'tsx/esm', 'scripts/verify-diff-patch.tsx']],
     ["repro-diff-split", ['node', '--import', 'tsx/esm', 'scripts/repro-diff-split.tsx']],
 // 代码块 tab 缩进背景回归（issue #606）：tab 展开须继承单元格样式，否则
 // 无背景的空格被 diff 跳过，在 tmux/Windows Terminal 深色底下显示为黑块。
@@ -616,6 +626,13 @@ const GROUPS = {
 // 工具卡完整度：非零退出码/信号行不被行预算折掉、折叠提示带被折字符数、verbose
 // 行窗口有界并注明、展开卡的截断说明、错误长文与输出共用行预算。
     ["verify-tool-card-completeness", ['node', '--import', 'tsx/esm', 'scripts/verify-tool-card-completeness.tsx']],
+// 解码吞吐（真 channel + 会话事件）：多步回合剔除工具间隙、字符估算按脚本
+// 类加权（CJK ~1.4 字符/token）、真实 usage 结算覆盖估算、回放不复活 tps。
+    ["verify-tps", ['node', 'scripts/verify-tps.mjs']],
+// 迟到 usage 回填（投影层直测）：codex 在回复结算后才计量——真实 output
+// tokens 原地替换该步的字符估算（live 读数与回合末采样都读真值）；同步
+// 第二次不再叠加、异步他步不污染。
+    ["verify-tps-backfill", ['node', '--import', 'tsx/esm', 'scripts/verify-tps-backfill.ts']],
 // 每回合用量：共享投影器把回合内各请求的 usage 求和成 turn-summary 行与底栏快照；
 // result 与 turn 不重复计、缓存缺失不当 0、中断/通知/压缩/回放、重试只计一次。
     ["verify-usage-turn-summary", ['node', '--import', 'tsx/esm', 'scripts/verify-usage-turn-summary.ts']],
@@ -662,6 +679,11 @@ const GROUPS = {
 // 崩溃诊断：serializeCrashDetail 逐层序列化 stack、cause 链、componentStack 与 digest；
 // crash.log 行格式；appendCrashLog 写失败不抛；plugin.ts 的崩溃分支确实接上了它。
     ["verify-crash-detail", ['node', '--import', 'tsx/esm', 'scripts/verify-crash-detail.ts']],
+// `/` 命令浮窗「影响当前对话」灰区回归（issue #1072）：回合运行中按对当前
+// 对话的影响分区（正常区在上、灰区沉底，不插标题行、不多占显示行），灰区整行
+// subtle 且不提亮查询命中，点击映射与命令索引一一对应，36 列不换行；浏览型
+// `/resume` 与门禁型 `/rewind` 同族不同区（只开界面的在上、会被拒的沉底）。
+    ["verify-command-hold-overlay", ['node', '--import', 'tsx/esm', 'scripts/verify-command-hold-overlay.tsx']],
   ],
   'channel-ui': [
 // L4 composition boundary plus report/metadata lifetime fences.
@@ -689,6 +711,12 @@ const GROUPS = {
 // channel 层分别用 DSH 会话夹具和 Claude 形会话夹具覆盖撤回、取消回执（确认/失败/
 // 未知）与回执在途时的门控。UI 键位在 verify-queue.mjs。
     ["verify-docked-queue", ['node', 'scripts/verify-docked-queue.mjs']],
+// 回合运行中的命令影响度真源表（issue #1072）：门禁提示与 `/` 浮窗灰区分区
+// 读同一张表——表里的命令名必须是真命令、提示 key 必须在字典里、会打断
+// 对话的名单与门禁名单不相交，且 src/ 里不得再有 `t('<门禁 key>')` 字面量
+// （门禁必须全部走表，提示与标注才不会漂移；新增门禁不得自带字面量 key）。
+// 浏览型命令（`/resume`）保留 key 但走 GRAY_ZONE_EXEMPT_COMMANDS 留在正常区。
+    ["verify-command-hold", ['node', '--import', 'tsx/esm', 'scripts/verify-command-hold.ts']],
     ['verify-shell-compat', ['node', 'scripts/verify-shell-compat.mjs']],
     ['verify-agent-lifecycle-compat', ['node', 'scripts/verify-agent-lifecycle-compat.mjs']],
     ['verify-bundled-presets', ['node', 'scripts/verify-bundled-presets.mjs']],
@@ -723,6 +751,11 @@ const GROUPS = {
 // 非负、代理对与 ANSI 转义的处理都在这里钉死。
     ["verify-cjk-token-estimate", ['node', '--import', 'tsx/esm', 'scripts/verify-cjk-token-estimate.ts']],
     ["verify-channel-goal-todo", ['node', '--import', 'tsx/esm', 'scripts/verify-channel-goal-todo.mjs']],
+// 目标预算与后端中立的 /goal（goals 能力）：语法（--budget 50k、控制词、无效预算）、
+// 「已用 12.3k / 50k tokens · 4m」中英文读数、能力快照（有能力才提供 /goal，无能力即
+// 不可用，DSH 保留注册表行）、投影保留 budget；真实 Chat 走核心通道端到端（调用能力、
+// 状态、无效行留在输入框、失败上报、面板显示预算）与页脚芯片。
+    ["verify-goal-budget", ['node', '--import', 'tsx/esm', 'scripts/verify-goal-budget.tsx']],
 // 投影基线：scripts/fixtures/dsh/ 的合成日志与流帧经 DSH 翻译器 + 共享投影器，
 // replay 与 live 两路都与 *.golden.json 逐字段比较；两路的差异必须登记原因。
     ["verify-projection-golden", ['node', '--import', 'tsx/esm', 'scripts/verify-projection-golden.ts']],
@@ -822,6 +855,10 @@ const GROUPS = {
 // 可选项跳过）→ accept/decline/cancel；URL 模式、elicitation_complete、不支持的模式、
 // refusal_fallback_prompt；中断与释放收回面板；经 channel 与真实 QuestionStore 端到端。
     ["verify-claude-dialogs", ['node', '--import', 'tsx/esm', 'scripts/verify-claude-dialogs.ts']],
+// 后端中立的 MCP elicitation ↔ 问卷纯函数（src/channel/elicitation.ts）：schema → 字段、
+// 逐类型校验、表单流程（拒绝 / 只重问无效项 / 类型化 content / 标签在首问时固定）、
+// URL 模式问题与提示文案、中英文都能解析；模块不 import 厂商包。
+    ["verify-elicitation", ['node', '--import', 'tsx/esm', 'scripts/verify-elicitation.ts']],
 // Claude 提示：fixtures/claude/notices 下逐类断言（api_retry、模型拒绝回退、
 // informational、notification 优先级、限流只报一次、permission_denied、auth_status、
 // memory_recall、conversation_reset、elicitation_complete），投影器按 key 去重。
@@ -835,6 +872,61 @@ const GROUPS = {
 // Claude 图片输入（假 Query）：核心内存暂存（不经 DSH attachments，有限额与淘汰）、
 // 文本后发 base64 块、类型/大小/数量限额、回放成惰性 facade；无该能力的会话不变。
     ["verify-claude-images", ['node', '--import', 'tsx/esm', 'scripts/verify-claude-images.ts']],
+// Codex 录制 fixture 的脱敏检查：凭据形状（sk-/Bearer/JWT）、白名单外的 URL 主机
+// （中转站主机名必须已换成 relay.invalid）、临时目录与 home 路径、机器标识。
+    ["verify-codex-fixtures", ['node', 'scripts/lib/codex-fixture-sanitize.mjs', '--check']],
+// 假 Codex app-server 自测（不起进程、不走网络）：脚本化应答/错误/延后应答、服务端
+// 请求等待客户端作答、崩溃、录制回放的 id 映射与 thread 改写、两路回放交错各自保序。
+    ["verify-codex-fake-app-server", ['node', '--import', 'tsx/esm', 'scripts/verify-codex-fake-app-server.ts']],
+// Codex JSON-RPC：请求/应答配对、超时（注入时钟）、服务端请求挂起/应答/未知方法、
+// close 拒绝挂起、行分帧与超长行；真子进程传输的 EOF 退出与超时终止。
+    ["verify-codex-rpc", ['node', '--import', 'tsx/esm', 'scripts/verify-codex-rpc.ts']],
+    ["verify-codex-proxy-transport", ['node', '--import', 'tsx/esm', 'scripts/verify-codex-proxy-transport.ts']],
+// CodexHub（假 app-server）：握手参数与 optOut、按 thread 路由（子 thread 归父）、
+// 按连接代数的服务端请求与重投、引用计数与空闲关闭、崩溃重启与 connectionRestored、
+// 重启预算耗尽即永久失败、指纹多实例。
+    ["verify-codex-hub", ['node', '--import', 'tsx/esm', 'scripts/verify-codex-hub.ts']],
+// Codex 翻译器：每个 wire fixture 的每个 thread → 事件 → 共享投影器，与 goldens
+// 逐字段比较；§7.3 attempt 算法边界、§7.4 item 表、§7.5 通知表与 §8 卡片形状。
+    ["verify-codex-translate", ['node', '--import', 'tsx/esm', 'scripts/verify-codex-translate.ts']],
+// Codex TPS：隐藏推理从 output item 开始计时，无 delta/延迟用量仍可结算，
+// 多步回合剔除工具间隙，首 token 等待与历史回放不进入生成速率。
+    ["verify-codex-tps", ['node', '--import', 'tsx/esm', 'scripts/verify-codex-tps.ts']],
+// Codex live≡replay（§10.4）：同一 thread 的 live 通知与录制历史投影逐行一致，
+// 只允许登记的差异（中断卡、用量行、live 通知行），且断言差异确实出现。
+    ["verify-codex-live-replay", ['node', '--import', 'tsx/esm', 'scripts/verify-codex-live-replay.ts']],
+// Codex 输入（假 app-server）：四种 placement、客户端队列 FIFO、steer 降级、now、
+// clientId 认领、turn/start 失败回滚、取消回执（V6）、强制收敛、断线与恢复、resume 续号。
+    ["verify-codex-input", ['node', '--import', 'tsx/esm', 'scripts/verify-codex-input.ts']],
+// Codex 审批与问卷（假 app-server）：按 availableDecisions 生成选项与官方文案、
+// 每种决策映射、拒绝+理由（cancel+followup）、外部结算、重投只显示一次、
+// 问卷与取消（V7）、dispose 撤回、录制的 s1b 审批端到端。
+    ["verify-codex-approvals", ['node', '--import', 'tsx/esm', 'scripts/verify-codex-approvals.ts']],
+// 真实 Chat 挂在 Codex 会话（假 app-server）上：审批面板文案、命令卡输出、
+// 流式回复、diff 卡、问卷、Esc 中断；80/40 列 × inline/fullscreen。
+    ["verify-codex-chat", ['node', '--import', 'tsx/esm', 'scripts/verify-codex-chat.tsx']],
+    ["verify-usage-event", ['node', '--import', 'tsx/esm', 'scripts/verify-usage-event.ts']],
+    ["verify-init-capability", ['node', '--import', 'tsx/esm', 'scripts/verify-init-capability.ts']],
+    ["verify-agent-event-invariants", ['node', '--import', 'tsx/esm', 'scripts/verify-agent-event-invariants.ts']],
+    ["verify-codex-auth", ['node', '--import', 'tsx/esm', 'scripts/verify-codex-auth.ts']],
+    ["verify-codex-daemon-resume", ['node', '--import', 'tsx/esm', 'scripts/verify-codex-daemon-resume.ts']],
+    ["verify-codex-live-guard", ['node', '--import', 'tsx/esm', 'scripts/verify-codex-live-guard.ts']],
+    ["verify-codex-controls", ['node', '--import', 'tsx/esm', 'scripts/verify-codex-controls.ts']],
+    ["verify-codex-plans", ['node', '--import', 'tsx/esm', 'scripts/verify-codex-plans.ts']],
+    ["verify-codex-advanced", ['node', '--import', 'tsx/esm', 'scripts/verify-codex-advanced.ts']],
+    ["verify-codex-catalog-history", ['node', '--import', 'tsx/esm', 'scripts/verify-codex-catalog-history.ts']],
+    ["verify-codex-lifecycle", ['node', '--import', 'tsx/esm', 'scripts/verify-codex-lifecycle.ts']],
+    ["verify-codex-side-query", ['node', '--import', 'tsx/esm', 'scripts/verify-codex-side-query.ts']],
+    ["verify-codex-reconnect", ['node', '--import', 'tsx/esm', 'scripts/verify-codex-reconnect.ts']],
+    ["verify-codex-images", ['node', '--import', 'tsx/esm', 'scripts/verify-codex-images.ts']],
+    ["verify-codex-subagents", ['node', '--import', 'tsx/esm', 'scripts/verify-codex-subagents.ts']],
+    ["verify-codex-child-output", ['node', '--import', 'tsx/esm', 'scripts/verify-codex-child-output.ts']],
+    ["verify-backend-logout", ['node', '--import', 'tsx/esm', 'scripts/verify-backend-logout.ts']],
+    ["verify-codex-chat-controls", ['node', '--import', 'tsx/esm', 'scripts/verify-codex-chat-controls.tsx']],
+    ["verify-session-archive", ['node', '--import', 'tsx/esm', 'scripts/verify-session-archive.tsx']],
+// 内核目录（N7）：三内核、未探测/未安装/未登录置灰、loginInSession 仍可选并提示、
+// 只有可一键安装的内核给安装向导、版本产品前缀、--backend 接受 codex。
+    ["verify-kernel-catalog", ['node', '--import', 'tsx/esm', 'scripts/verify-kernel-catalog.ts']],
 // IDE 选区通道回归（PR #562）：纯函数（env 直连/lock 扫描与 workspace
 // 匹配过滤/hello_ack 解析/selection_changed 校验）、无 IDE 静默降级、
 // loopback 对连（token 握手 ACK、错误 token 换下一候选、断连清空）、
@@ -1107,6 +1199,10 @@ const GROUPS = {
 // 提问面板 hideCustomInput 行为回归：纯选择题隐藏输入行且 Tab/打字
 // 不劫持焦点，纯文本题忽略 hide 标记，多选题默认行为不回退。
     ["verify-askpanel-hide-custom-input", ['node', '--import', 'tsx/esm', 'scripts/verify-askpanel-hide-custom-input.tsx']],
+// 保密问题（QuestionItemView.secret）：面板输入行按码点画 •（选项行打字、括号粘贴、
+// CJK、光标编辑），提交的仍是原文；普通题照常显示；交互桥带上 secret；答卷记录
+// 掩为 ••••（投影器端到端），向导 redact 不变。
+    ["verify-question-secret", ['node', '--import', 'tsx/esm', 'scripts/verify-question-secret.tsx']],
 // 问卷面板粘贴回归：bracketed paste 压平插入（纯换行块不得提交、ANSI/
 // OSC 剥净）、Ctrl+V/Alt+V 异步剪贴板插入到实时光标（读期间打字真竞态
 // 臂、busy 去重）、选项行粘贴追加+附加标签、plan-review 粘贴绝不快选/

@@ -36,7 +36,7 @@ import type {
   StagedImageHandle,
 } from '../dsh-adapter/channel.js'
 import type { TranscriptImage } from '../dsh-adapter/transcript-images.js'
-import { isHiddenCommandName, isUnavailableLocalCommand, parseCommandName } from '../commands.js'
+import { isHiddenCommandName, isUnavailableLocalCommand, parseCommandName, workingHoldOf } from '../commands.js'
 import { appendHistory, HISTORY_LIMIT, historyProjectKey, loadHistoryOldestFirst } from '../history.js'
 import { mentionAtCaret } from '../utils/mentions.js'
 import { preserveSelection, type FileCandidate } from '../utils/fileSuggestions.js'
@@ -596,8 +596,8 @@ export interface PromptInputProps {
   /** Double-tap Esc with an empty input: open the rewind picker. */
   onRewindRequest?(): void
   /**
-   * ← on an EMPTY prompt backgrounds this session and
-   * opens the agent view (with text, ← moves the caret as usual).
+   * ← on an EMPTY prompt opens the session manager. DSH backgrounds the
+   * session first; other backends keep it attached. With text, ← moves the caret.
    */
   onBackgroundRequest?(): void
   /**
@@ -1311,7 +1311,27 @@ export function PromptInput({
   // snapshot's cherry-pick resurrected the old formula.)
   const helpViewportHeight = Math.max(3, Math.min(terminalRows - 7, 15))
 
-  const suggestions = value.startsWith('/') ? channel.commandCompletions(value) : []
+  // Issue #1072: while a turn runs, the overlay groups the commands that
+  // AFFECT the running conversation (gated / conversation-acting / steering)
+  // below the ones that do not. The partition is a stable reorder and keeps ONE
+  // index space: `suggestions` stays the only list selection, Enter dispatch and
+  // clicks read, and the default selection stays the first normal-region row.
+  // The region is marked by colour only — it costs no display row.
+  const completions = value.startsWith('/') ? channel.commandCompletions(value) : []
+  const holdOf = (commandLine: string): boolean =>
+    workingHoldOf(commandLine, channel.commandList.find(
+      command => command.name === commandLine.replace(/^\//, '').split(/[\t ]/u)[0],
+    )?.skill === true) !== undefined
+  const normalCompletions = channel.working
+    ? completions.filter(completion => !holdOf(completion.commandLine))
+    : completions
+  /** 灰区起始索引；灰区为空时不分区。 */
+  const suggestionsHoldFrom = channel.working && normalCompletions.length < completions.length
+    ? normalCompletions.length
+    : undefined
+  const suggestions = suggestionsHoldFrom === undefined
+    ? completions
+    : [...normalCompletions, ...completions.filter(completion => holdOf(completion.commandLine))]
   const overlayOpen =
     suggestions.length > 0 &&
     !expanded &&
@@ -2045,8 +2065,9 @@ export function PromptInput({
    * The Enter main path, shared by the inline prompt, the expanded
    * editor's Ctrl+Enter, and its Send button:
    * - command menu open → run the SELECTED command (never send `/mo`);
-   * - model working → STEER into the running turn (next step boundary,
-   *   agent continues — the "immediate" send; Codex/pi semantics);
+   * - model working → a KNOWN command is still a command; anything else
+   *   STEERS into the running turn (next step boundary, agent continues —
+   *   the "immediate" send; Codex/pi semantics);
    * - otherwise → submit directly (or run a unique command).
    * Reads valueRef so a key batch (typing + Enter in one stdin read)
    * operates on the text the preceding keys produced.
@@ -2091,22 +2112,12 @@ export function PromptInput({
       return
     }
     if (channel.working && value.trim() !== '') {
-      // Immediate-command semantics: /btw and /skills are exempt from
-      // steering — neither command interrupts the running turn. Hidden
-      // UI-only easter eggs (e.g. /deepseek) are also safe to run while
-      // streaming. Every other input keeps the steer behavior so /new
-      // /model etc. stay idle-only.
-      const parsed = value.startsWith('/') ? parseCommandName(value) : undefined
-      if (parsed !== undefined && (
-        ((parsed.name === 'btw' || parsed.name === 'skills')
-          && channel.commandList.some(c => c.name === parsed.name))
-        || isHiddenCommandName(parsed.name)
-        // A built-in the backend lacks is refused here too, never steered in.
-        // oxlint-disable-next-line typescript/no-unnecessary-condition -- partial embedder channels omit the snapshot
-        || isUnavailableLocalCommand(parsed.name, channel.backendCapabilities as Channel['backendCapabilities'] | undefined)
-      )) {
-        if (tryRunCommand(value)) return
-      }
+      // While a turn is running a KNOWN command is dispatched as a command:
+      // with or without arguments, with the completion overlay open or closed,
+      // from the inline prompt or the fullscreen editor (issue #1072). Each
+      // command's own gate decides whether it can run mid-turn and says why;
+      // steering is reserved for input that is NOT a command.
+      if (tryRunCommand(value)) return
       steerSend(value)
       return
     }
@@ -3031,8 +3042,8 @@ export function PromptInput({
       return
     }
     if (key.leftArrow) {
-      // ← on an EMPTY prompt backgrounds this session
-      // and opens the agent view; with text it moves the caret as usual.
+      // ← on an EMPTY prompt opens the session manager; the caller decides
+      // whether the backend can background the session first.
       // (The command/file overlays both imply non-empty text, so no extra
       // gate beyond the help menu is needed.)
       if (value.length === 0 && !helpOpen) {
@@ -4429,6 +4440,7 @@ export function PromptInput({
             columns={columns}
             query={value}
             accent={promptAccent}
+            holdFrom={suggestionsHoldFrom}
             // 点击行 = 运行该命令（与 Enter 同路径）
             onPick={(index) => {
               const command = suggestions[index]

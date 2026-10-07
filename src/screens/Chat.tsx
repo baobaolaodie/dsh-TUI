@@ -29,6 +29,7 @@ import {
   RECENTS_GROUP_PROVIDER,
 } from '../modelGroups.js'
 import { readModelRecents, recordModelUse, type ModelRecentsRef } from '../modelRecents.js'
+import { WORKING_GATE_NOTICES } from '../commands.js'
 import type { ChannelUi as Channel } from '../adapter/channel/ui-policy.js'
 import { sessionCwdMatches, type ChatRow, type ComposerImageRef, type EffortOption, type ExternalCommandOutcome, type PermissionPresetSnapshot, type PresetOption, type SkillInfo } from '../dsh-adapter/channel.js'
 import type { QuestionStore } from '../channel/questions.js'
@@ -53,6 +54,7 @@ import { useKernelPicker } from './chat/useKernelPicker.js'
 import { useBackendChannels } from './chat/useBackendChannels.js'
 import { backendModeStatus as modeStatus, backendPermissionCommand, parseMcpCommand } from './chat/backendCommands.js'
 import { PermissionStore, type PermissionPanelSource } from '../channel/permissions.js'
+import { goalStatusLines, parseGoalCommand } from '../channel/goal-command.js'
 import { AskUserQuestionPanel } from '../components/questions/AskUserQuestionPanel.js'
 import { ApprovalPanel } from '../components/approvals/ApprovalPanel.js'
 import { ExtensionDialog } from '../components/ExtensionDialog.js'
@@ -951,11 +953,19 @@ export function Chat({
   const backgroundAgentsNeedingInput = agentViewRows.filter(
     row => row.status === 'needs-input' && !row.current,
   ).length
-  /** Background the attached session and open the supervisor
-   *  (`/bg`, `/background`, and ← on an empty prompt all land here). The
-   *  backgrounded session becomes the screen's return target (final Esc
-   *  attaches back to it). */
+  /** Open the supervisor from `/bg`, `/background`, or an empty-prompt ←.
+   *  DSH backgrounds the attached session first and uses it as the Esc
+   *  return target; other backends keep the current session attached. */
   const backgroundToAgentView = React.useCallback((): void => {
+    // The non-DSH backends have a session catalog, but no live background
+    // handoff. Open the shared session manager without pretending to park the
+    // current turn. DSH keeps its existing handoff and Esc return target.
+    const backendId = channel.backendCapabilities?.backendId
+    if (backendId !== undefined && backendId !== 'dsh') {
+      agentViewOpenSessionRef.current = channel.agentId
+      setSupervisorOpen(true)
+      return
+    }
     void channel.backgroundCurrent().then((result) => {
       if (result.ok) {
         setAgentViewReturnId(result.backgroundedSessionId)
@@ -3027,9 +3037,8 @@ export function Chat({
       }
       case 'bg':
       case 'background': {
-        // `/background`: the attached session moves to the background
-        // (it keeps running in this process), the terminal lands on a fresh
-        // session, and the supervisor opens on top.
+        // DSH parks the attached session before opening the supervisor;
+        // other backends open it over their still-attached session.
         setHelpOpen(false)
         backgroundToAgentView()
         return true
@@ -3347,6 +3356,8 @@ export function Chat({
         return true
       }
       case 'init': {
+        const backend = channel.backendInit?.()
+        if (backend !== undefined) { void backend.run(); return true }
         const result = channel.initWorkspace()
         if (result === null) channel.notify(t('agentsmd-create-failed'), { color: 'error' })
         else if (result === 'exists') channel.notify(t('agentsmd-exists'))
@@ -3449,9 +3460,12 @@ export function Chat({
           })
         return true
       }
-      case 'logout':
-        channel.notify(t('login-logout-hint'))
+      case 'logout': {
+        const auth = channel.backendAuth()
+        if (auth?.logout === undefined) channel.notify(t('login-logout-hint'))
+        else void auth.logout()
         return true
+      }
       case 'permission': {
         // The command itself is registered by the permission-presets row
         // (dsh-base): bare `/permission` opens the preset picker and Enter
@@ -3584,7 +3598,7 @@ export function Chat({
         if (onUpdate === undefined) {
           channel.notify(t('update-unavailable'), { color: 'warning' })
         } else if (channel.working) {
-          channel.notify(t('update-working'), { color: 'warning' })
+          channel.notify(t(WORKING_GATE_NOTICES.update), { color: 'warning' })
         } else {
           channel.notify(t('update-starting'))
           onUpdate()
@@ -3667,6 +3681,43 @@ export function Chat({
         channel.pushLocal('/reload', lines)
         return true
       }
+      case 'goal': {
+        // DSH: the `dsh-command-goal` registry row owns /goal, exactly as the
+        // default branch below would dispatch it.
+        if (channel.commandList.some(command => command.external && command.name === 'goal')) {
+          setHelpOpen(false)
+          return runExternalCommand(name, rawInput, images)
+        }
+        // Another backend: the channel core's host over its typed `goals`
+        // capability. None (DSH without the row, or a backend's own `goal`
+        // command) keeps the previous route: the line goes on as text. A
+        // backend with neither never gets here — PromptInput refuses /goal
+        // as unavailable (isUnavailableLocalCommand).
+        const goals = channel.backendGoals?.()
+        if (goals === undefined) return false
+        setHelpOpen(false)
+        // The capability calls settle like registry commands: the draft is
+        // consumed only once the backend took the change (a failure is
+        // reported by the host and leaves the line editable). An invalid
+        // line is never sent anywhere: it stays in the composer.
+        const command = parseGoalCommand(rawInput)
+        switch (command.kind) {
+          case 'status':
+            channel.pushLocal('/goal', goalStatusLines(channel.goal))
+            return true
+          case 'invalid':
+            channel.notify(command.reason, { color: 'error' })
+            return Promise.resolve(false)
+          case 'set':
+            return goals.set(command.objective, command.tokenBudget === undefined ? undefined : { tokenBudget: command.tokenBudget })
+          case 'pause':
+            return goals.pause()
+          case 'resume':
+            return goals.resume()
+          case 'clear':
+            return goals.clear()
+        }
+      }
       case 'channel': {
         // 渠道选择器。/channel 只在声明了 channels 能力的内核下进命令表，
         // 能走到这里就说明可用。与 /kernel 一样，再执行一次就收起。
@@ -3692,7 +3743,7 @@ export function Chat({
         if (onRestart === undefined) {
           channel.notify(t('restart-unavailable'), { color: 'warning' })
         } else if (channel.working) {
-          channel.notify(t('update-working'), { color: 'warning' })
+          channel.notify(t(WORKING_GATE_NOTICES.restart), { color: 'warning' })
         } else {
           channel.notify(t('restart-starting'))
           onRestart()
@@ -6394,6 +6445,7 @@ export function Chat({
           showAll={showAllMessages}
           thinkingVisible={thinkingVisible}
           historyPaintEnabled={!fullscreen}
+          fullscreen={fullscreen}
           onToggleAll={() =>{  setShowAllMessages(previous => !previous) }}
           onLoadOlder={() => channel.loadOlder()}
           registerRowRef={registerRowRef}

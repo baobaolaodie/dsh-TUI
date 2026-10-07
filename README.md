@@ -31,7 +31,7 @@
 - **Mermaid diagrams** — ````mermaid ```` fences drawn as Unicode diagrams.
 - **LaTeX math** — `$…$` and `$$…$$` formulas as Unicode text, fractions and limits stacked in display blocks; `mathRendering: image` typesets block and one-row inline formulas as terminal images on graphics terminals.
 - **Timeline rail** — every turn clickable; timeline / scrollbar / hidden gutter.
-- **Side panel** — `Ctrl+B` splits the chat with a panel column (todo / jobs) once the terminal is wide enough; narrow terminals and inline mode keep today's full-screen panels.
+- **Side panel** — `Ctrl+B` splits the chat with a panel column once the terminal is wide enough; all eight built-in panels are enabled by default. Narrow terminals and inline mode keep full-screen panels.
 - **Live state** — activity animation, context bar, TPS, cache hit rate, effort, tokens, session cost estimate (main + subagents), Git and session metadata.
 - **One session manager** — `/resume` `/home` `/agentview` `/bg` `⌸`.
 - **Session workflow** — `/new` `/compact` `/export` `/btw`, model hot-switch, fork, rewind, vim, fullscreen draft editor.
@@ -202,11 +202,55 @@ its manual equivalent.
 
 Details and known limitations: [Claude backend](docs/claude-backend.en.md).
 
+### Experimental: native Codex backend
+
+Run your own Codex through `codex app-server`, sharing its configuration,
+login, instructions, skills, hooks, MCP and native threads:
+
+```sh
+npm install -g @openai/codex@0.160.1
+dsh-tui --backend codex
+dsh-tui --backend codex --resume <thread-id>
+```
+
+Protocol baseline **0.160.1**, minimum **0.144.0**; other versions may show
+drift. `CODEX_EXECUTABLE` selects a binary; `/kernel` remembers the backend.
+`codex resume <id>` can open the same thread after the other writer exits.
+This is not `migrate codex`, which imports history into DSH.
+With native credentials, a writer conflict for an idle thread retained by the
+official background server triggers a reconnection to that server. Managed
+subscription credentials and `/channel` connections use private app-server processes.
+
+Streaming/tool cards, approvals, questions, steer/queue/interrupt, model and
+effort controls, Plan, `/review`, `/diff`, `/usage`, `/init`, skills and MCP
+share the existing UI. **Shift+Tab only toggles Plan**, keeping its underlying
+permission preset; Full Access requires an explicit choice. Existing Codex
+settings are respected, not overwritten with defaults. `/login` offers
+ChatGPT OAuth, a device code or an API key (the last writes to Codex’s own
+credential store). Relay `/channel` connections take precedence; managed
+subscription tokens are only injected on first-party routes. dsh-TUI does
+not write `~/.codex/config.toml` or log out your native Codex account.
+
+TPS includes hidden reasoning time and excludes tool execution time. Live
+text estimates are corrected when Codex reports output token usage.
+
+Native browsing/archive, fork/conversation rewind, paged history, images,
+subagents, polled background terminals, goals and `/btw`/`/recap` use the
+existing surfaces. `/logout` removes only the matching dsh-auth credential;
+already-loaded managed tokens require a normal restart, not native logout.
+The real 0.160.1 app-server passed nine credential-free offline checks and eight
+daemon-resume checks, with no model turn or charge; real subscription login, credentialed model calls
+and real-TTY interaction were not run. Only Codex identification/title
+changes automatically, not palette or companion.
+Using ChatGPT subscription tokens in third-party clients is subject to
+OpenAI’s terms. Full instructions and current boundaries:
+[Codex backend](docs/codex-backend.en.md).
+
 ## Keybindings & Mouse
 
-`Enter` send · `Tab` complete · `Ctrl+Enter` interrupt and send · `Alt+Up` recall the last message · `Esc` dismiss, double-`Esc` rewinds · `Ctrl+B` side panel · `Ctrl+O` details · `Ctrl+R` history (`↑`/`↓` and `Ctrl+R` are scoped to the current project) · `Ctrl+V` paste · `Ctrl+Shift+E` fullscreen draft editor · `?` shortcuts · `←` background the session.
+`Enter` send · `Tab` complete · `Ctrl+Enter` interrupt and send · `Alt+Up` recall the last message · `Esc` dismiss, double-`Esc` rewinds · `Ctrl+B` side panel · `Ctrl+O` details · `Ctrl+R` history (`↑`/`↓` and `Ctrl+R` are scoped to the current project) · `Ctrl+V` paste · `Ctrl+Shift+E` fullscreen draft editor · `?` shortcuts · `←` open the session manager (DSH backgrounds the current session first).
 
-While the model is working: `Enter` steers, `Tab` queues a follow-up, `Ctrl+Enter` interrupts and sends.
+While the model is working: `Enter` steers, `Tab` queues a follow-up, `Ctrl+Enter` interrupts and sends. Input that names a command is still a command — with or without arguments — so `/model` or `/new` reach their own gate (and the `/` overlay sinks the commands that affect the running conversation) instead of silently becoming an interruption; only text that is not a command — and a direct skill gesture such as `/skill-name …` — steers.
 
 On native Windows, fragmented Win32 input records are reassembled across short input delays instead of appearing as numeric protocol text. The platform check only reports that this machine might run the private mode (win32-input-mode); a bare `ESC[` fragment is held only after one record has actually been decoded, while a fragment whose own shape is already record-specific holds on its own (which is how even the first record can survive a split). Windows terminals that never enter the mode (mintty, GitBash) therefore keep the classic VT path: a lone `Esc` keeps its normal response time, and a letter typed after a timed-out `ESC[` is not swallowed.
 
@@ -246,7 +290,7 @@ History-only directories offer edit and new-session actions; rename and remove a
 
 **Background jobs**: card headers open the focused task panel. Click the card body or use `Ctrl+O` to toggle the command between its first statement and full script. Commands and output use separate colored edges with `❯` (`>` on Windows) and `≡` on their first rows; output always stays at the latest two visible rows. `/jobs` and the side panel keep the full output scrollable, while `e` toggles the focused command. Consecutive blank script lines collapse to one.
 
-**Background sessions**: `/bg` or `←` on an empty prompt; `Esc` returns. They run in this process and stop when the TUI exits. Logs survive.
+**Background sessions**: On the DSH backend, `/bg` or `←` on an empty prompt backgrounds the current session and opens the session manager; `Esc` returns to it. Background sessions run in this process and stop when the TUI exits. Logs survive. On Claude/Codex, those entries open the session manager without backgrounding the session.
 
 Full commands: [Interaction and commands](docs/interaction.en.md).
 

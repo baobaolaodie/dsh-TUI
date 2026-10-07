@@ -29,6 +29,7 @@ import { createActivityProjection } from '../../../channel/activity.js'
 import { channelCapabilities } from '../../../channel/capabilities.js'
 import { anchoredRow, prependHistoryRows, projectHistorySlice, restoreFoldedRows } from '../../../channel/history-restore.js'
 import { t } from '../../../i18n.js'
+import { WORKING_GATE_NOTICES } from '../../../commands.js'
 import { logForDebugging } from '../../../utils/debug.js'
 import { DEFAULT_SESSION_MODES } from '../../../sessionModes.js'
 import { resolveContextOccupancy } from '../../context-occupancy.js'
@@ -335,6 +336,7 @@ export function createCoreChannel(
     capabilities: session.capabilities,
     dsh: false,
     resume: options.openSession !== undefined && options.sessionCatalog !== undefined,
+    deleteAction: options.sessionCatalog?.deleteAction,
   })
   const initialCapabilities = snapshotOf(initialSession)
   /**
@@ -403,6 +405,7 @@ export function createCoreChannel(
         contextPressure?.read(state.sessionId),
         state.lastUsage,
         state.contextWindow,
+        feed.projector.contextUsage(),
       )
     },
     commandList: localCommandsFor(initialCapabilities.commands),
@@ -417,12 +420,32 @@ export function createCoreChannel(
     get olderHistory(): boolean {
       return extension.loadOlder === undefined && !viewCleared() && (binding.session.capabilities.transcript?.hasOlder() ?? false)
     },
+    backendInit: () => {
+      const fence = mcpFence()
+      const init = fence.session.capabilities.init
+      if (extension.delegates?.initWorkspace !== undefined || init === undefined) return undefined
+      return { run: () => guarded('init', false, async () => {
+        if (!fence.current()) return false
+        await init.run()
+        return true
+      }, fence.current) }
+    },
     backendAuth: () => {
-      const auth = binding.session.capabilities.auth
+      const fence = mcpFence()
+      const auth = fence.session.capabilities.auth
       if (auth === undefined) return undefined
       const oauth = (ctx.get('dshAuth') as { api?: OAuthSetupHost } | undefined)?.api
       const backend = state.backendCapabilities.backendLabel
       return { login: async present => {
+        const login = auth.login?.bind(auth)
+        if (login !== undefined) {
+          const loginOAuth = oauth === undefined || auth.oauthProvider === undefined ? undefined : async () => {
+            const outcome = await present(oauth, auth.oauthProvider!)
+            return outcome === 'added' || outcome === 'updated'
+          }
+          await guarded('login', undefined, () => login(loginOAuth))
+          return
+        }
         const lines = await auth.status().then(report => report.lines)
           .catch((error: unknown) => [t('capability-failed', { name: 'login', err: error instanceof Error ? error.message : String(error) })])
         channelCommands(state).pushLocal('/login', [t('login-backend-heading', { backend }), ...lines, ...(oauth === undefined ? [t('login-backend-no-oauth')] : [])])
@@ -435,7 +458,20 @@ export function createCoreChannel(
         } catch (error) {
           notify(t('login-backend-reconnect-failed', { err: error instanceof Error ? error.message : String(error) }), { color: 'error', timeoutMs: 8000 })
         }
-      } }
+      },
+      logout: () => guarded('logout', false, async () => {
+          if (!fence.current()) return false
+          if (oauth === undefined || auth.oauthProvider === undefined) {
+            notify(t('login-backend-no-oauth'), { color: 'warning' })
+            return false
+          }
+          const removed = await oauth.logout(auth.oauthProvider)
+          if (fence.current()) notify(t(removed ? 'login-backend-oauth-removed' : 'login-backend-oauth-missing', { provider: auth.oauthProvider }), { color: removed ? 'success' : 'warning', timeoutMs: 8000 })
+          // Do not reconnect or call the native auth capability: a native
+          // login is not ours to erase; already-loaded tokens need a restart.
+          return removed
+        }, fence.current),
+      }
     },
     backendChannels: () => {
       const fence = mcpFence()
@@ -464,7 +500,7 @@ export function createCoreChannel(
           if (option === undefined) { unavailable('channel'); return { ok: false, restart: false } }
           const restart = restartFor(option)
           if (restart && state.working) {
-            notify(t('channel-switch-while-working'), { color: 'warning' })
+            notify(t(WORKING_GATE_NOTICES.channel), { color: 'warning' })
             return { ok: false, restart }
           }
           channels.setActive(id)
@@ -527,6 +563,26 @@ export function createCoreChannel(
         toggle: (name, enabled) => run(name, enabled ? 'mcp-enabled' : 'mcp-disabled', () => mcp.toggle!(name, enabled)),
       }
     },
+    backendGoals: () => {
+      const fence = mcpFence()
+      const goals = fence.session.capabilities.goals
+      if (goals === undefined) return undefined
+      // The capability only asks for the change: the goal itself arrives as
+      // `goal.change` (projected like every other session fact).
+      const run = (key: 'goal-backend-set' | 'goal-backend-paused' | 'goal-backend-resumed' | 'goal-backend-cleared', action: () => Promise<void>): Promise<boolean> =>
+        guarded('goal', false, async () => {
+          if (!fence.current()) return false
+          await action()
+          if (fence.current()) notify(t(key), { color: 'success' })
+          return true
+        }, fence.current)
+      return {
+        set: (objective, options) => run('goal-backend-set', () => goals.set(objective, options?.tokenBudget === undefined ? undefined : { tokenBudget: options.tokenBudget })),
+        pause: () => run('goal-backend-paused', () => goals.pause()),
+        resume: () => run('goal-backend-resumed', () => goals.resume()),
+        clear: () => run('goal-backend-cleared', () => goals.clear()),
+      }
+    },
     ...actionMethods,
     subagentControl: {
       interrupt: agentId => {
@@ -570,7 +626,8 @@ export function createCoreChannel(
             const text = input.text.trim()
             if (text === '') return Promise.resolve({ ok: false, reason: 'failed', message: 'empty text' })
             const name = input.targetName !== undefined && input.targetName.trim() !== '' ? input.targetName.trim() : input.targetId
-            const envelope = t('agent-message-envelope', { name, id: input.targetId, text })
+            const tool = binding.session.capabilities.subagents?.messagingTool
+            const envelope = tool === undefined ? t('agent-message-envelope', { name, id: input.targetId, text }) : t('agent-message-native-envelope', { tool, name, id: input.targetId, text })
             const intentId = `agent-message-${(agentMessageIntents += 1)}`
             dispatchUserText(envelope, 'followup', [], undefined)
             return Promise.resolve({ ok: true, intentId, state: 'issued' })

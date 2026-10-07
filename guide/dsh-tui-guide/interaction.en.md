@@ -6,7 +6,7 @@
 
 | Key | Behavior |
 | --- | --- |
-| `Enter` | Send while idle; steer text into the running turn at its next step boundary; confirm an open menu |
+| `Enter` | Send while idle; run a known `/` command (with or without arguments — while a turn runs its own gate decides); steer the remaining text into the running turn at its next step boundary; confirm an open menu |
 | `Tab` | Complete a `/` command or `@` file; while the model is working, queue non-empty input as a post-turn follow-up |
 | `Ctrl+Enter` | Interrupt the running turn and process the input immediately |
 | `Shift+Enter` / `Ctrl+J` | Insert a newline at the caret; `Ctrl+J` (LF) is the fallback when the terminal cannot report the Shift modifier; macOS Terminal.app uses `Option+Enter` |
@@ -20,7 +20,7 @@
 | `Ctrl+Z` | Undo the prompt draft's last word-level edit (text, caret and images together). Draft-only: a submit, a history recall (`Ctrl+R`/`↑`) or a session switch ends the history; it is NOT the message/conversation rewind behind `Esc Esc`. Remappable via `/settings` |
 | `Esc` / `Ctrl+C` / `Enter` while an image preview is open | Close the preview and restore the surface underneath; other keys are not passed through |
 | `Left` / `Right` in the image modal | Previous / next image, no wrapping; caret peeks keep arrows with the prompt |
-| `←` (empty input) | Background this session and open the session-management screen (same as `/bg`) |
+| `←` (empty input) | Open the session manager (same as `/bg`); DSH backgrounds the current session first, while Claude/Codex keep it attached |
 | `Ctrl+C` | Interrupt while working; press again while the interrupt is still settling to force-exit<br>clear non-empty idle input; **while idle with a selection in the prompt input, copy it to the clipboard (selection kept for editing)**; press twice on empty input to exit |
 | `Ctrl+D` | Same ladder as `Ctrl+C`: interrupt while working (press again to force-exit if the interrupt stalls); press twice while idle to exit |
 | `Ctrl+O` | Toggle transcript/verbose detail, including full reasoning and tool arguments/output; also the escape hatch for the **long-line fold** (a single line over 1000 chars is clipped to 1000 with a `… N chars folded` marker — see the user guide §5). Clicking the folded row (or the tool card face) toggles it too |
@@ -294,9 +294,11 @@ While the model is working, three paths have different placement:
 
 | Action | Placement |
 | --- | --- |
-| `Enter` | Steer: deliver to the running turn at its next step boundary |
+| `Enter` | known `/` command (with or without arguments) → run it, its own gate decides; anything else → steer: deliver to the running turn at its next step boundary |
 | `Tab` | Follow-up: wait until the current turn finishes |
 | `Ctrl+Enter` | Interrupt: stop the turn and deliver immediately |
+
+**While a turn is running, a command is always a command; only two kinds of input steer: plain text that is not a command, and a direct skill gesture (`/skill-name …`).** The completion overlay groups commands by their impact on the current conversation: the harmless ones stay on top in their normal style, while gated, interrupting, replacing or steering commands sink to the bottom in the theme's grey (`subtle`, no header row) — where they stay selectable.
 
 - Undelivered messages appear above the editor.
 - `Alt/Option+Up` retrieves the latest one.
@@ -418,9 +420,10 @@ On Windows, `dsh-tui.cmd --resume` uses the session ID last written to `~/.dsh-t
 
 ### Background sessions
 
-`/bg` (alias `/background`) moves the current session to the background and keeps it
+On DSH, `/bg` (alias `/background`) moves the current session to the background and keeps it
 running, switches the terminal to a fresh session, and opens the session-management screen;
-`←` on an empty prompt does the same.
+`←` on an empty prompt does the same. On Claude/Codex, both entries open the session manager
+without backgrounding the attached session.
 
 - While a background session waits on you, the prompt footer shows `← N agents`.
 - A background session awaiting approval shows as **needs input**, and the approval panel labels which session it comes from.
@@ -742,6 +745,7 @@ reason; see [Claude backend](claude-backend.en.md#approvals-and-questions).
 
 The command menu merges local commands with the DSH command registry. Type `/` to inspect the complete surface available in the current composition.
 
+- **While a turn is running**, the overlay groups commands by their impact on the current conversation: the harmless ones stay on top in their normal style, while gated, interrupting, replacing or steering commands sink to the bottom in the theme's grey (`subtle`, no header row) — and stay selectable there.
 - Command descriptions follow the UI language (`/lang`).
 - Built-in commands and mapped registry commands (`/plan`, `/goal`, `/feedback`) show Chinese translations in zh.
 - Unmapped registry commands fall back to the registry's own text.
@@ -749,7 +753,7 @@ The command menu merges local commands with the DSH command registry. Type `/` t
 **Sessions**
 
 - `/new`, `/resume`, `/home`, `/agentview` — all three open the same session-management screen.
-- `/bg` — alias `/background`, backgrounds the session and opens that screen.
+- `/bg` — alias `/background`, opens the session manager; DSH backgrounds the session first, while Claude/Codex keep it attached.
 - `/rename`.
 - `/recap` — session recap: apply the suggested title in one key; `/settings` can enable an
   auto-summary on session open, on by default — a divider + `Recap:` line appears at the

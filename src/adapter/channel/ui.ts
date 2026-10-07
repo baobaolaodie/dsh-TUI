@@ -145,13 +145,18 @@ export function createChannelUi(channel: ChannelUi, mode: AdapterMode, lease: Ch
       }
       if (key === 'backendAuth' && result !== undefined) {
         const host = result as NonNullable<ReturnType<ChannelUi['backendAuth']>>
-        return methods<typeof host>({ login: present => host.login((oauth, provider) => settle(present(query(oauth), provider))) }, { login: 'mutate' })
+        const login = methods<Pick<typeof host, 'login'>>({ login: present => host.login((oauth, provider) => settle(present(query(oauth), provider))) }, { login: 'mutate' })
+        if (host.logout === undefined) return login
+        return Object.freeze({ ...login, ...methods({ logout: () => host.logout!() }, { logout: 'mutate' }) })
       }
       if (key === 'backendModes' && result !== undefined) {
         return methods(result as NonNullable<ReturnType<ChannelUi['backendModes']>>, { snapshot: 'read-only', set: 'mutate' })
       }
       if (key === 'backendMcp' && result !== undefined) {
         return methods(result as NonNullable<ReturnType<ChannelUi['backendMcp']>>, { reconnect: 'mutate', toggle: 'mutate' })
+      }
+      if (key === 'backendGoals' && result !== undefined) {
+        return methods(result as NonNullable<ReturnType<ChannelUi['backendGoals']>>, { set: 'mutate', pause: 'mutate', resume: 'mutate', clear: 'mutate' })
       }
       if (key === 'settingsHost' && result !== undefined) {
         return methods(result as NonNullable<ReturnType<ChannelUi['settingsHost']>>, {

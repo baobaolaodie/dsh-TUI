@@ -389,6 +389,9 @@ export function attachDshExtensions(
       state.emit()
     },
     commandDescriptions: name => commandTrees?.descriptions(name),
+    // A skill gesture typed mid-turn stays immediate (steer at the next step
+    // boundary) instead of degrading into a turn-end followup (issue #1072).
+    working: () => state.working,
     // Attached-context pass-through: the skill catalog never loses the
     // FIFO/decision fence.
     deliverUserText: (text, placement, attach) => core.input.deliverUserText(text, placement, [], attach),

@@ -11,7 +11,7 @@ import { Config, normalizeBackendChoice } from './index.js'
 import { configValues, createSettingsScope, resolveSettingsNamespace, type RuntimeConfig } from './compat/settings.js'
 import { createChannel } from './channel.js'
 import { createDshSession } from './backend/session.js'
-import { BACKEND_LOADERS, openBackendStartup, probeKernels, sdkInstall } from './backends.js'
+import { BACKEND_LOADERS, closeBackendResources, openBackendStartup, probeKernels, sdkInstall } from './backends.js'
 import { formatSessionRef } from '../agent/refs.js'
 import type { AgentSession } from '../agent/session.js'
 import { mountFailureText } from '../sessions/resumeFailure.js'
@@ -1073,8 +1073,9 @@ export async function apply(ctx: Context, runtimeConfig: RuntimeConfig<Config>, 
       if (shadow) return
       channel.setSplashFont(normalizeSplashFont(value.splashFont ?? config.splashFont))
     }
-    /** 品牌外观（`dsh-tui.brand`）：`auto` 跟随后端（Claude 后端整套换橙），
-     *  其余固定一档；设置用户层优先于 cordis.yml，非法值回落 `auto`。 */
+    /** 品牌外观（`dsh-tui.brand`）：`auto` 跟随后端（Claude 后端整套换橙、
+     *  Codex 后端整套换薰衣草紫），其余固定一档；设置用户层优先于
+     *  cordis.yml，非法值回落 `auto`。 */
     const applyBrand = (value: Pick<SettingsValue, 'brand'>): void => {
       if (shadow) return
       channel.setBrand(normalizeBrandSetting(value.brand ?? config.brand))
@@ -1867,7 +1868,8 @@ export async function apply(ctx: Context, runtimeConfig: RuntimeConfig<Config>, 
    *  The caller supplies the notice. */
   const restartFreshSession = (notice: string): void => {
     if (exited || restartRequested || backendSwitchRequested !== undefined) return
-    backendSwitchRequested = backendChoice
+    if (backendChoice === 'codex') restartRequested = true
+    else backendSwitchRequested = backendChoice
     logRestartEvent('command: channel connection switch accepted', { backend: backendChoice })
     notifyChannel(notice)
     handleExit()
@@ -2724,7 +2726,7 @@ function runUpdate(
   profile: string | undefined,
   sessionId: string,
   targetVersion: string | undefined,
-  kernel: 'dsh' | 'claude',
+  kernel: KernelBackendId,
   hint: (sessionId: string) => string = id => resumeCommand(profile, id),
 ): void {
   disposeRootAndThen(ctx, () => {
@@ -2796,7 +2798,7 @@ function disposeRootAndThen(ctx: Context, done: () => void, fallbackCode = 1): v
     process.exit(fallbackCode)
   }, 5000)
   timer.unref()
-  void withHostRootCapability(() => ctx.root.fiber.dispose()).then(
+  void withHostRootCapability(() => ctx.root.fiber.dispose()).finally(() => closeBackendResources()).then(
     () => {
       clearTimeout(timer)
       done()
