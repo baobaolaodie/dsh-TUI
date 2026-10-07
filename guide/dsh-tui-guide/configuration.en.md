@@ -65,7 +65,7 @@ A complete common override looks like this:
 | `effortDefault` | unset | Default reasoning effort for new sessions; `auto` defers to `effort`; editable through `/settings` |
 | `whale` / `whaleIdle` | `true` / `true` | Header whale and welcome-page idle animation |
 | `splashFont` | `daily` | Big-text face on the header splash: `daily` rotates by local date (the default), any other value is a face id (`bold` / `square` / `bevel` / `wide` / `dot` / `stencil` / `classic` / `slab`) pinning that one; an unknown value falls back to `daily`. Also editable through `/settings` |
-| `whaleGirl` | `false` | Maid-portrait toggle: While Companion skin is deepy or whaleGirl, the splash art is that mascot and the Maid-portrait toggle has no effect; set Companion skin to whale to use the maid portrait. "Companion skin" is `companion.skin`; when the toggle does apply, the portrait prefers the real image over the terminal image protocol (Kitty/Sixel) and falls back to the character-art maid without it. See the precedence table below |
+| `whaleGirl` | `false` | Maid-portrait toggle: While Companion skin is deepy or whaleGirl, the splash art is that mascot and the Maid-portrait toggle has no effect; set Companion skin to whale to use the maid portrait. "Companion skin" is `companion.skin`; when the toggle does apply, the portrait renders the real raster through the terminal image protocols (Kitty/Sixel) and falls back to the character-art maid without them. See the precedence table below |
 | `minimal` | `false` | Minimal UI (极简界面): reduce header decoration and colors. **A display switch only** — a different thing from the kernel's `minimal` agent preset under `preset` below (that one decides which tools the model can use) |
 | `sidePanel.splitEnabled` | `true` (boolean) | Master switch of the split layout: on, `Ctrl+B` and `/panel` open the side column next to the chat; off, neither splits and `/jobs` & co. keep their full-screen panels. Applies immediately |
 | `sidePanel.open` | `false` (boolean) | Whether a session opens with the sidebar already expanded; off by default, so the upgrade leaves the layout as it was. An in-session `Ctrl+B` / `/panel toggle` is not written back here. Applies immediately |
@@ -91,8 +91,10 @@ A complete common override looks like this:
 | `companion.skin` | Splash (header) art slot | Maid-portrait toggle |
 | --- | --- | --- |
 | `deepy` (default) | the Deepy mascot (letter-grid animation only — no raster) | **No effect** |
-| `whaleGirl` | Whale-girl mascot (real image over the image protocol; letter-grid fallback without it) | **No effect** |
+| `whaleGirl` | Whale-girl mascot (real image through the image protocol; letter-grid fallback without it) | **No effect** |
 | `whale` | Original path: the pixel whale; the maid portrait once the Maid-portrait toggle is on (real image preferred, character-art fallback) | **Applies** |
+
+Caveat: with brand set to claude the splash art slot is always the Claude girl; this table does not apply.
 
 ### Precedence and force-off
 
