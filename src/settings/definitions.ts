@@ -492,8 +492,8 @@ export const SETTING_DEFINITIONS = {
     label: 'Header art',
     descriptions: { zh: '标题图形 logo' },
     group: 'splash',
-    hint: 'Show the header splash art — the pixel whale, or the maid portrait when the setting below is on. Off leaves a text-only header.',
-    hintDescriptions: { zh: '开屏头部显示图形 logo：像素鲸鱼（打开下方「女仆娘立绘」时显示女仆娘）。关闭则只留文字标题。' },
+    hint: 'Header art: the companion mascot, the pixel whale, or the maid portrait (Companion skin decides). Off leaves a text-only header.',
+    hintDescriptions: { zh: '标题图形：宠物皮肤决定吉祥物，或像素鲸鱼／女仆娘立绘。关闭则只留文字标题。' },
     kind: 'boolean',
   },
   'whaleGirl': {

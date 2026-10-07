@@ -91,6 +91,8 @@ Config；旧版仍使用 `~/.dsh/settings.yaml`。不要把旧文件路径当成
 | `whaleGirl` | 鲸娘吉祥物（图像协议真图；无协议回落字母格） | **不生效** |
 | `whale` | 原路径：像素鲸鱼；打开女仆娘立绘后为立绘（真图优先，回落字符画） | **生效** |
 
+例外：`brand` 为 `claude` 时开屏艺术槽固定为 Claude 娘，本表不适用。
+
 ### 优先级与强制关闭
 
 - `/settings → 终端图片预览` 保存的选择优先于 `config.terminalImages`。
