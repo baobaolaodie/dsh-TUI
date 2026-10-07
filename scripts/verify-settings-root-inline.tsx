@@ -134,11 +134,11 @@ assert(await settled(() => !screen().includes('D one') && screen().includes('A o
 await instance.unmount()
 
 // ── 6. Precedence-hint visibility across widths, in both languages (T08) ──
-// The frozen contract (TASK.md «冻结表述 B v2», visibility tiers) is about
+// The frozen contract (TASK.md «冻结表述 B v3», visibility tiers) is about
 // what the bottom help bar really shows: at 100 columns both hints still
 // spell out the tokens naming who owns the splash slot; at 80 columns the
 // short core still names whale / the splash art; at 60 columns only the head
-// fits — and that head must be the semantic short core, not the old
+// fits — and that head must match the frozen short core verbatim, not the old
 // technical-detail sentence. The two fields come from the real definitions
 // (the contract's single source of truth), rendered under their real topic
 // group. Measured widths are printed as a readout only, never asserted as
@@ -202,10 +202,25 @@ const TIER_TOKENS: Record<'en' | 'zh', Record<100 | 80, Record<'whaleGirl' | 'co
     80: { whaleGirl: ['whale'], 'companion.skin': ['开屏'] },
   },
 }
-/** 60-column tier: the head must be the semantic short core. */
-const CORE_HEAD: Record<'en' | 'zh', Record<'whaleGirl' | 'companion.skin', string>> = {
-  en: { whaleGirl: 'Set Compani', 'companion.skin': 'Also picks' },
-  zh: { whaleGirl: '宠物皮肤要设', 'companion.skin': '同时决定开屏' },
+/** A required token must be a whole word: a bare `whale` must not be satisfied
+ *  by the `whaleGirl` token next to it (same tokenizer as the definitions
+ *  check — independent review B-F3). CJK topics have no word boundaries in
+ *  that split, so they stay a plain substring match. */
+const showsToken = (visible: string, token: string): boolean =>
+  /^[A-Za-z0-9_]+$/.test(token) ? visible.split(/[^A-Za-z0-9_]+/).includes(token) : visible.includes(token)
+/** The frozen short cores each hint opens with (TASK.md «冻结表述 B v3»), the
+ *  same literals `verify-settings-definitions.ts` anchors on. Truncation only
+ *  drops the tail, so whatever the bar shows must match the core verbatim —
+ *  a semantic inversion keeps every token and is caught only here. */
+const SHORT_CORES: Record<'en' | 'zh', Record<'whaleGirl' | 'companion.skin', string>> = {
+  en: {
+    whaleGirl: 'Set Companion skin to whale, not deepy/whaleGirl.',
+    'companion.skin': 'Also picks the splash art. Set it to whale to keep the maid portrait.',
+  },
+  zh: {
+    whaleGirl: '宠物皮肤要设为 whale，不要 deepy/whaleGirl',
+    'companion.skin': '同时决定开屏艺术槽。设为 whale 才保留女仆娘立绘。',
+  },
 }
 
 for (const lang of ['en', 'zh'] as const) {
@@ -217,14 +232,22 @@ for (const lang of ['en', 'zh'] as const) {
       const check = (key: 'whaleGirl' | 'companion.skin', seen: { hint: string; keys: string }): void => {
         const budget = columns - stringWidth(seen.keys) - 2
         console.log(`readout — ${lang} ${columns}col ${key}: budget ${budget}, visible ${stringWidth(seen.hint)} cols | ${seen.hint}`)
-        // The 60-column tier has no token budget left: only the head fits,
-        // and the head must be the semantic short core.
-        if (columns === 60) {
-          assert(seen.hint.startsWith(CORE_HEAD[lang][key]), `${lang} ${columns}col: ${key} visible text starts with the short-core head`, ui.screen())
-          return
+        // The 60-column tier has no token budget left: the head below is all it
+        // can show, and the tokens are not required at that width (a known UI
+        // limit the docs' precedence table covers).
+        if (columns !== 60) {
+          const tokens = TIER_TOKENS[lang][columns][key]
+          assert(tokens.every(token => showsToken(seen.hint, token)), `${lang} ${columns}col: ${key} visible text shows ${tokens.join(' + ')}`, ui.screen())
         }
-        const tokens = TIER_TOKENS[lang][columns][key]
-        assert(tokens.every(token => seen.hint.includes(token)), `${lang} ${columns}col: ${key} visible text shows ${tokens.join(' + ')}`, ui.screen())
+        // Whatever is visible is a truncated head of the hint, so it must still
+        // match the frozen short core: tokens survive a semantic inversion
+        // (`Never choose whale …`), this does not. The bar may run past the
+        // core into the detail sentence, so compare the overlap only.
+        const visible = seen.hint.replace(/…$/, '')
+        const core = SHORT_CORES[lang][key]
+        const overlap = Math.min(visible.length, core.length)
+        assert(visible.slice(0, overlap) === core.slice(0, overlap),
+          `${lang} ${columns}col: ${key} visible text matches the frozen short core`, ui.screen())
       }
       // The screen opens focused on the first field; one ↓ moves to the
       // second. The pointer glyph is text-observable, so the focus step has
