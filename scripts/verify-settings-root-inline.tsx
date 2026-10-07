@@ -88,6 +88,13 @@ const instance = await render(
 const screen = (): string => viewportLines(term, rows).join('\n')
 /** The rendered line carrying text, if any. */
 const lineOf = (text: string): string => screen().split('\n').find(line => line.includes(text)) ?? ''
+/** The help bar's two segments, read off the rendered line: the focused
+ *  field's hint on the left, the pinned navigation keys on the right. */
+function barSegments(line: string): { hint: string; keys: string } {
+  const cut = line.indexOf('Enter')
+  if (cut < 0) return { hint: line.trim(), keys: '' }
+  return { hint: line.slice(0, cut).trim(), keys: line.slice(cut).trim() }
+}
 
 /** Focus moves only change colors/the pointer glyph; the pacing sleeps are
  *  the upstream convention (no text-observable condition mid-walk). */
@@ -95,9 +102,11 @@ async function arrow(direction: 'down' | 'up', times: number): Promise<void> {
   const key = direction === 'down' ? '\x1b[B' : '\x1b[A'
   for (let i = 0; i < times; i++) { stdin.write(key); await sleep(120) } // 固定窗:pacing 焦点步进无 settle 锚点
 }
-function assert(condition: boolean, label: string): void {
+/** `dump` overrides the failure screen dump for scenarios rendered into their
+ *  own terminal (the module-level `screen()` belongs to the first harness). */
+function assert(condition: boolean, label: string, dump?: string): void {
   console.log((condition ? 'ok' : 'FAIL') + ' — ' + label)
-  if (!condition) { console.log('--- screen ---\n' + screen()); process.exit(1) }
+  if (!condition) { console.log('--- screen ---\n' + (dump ?? screen())); process.exit(1) }
 }
 
 // 1. Inline groups lay their fields — and header — right on the root page.
@@ -123,4 +132,112 @@ assert(await settled(() => screen().includes('D one') && screen().includes('D tw
 stdin.write('\x1b')
 assert(await settled(() => !screen().includes('D one') && screen().includes('A one')), 'Esc returns to the root page with the inline fields in place')
 await instance.unmount()
+
+// ── 6. Precedence-hint visibility across widths, in both languages (T08) ──
+// The frozen contract (TASK.md «冻结表述 B v2», visibility tiers) is about
+// what the bottom help bar really shows: at 100 columns both hints still
+// spell out the tokens naming who owns the splash slot; at 80 columns the
+// short core still names whale / the splash art; at 60 columns only the head
+// fits — and that head must be the semantic short core, not the old
+// technical-detail sentence. The two fields come from the real definitions
+// (the contract's single source of truth), rendered under their real topic
+// group. Measured widths are printed as a readout only, never asserted as
+// thresholds (L-025).
+const [{ settingField, SETTING_GROUPS }, { setLang }, { stringWidth }] = await Promise.all([
+  import('../src/settings/definitions.js'),
+  import('../src/i18n.js'),
+  import('../src/ink/stringWidth.js'),
+])
+
+const HINT_ROWS = 16
+const hintDocs = { 'dsh-tui': { revision: 1, value: { whaleGirl: false, companion: { skin: 'deepy' } }, user: {} } }
+const hintHost = {
+  listNamespaces: () => Object.entries(hintDocs).map(([ns, doc]) => ({
+    ns, revision: doc.revision, applies: 'live' as const, value: { ...doc.value }, user: { ...doc.user },
+  })),
+  // Read-only scenario: a write here means the visibility probe drifted into
+  // mutating territory and must fail loudly.
+  write: (ns: string) => Promise.reject(new Error('unexpected write in the hint-visibility scenario: ' + ns)),
+  credentialConfigured: () => Promise.resolve(false),
+  writeCredential: () => Promise.resolve(),
+}
+const hintSection = {
+  ns: 'dsh-tui',
+  title: 'dsh-tui',
+  groups: SETTING_GROUPS.filter(group => group.id === 'splash'),
+  fields: [settingField('whaleGirl'), settingField('companion.skin')],
+}
+
+async function openHintScreen(width: number) {
+  const term = new XTerm({ cols: width, rows: HINT_ROWS, scrollback: 50, allowProposedApi: true })
+  class HintStdout extends Writable {
+    columns = width
+    rows = HINT_ROWS
+    isTTY = true
+    _write(chunk: unknown, _e: BufferEncoding, cb: () => void) { term.write(String(chunk), cb) }
+  }
+  const stdin = new FakeStdin()
+  const instance = await render(
+    <Settings channel={{ settingsHost: () => hintHost, settingsSections: () => [hintSection], subscribeSettingsSections: () => () => {} } as any} onClose={() => {}} />,
+    { stdout: new HintStdout(), stdin, stderr: new FakeStderr(), exitOnCtrlC: false, patchConsole: false },
+  )
+  const screen = (): string => viewportLines(term, HINT_ROWS).join('\n')
+  const lineOf = (text: string): string => screen().split('\n').find(line => line.includes(text)) ?? ''
+  const bar = (): { hint: string; keys: string } => barSegments(lineOf('Esc '))
+  return { stdin, lineOf, bar, screen, unmount: () => instance.unmount() }
+}
+
+const HINT_LABELS: Record<'en' | 'zh', Record<'whaleGirl' | 'companion.skin', string>> = {
+  en: { whaleGirl: 'Maid portrait', 'companion.skin': 'Companion skin' },
+  zh: { whaleGirl: '女仆娘立绘', 'companion.skin': '宠物皮肤' },
+}
+/** Tokens the 100/80-column tiers require in the visible segment. */
+const TIER_TOKENS: Record<'en' | 'zh', Record<100 | 80, Record<'whaleGirl' | 'companion.skin', readonly string[]>>> = {
+  en: {
+    100: { whaleGirl: ['deepy', 'whale'], 'companion.skin': ['splash', 'whale'] },
+    80: { whaleGirl: ['whale'], 'companion.skin': ['splash'] },
+  },
+  zh: {
+    100: { whaleGirl: ['deepy', 'whale'], 'companion.skin': ['开屏', 'whale'] },
+    80: { whaleGirl: ['whale'], 'companion.skin': ['开屏'] },
+  },
+}
+/** 60-column tier: the head must be the semantic short core. */
+const CORE_HEAD: Record<'en' | 'zh', Record<'whaleGirl' | 'companion.skin', string>> = {
+  en: { whaleGirl: 'Set Compani', 'companion.skin': 'Also picks' },
+  zh: { whaleGirl: '宠物皮肤要设', 'companion.skin': '同时决定开屏' },
+}
+
+for (const lang of ['en', 'zh'] as const) {
+  setLang(lang)
+  for (const columns of [100, 80, 60] as const) {
+    const ui = await openHintScreen(columns)
+    try {
+      const labels = HINT_LABELS[lang]
+      const check = (key: 'whaleGirl' | 'companion.skin', seen: { hint: string; keys: string }): void => {
+        const budget = columns - stringWidth(seen.keys) - 2
+        console.log(`readout — ${lang} ${columns}col ${key}: budget ${budget}, visible ${stringWidth(seen.hint)} cols | ${seen.hint}`)
+        // The 60-column tier has no token budget left: only the head fits,
+        // and the head must be the semantic short core.
+        if (columns === 60) {
+          assert(seen.hint.startsWith(CORE_HEAD[lang][key]), `${lang} ${columns}col: ${key} visible text starts with the short-core head`, ui.screen())
+          return
+        }
+        const tokens = TIER_TOKENS[lang][columns][key]
+        assert(tokens.every(token => seen.hint.includes(token)), `${lang} ${columns}col: ${key} visible text shows ${tokens.join(' + ')}`, ui.screen())
+      }
+      // The screen opens focused on the first field; one ↓ moves to the
+      // second. The pointer glyph is text-observable, so the focus step has
+      // a real settle anchor (no fixed pacing window).
+      assert(await settled(() => ui.lineOf(labels.whaleGirl).includes('❯')), `${lang} ${columns}col: focus starts on ${labels.whaleGirl}`, ui.screen())
+      check('whaleGirl', ui.bar())
+      ui.stdin.write('\x1b[B')
+      assert(await settled(() => ui.lineOf(labels['companion.skin']).includes('❯')), `${lang} ${columns}col: ↓ moves the focus to ${labels['companion.skin']}`, ui.screen())
+      check('companion.skin', ui.bar())
+    } finally {
+      await ui.unmount()
+    }
+  }
+}
+
 console.log('verify-settings-root-inline: all assertions passed')
