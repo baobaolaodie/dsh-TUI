@@ -90,7 +90,7 @@ A complete common override looks like this:
 
 | `companion.skin` | Splash (header) art slot | Maid-portrait toggle |
 | --- | --- | --- |
-| `deepy` (default) | Deepy mascot (letter-grid animation; real image when the image protocol allows) | **No effect** |
+| `deepy` (default) | the Deepy mascot (letter-grid animation only — no raster) | **No effect** |
 | `whaleGirl` | Whale-girl mascot (real image over the image protocol; letter-grid fallback without it) | **No effect** |
 | `whale` | Original path: the pixel whale; the maid portrait once the Maid-portrait toggle is on (real image preferred, character-art fallback) | **Applies** |
 
