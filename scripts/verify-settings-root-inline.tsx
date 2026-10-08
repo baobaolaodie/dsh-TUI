@@ -246,6 +246,12 @@ for (const lang of ['en', 'zh'] as const) {
         const visible = seen.hint.replace(/…$/, '')
         const core = SHORT_CORES[lang][key]
         const overlap = Math.min(visible.length, core.length)
+        // An empty bar (the help row dropped the hint, or the `Esc ` anchor the
+        // bar is read from went missing) would make the overlap 0 and compare
+        // `` === `` — green with nothing checked, which at 60 columns is the only
+        // assertion covering this hint. Every tier below shows a non-empty head
+        // (12–13 columns at 60), so require one.
+        assert(overlap > 0, `${lang} ${columns}col: ${key} help bar shows a non-empty hint head`, ui.screen())
         assert(visible.slice(0, overlap) === core.slice(0, overlap),
           `${lang} ${columns}col: ${key} visible text matches the frozen short core`, ui.screen())
       }
