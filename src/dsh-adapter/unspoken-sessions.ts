@@ -26,10 +26,31 @@
  *     informational records (`dsh-session/lib/types/types.d.ts:503-507`), and
  *     every conversational event type is a known one.
  *  3. PROCESS — the session this process is bound to, a live background
- *     session, and any delegated run or descendant of one are spared. The
- *     shipping delete primitive has no `kind`/`parentSession` check
+ *     session, any session a LIVE peer process holds in the mount ledger, and
+ *     any delegated run or descendant of one are spared. The shipping delete
+ *     primitive has no `kind`/`parentSession` check
  *     (`compat/sessionLog.ts:1280-1304`; see ADR-0012's note that only the UI
  *     filters sub-agents), so this layer is ours to add.
+ *
+ *     Delegation is decided from the candidate's **own header** — the first
+ *     frame of its log, which carries `origin` / `parentSession` /
+ *     `delegationDepth` (`sessions/header.ts:16-25`, `:102-113`) — because the
+ *     install's listing is a boot-time snapshot: a delegated run created after
+ *     it is in the index but in no listing, and a rule that reads only the
+ *     listing hands that run to the delete primitive (REVIEW F-03). The listing
+ *     keeps its own job, the **descendant closure**: a fork whose ancestor the
+ *     listing (or the ancestor's own header) calls delegated is spared too. An
+ *     UNREADABLE header adds no protection rather than a guess — the listing
+ *     still speaks, and this read resolves the log through the same lookup the
+ *     delete primitive uses, so a log whose header cannot be read is a log that
+ *     primitive refuses to remove.
+ *
+ *     Cross-process holding comes from the same ledger the mount paths consult
+ *     (`sessionMounts.readSessionOwners`, synchronous, dead pids already
+ *     dropped): the delete entry points refuse a session a peer holds
+ *     (`useSessionSupervisor.ts:610-616`), and an exit sweep that skipped that
+ *     check could delete a session another terminal is still driving
+ *     (REVIEW F-04).
  *
  * The action is the existing primitive plus the same per-session note cleanup
  * the picker's delete uses (`channel/session-metadata.ts:233-242`):
@@ -50,7 +71,9 @@
  * @module @deepseek-harness-tui/dsh-tui/dsh-adapter/unspoken-sessions
  */
 import { clearResumeTarget, forgetAgentViewSession, forgetSession, readResumeTarget } from '../sessionHistory.js'
-import { deleteSessionLog, readSessionEventsFromLog } from './compat/sessionLog.js'
+import { deleteSessionLog, findSessionLogFile, readSessionEventsFromLog } from './compat/sessionLog.js'
+import { readHeader, type RawSessionHeader } from './sessions/header.js'
+import { decodeFrame, readWindow, walkFrames } from './sessions/frames.js'
 import { readIndex as readSessionIndex } from './sessions/store.js'
 
 /** Candidates examined per round. Past it a shell is spared, not deleted. */
@@ -61,6 +84,71 @@ const DEFAULT_MAX_CANDIDATES = 512
  * *proven* empty, so it is spared (`log-incomplete`).
  */
 const DEFAULT_MAX_EVENTS_PER_LOG = 1024
+
+/**
+ * Bytes read from the head of one log to reach its first frame. The physical
+ * header is the first line of the file (`compat/sessionLog.ts:809`), so this is
+ * the head-window budget `sessions/digest.ts` already reads with; a first frame
+ * larger than it reports "unknown", which on its own never deletes anything.
+ */
+const HEADER_WINDOW_BYTES = 64 * 1024
+
+/** Shared empty set — "no ledger was read" must not allocate per round. */
+const NO_SESSIONS: ReadonlySet<string> = new Set<string>()
+
+/**
+ * One session's physical header, from the first frame of its log.
+ *
+ * The first line of a session log IS the physical `session` record, and it
+ * carries `origin` / `parentSession` / `delegationDepth`. The bounded EVENT
+ * reader cannot serve it: physical header rows have no `seq`
+ * (`compat/sessionLog.ts:821`), so they never reach `events`. This decodes only
+ * the first frame of a 64 KiB head window, which makes one candidate one small
+ * read instead of a full parse.
+ *
+ * The log is located exactly as the delete primitive locates it
+ * ({@link findSessionLogFile} — the shipping compressed generations), so
+ * "this read cannot see the header" and "the primitive cannot see the log"
+ * are the same fact rather than two that can drift apart.
+ *
+ * Never throws: an absent, undecodable, misnamed or oversized-first-frame log
+ * reports `undefined`, and the caller treats that as "no new information"
+ * (see {@link UnspokenSweepDeps.readSessionHeader}).
+ *
+ * @param sessionId - Session whose header should be read.
+ * @returns The narrowed header, or undefined when it cannot be read.
+ */
+export function readSessionHeaderFromLog(sessionId: string): RawSessionHeader | undefined {
+  try {
+    const path = findSessionLogFile(sessionId)
+    if (path === undefined) return undefined
+    const window = readWindow(path, HEADER_WINDOW_BYTES)
+    if (window === undefined) return undefined
+    const first = walkFrames(window.buffer, 0, 1)[0]
+    if (first === undefined) return undefined
+    const line = decodeFrame(window.buffer, first)?.[0]
+    return line === undefined ? undefined : readHeader(line)
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * Whether a header marks a DELEGATED run — never a fork.
+ *
+ * `origin === 'subagent'` is upstream's own classification
+ * (`sessions/header.ts:102-113`); a nonzero `delegationDepth` records the same
+ * fact without it (upstream keeps that field optional, so requiring it would
+ * under-mark). `parentSession` alone is deliberately NOT enough: a `/rewind`
+ * fork records one exactly like a delegated child does, and a fork inherits its
+ * ancestor's conversation — the log layer sees the inherited `turn/start` or
+ * human message in the fork's own artifact and spares it there.
+ * @param header - A narrowed header.
+ * @returns True when the session is a delegated run.
+ */
+function isDelegatedHeader(header: RawSessionHeader): boolean {
+  return header.origin === 'subagent' || (header.delegationDepth ?? 0) > 0
+}
 
 /**
  * One index entry, as much of it as layer ① reads. `SessionIndex` satisfies
@@ -106,6 +194,8 @@ export type UnspokenSkipReason =
   | 'live-session'
   /** ③ The session is a delegated run or descends from one. */
   | 'subagent'
+  /** ③ Another LIVE process holds the session in the mount ledger. */
+  | 'held-elsewhere'
   /** Sweep only: the delete primitive declined (absent or uncontained). */
   | 'delete-unavailable'
   /** A dependency threw; the session is spared rather than guessed at. */
@@ -135,9 +225,11 @@ export interface UnspokenSweepResult {
 }
 
 /**
- * What the sweep cannot know from inside this module. The first three read
- * the local store and have real defaults; the process-layer facts are
+ * What the sweep cannot know from inside this module. The store-layer reads
+ * (index, log, header) have real shipping defaults; the process-layer facts are
  * required, because a missing one would silently widen the delete set.
+ * `occupiedElsewhere` is the one optional process fact: absent means no ledger
+ * was consulted, which is what every caller but the exit path wants.
  */
 export interface UnspokenSweepDeps {
   /** ① Index snapshot. Defaults to the TUI session index. */
@@ -150,6 +242,25 @@ export interface UnspokenSweepDeps {
   readonly liveSessionIds: () => ReadonlySet<string>
   /** ③ Whether a session is a delegated run or a descendant of one. */
   readonly isSubagentOrDescendant: (sessionId: string) => boolean
+  /**
+   * ③ One candidate's own physical header. Defaults to
+   * {@link readSessionHeaderFromLog}, so the shipping exit path reads it
+   * without wiring anything.
+   *
+   * `undefined` means "no new information": the session is judged by the
+   * listing lineage alone, exactly as before this source existed. That is safe
+   * rather than optimistic because the default reader and the delete primitive
+   * locate a log through the same lookup — a log whose header cannot be read
+   * is a log the primitive refuses to remove (`delete-unavailable`).
+   */
+  readonly readSessionHeader?: (sessionId: string) => RawSessionHeader | undefined
+  /**
+   * ③ Sessions some OTHER live process holds, from the mount ledger
+   * (`sessionMounts.readSessionOwners`, synchronous, dead pids already
+   * dropped). Absent means no ledger was read — the shipping behaviour
+   * everywhere except the exit path, which is the only caller that has one.
+   */
+  readonly occupiedElsewhere?: () => ReadonlySet<string>
   /** Remove one session's log directory. Defaults to `deleteSessionLog`. */
   readonly deleteLog?: (sessionId: string) => 'deleted' | 'unavailable'
   /** Forget a deleted session's notes. Defaults to the picker's own trio. */
@@ -165,6 +276,12 @@ export interface UnspokenSweepDeps {
  * passed. Injectable so the regression can drive this exact pipeline with
  * reversed rules and prove the assertions have discriminating power
  * (AC-7 ③, LESSONS L-044).
+ *
+ * `held` is the whole process layer: this process's binding and live runs, the
+ * ledger's foreign holders, and the candidate's own header lineage. It is one
+ * rule rather than four because every one of them answers the same question —
+ * "may something else still be using this session?" — and the FIRST answer
+ * wins, so the reported reason is deterministic.
  */
 export interface UnspokenJudges {
   readonly index: (entry: UnspokenIndexEntry | undefined) => UnspokenSkipReason | undefined
@@ -213,7 +330,17 @@ export function delegatedSessionIds(sessions: Iterable<UnspokenSessionLineage>):
 
 /** The shipping rules, bound to the injected process-layer facts. */
 export function unspokenJudges(deps: UnspokenSweepDeps): UnspokenJudges {
-  let binding: { readonly current: string | undefined, readonly live: ReadonlySet<string> } | undefined
+  const readSessionHeader = deps.readSessionHeader ?? readSessionHeaderFromLog
+  /** Whether one session's own header marks it a delegated run. */
+  const delegatedHeaderOf = (sessionId: string): boolean => {
+    const header = readSessionHeader(sessionId)
+    return header !== undefined && isDelegatedHeader(header)
+  }
+  let binding: {
+    readonly current: string | undefined
+    readonly live: ReadonlySet<string>
+    readonly occupied: ReadonlySet<string>
+  } | undefined
   return {
     index: entry =>
       entry?.derived === undefined ? 'index-unknown' : entry.derived.hasPrompt ? 'index-has-prompt' : undefined,
@@ -228,9 +355,26 @@ export function unspokenJudges(deps: UnspokenSweepDeps): UnspokenJudges {
       return undefined
     },
     held: sessionId => {
-      binding ??= { current: deps.currentSessionId(), live: deps.liveSessionIds() }
+      binding ??= {
+        current: deps.currentSessionId(),
+        live: deps.liveSessionIds(),
+        occupied: deps.occupiedElsewhere?.() ?? NO_SESSIONS,
+      }
       if (sessionId === binding.current) return 'current-session'
       if (binding.live.has(sessionId)) return 'live-session'
+      if (binding.occupied.has(sessionId)) return 'held-elsewhere'
+      // The candidate's OWN header first: the listing is a boot-time snapshot,
+      // so a delegated run created after it is named by no listing at all.
+      const own = readSessionHeader(sessionId)
+      if (own !== undefined && isDelegatedHeader(own)) return 'subagent'
+      // Descendant closure. The listing's verdict on the ancestor comes first
+      // (it covers whole chains); one hop up the candidate's own header chain
+      // backs it up, because a listing that predates a delegated run cannot
+      // name that run's descendants either.
+      const parent = own?.parentSession
+      if (parent !== undefined && (deps.isSubagentOrDescendant(parent) || delegatedHeaderOf(parent))) {
+        return 'subagent'
+      }
       return deps.isSubagentOrDescendant(sessionId) ? 'subagent' : undefined
     },
   }

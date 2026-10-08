@@ -38,6 +38,16 @@
  *      untouched (listing GC converges it) and forgets the session's
  *      `last-used` / agent-view / resume notes.
  *  12. A refused or throwing delete is reported and leaves the log in place.
+ *  13. Layer ③ reads each candidate's OWN header (from its log's first frame):
+ *      `origin:'subagent'` and `delegationDepth > 0` spare a run the listing
+ *      cache never saw, a fork whose listed ancestor is delegated is spared as
+ *      a descendant, and a plain fork of a non-delegated parent is left to
+ *      layer ② (which sees the inherited conversation in the fork's own log).
+ *      The pre-fix listing-only rule is re-run as the negative control: it
+ *      really does collect the header-delegated shell (F-03's minimum case).
+ *  14. A session another live process holds is spared with `held-elsewhere` —
+ *      driven both through the injected seam and through the real
+ *      `session-mounts.json` ledger and `sweepUnspokenOnExit`'s own wiring.
  *
  * Run: node --import tsx/esm scripts/verify-unspoken-session-sweep.tsx
  * The sessions root, the DSH home and `~/.dsh-tui` are ALL redirected under
@@ -48,6 +58,9 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { constants, zstdCompressSync, zstdDecompressSync } from 'node:zlib'
+// Type-only, so it is erased: the value import below must stay AFTER the env
+// override (DATA_DIR and sessionsRoots() read the environment at import time).
+import type { UnspokenSweepDeps } from '../src/dsh-adapter/unspoken-sessions.js'
 
 const root = mkdtempSync(join(tmpdir(), 'dsh-tui-sweep-'))
 // Registered BEFORE the imports below: a missing or broken module under test
@@ -73,7 +86,7 @@ const agentViewFile = join(dataDir, 'agent-view-sessions.json')
 // Import AFTER the env override: DATA_DIR (utils/paths) is a module-level
 // constant and sessionsRoots() (compat/sessionLog) prefers
 // DSH_TUI_SESSION_ROOT, so both must see the temporary root from the start.
-const { collectUnspokenSessionIds, delegatedSessionIds, sweepUnspokenSessions } =
+const { collectUnspokenSessionIds, delegatedSessionIds, readSessionHeaderFromLog, sweepUnspokenSessions, unspokenJudges } =
   await import('../src/dsh-adapter/unspoken-sessions.js')
 const { readIndex } = await import('../src/dsh-adapter/sessions/store.js')
 const { readResumeTarget } = await import('../src/sessionHistory.js')
@@ -146,6 +159,17 @@ const logFile = (id: string): string => join(logDir(id), 'session.v4.jsonl.zstd'
 function writeLog(id: string, rows: readonly unknown[], extraFrames: readonly Buffer[] = []): void {
   mkdirSync(logDir(id), { recursive: true })
   writeFileSync(logFile(id), Buffer.concat([frame([header(id), boot, ...rows]), ...extraFrames]))
+}
+
+/**
+ * The same layout with extra PHYSICAL header fields (`origin`,
+ * `delegationDepth`, `parentSession`) — the fields dsh-session persists on the
+ * log's first line and the only place a candidate's own lineage can be read
+ * from (`sessions/header.ts:102-113`).
+ */
+function writeLogWithHeader(id: string, fields: Record<string, unknown>, rows: readonly unknown[] = []): void {
+  mkdirSync(logDir(id), { recursive: true })
+  writeFileSync(logFile(id), frame([{ ...header(id), ...fields }, boot, ...rows]))
 }
 
 interface IndexRow {
@@ -255,6 +279,12 @@ function buildSharedTree(): void {
   // The corrupt log needs a hand-built byte tail, so it is finished here.
   writeFileSync(logFile('corrupt-frame'), Buffer.concat([frame([header('corrupt-frame'), boot]), corruptFrame]))
 }
+
+// Loaded once, right before the cases that need the exit helper and the mount
+// ledger: plugin.ts drags in the renderer, and this regression is the fast,
+// focused one for the sweep module.
+const { sweepUnspokenOnExit, exitListingGap } = await import('../src/dsh-adapter/plugin.js')
+const { readMountLedgerStrict, readSessionOwners } = await import('../src/sessionMounts.js')
 
 try {
   buildSharedTree()
@@ -453,6 +483,14 @@ try {
       assert.deepEqual(throwingHeld.ids, [])
       assert.equal(reasonOf(throwingHeld, 'shell-fresh'), 'unexpected-error')
     })
+    const throwingHeader = collectUnspokenSessionIds({
+      ...treeDeps(),
+      readSessionHeader: () => { throw new Error('fixture header failure') },
+    })
+    check('a throwing header read is one candidate\'s problem, never the round\'s', () => {
+      assert.deepEqual(throwingHeader.ids, [])
+      assert.equal(reasonOf(throwingHeader, 'shell-fresh'), 'unexpected-error')
+    })
   })
 
   test('10. every index entry is either collected or reported with one reason', () => {
@@ -537,6 +575,196 @@ try {
         forgetState: () => { throw new Error('fixture forget failure') },
       })
       assert.deepEqual(noisy.deleted, ['refused-shell', 'throwing-delete'])
+    })
+  })
+  test('13. a candidate\'s own header decides delegation, not the listing cache', () => {
+    // The listing cache is a BOOT-time snapshot (F-03). A delegated run created
+    // after boot is in the index but not in that listing, so a rule that reads
+    // only the listing would hand it to the delete primitive. This tree is
+    // exactly that shape: one session the listing knows about (`list-delegated`)
+    // and five it does not.
+    const headerIndex: Record<string, IndexRow> = {
+      'sub-header-only': { hasPrompt: false },
+      'deep-header': { hasPrompt: false },
+      'fork-of-delegated': { hasPrompt: false },
+      'fork-of-header-delegated': { hasPrompt: false },
+      'fork-of-root': { hasPrompt: false },
+      'fork-inherited-turn': { hasPrompt: false },
+      'plain-encoding-shell': { hasPrompt: false },
+    }
+    buildTree(headerIndex, {})
+    // The header is the ONLY source for these rows; the listing below is stale
+    // by construction and names an id that is not even in the index.
+    writeLogWithHeader('sub-header-only', { origin: 'subagent', delegationDepth: 1 })
+    writeLogWithHeader('deep-header', { delegationDepth: 2 })
+    writeLogWithHeader('fork-of-delegated', { parentSession: 'list-delegated' })
+    // One hop further: the ancestor is delegated by ITS OWN header and is in no
+    // listing, which is exactly the post-boot case this layer exists for.
+    writeLogWithHeader('fork-of-header-delegated', { parentSession: 'sub-header-only' })
+    writeLogWithHeader('fork-of-root', { parentSession: 'list-root' })
+    // A fork's own log carries the inherited prefix, so layer ② sees whatever
+    // the ancestor already said — this is the evidence the fork rule rests on.
+    writeLogWithHeader('fork-inherited-turn', { parentSession: 'list-root' }, [turnStart])
+    // A `compression:"none"` backend writes a PLAIN `session.jsonl`, which the
+    // header reader's lookup deliberately does not reach — and neither does the
+    // delete primitive's. This is the case that makes "an unreadable header adds
+    // no protection" safe: unknown here still cannot remove anything.
+    mkdirSync(logDir('plain-encoding-shell'), { recursive: true })
+    writeFileSync(
+      join(logDir('plain-encoding-shell'), 'session.jsonl'),
+      [header('plain-encoding-shell'), boot].map(row => JSON.stringify(row)).join('\n') + '\n',
+    )
+
+    check('the shipping header reader reads the first physical frame, and only claims what is there', () => {
+      assert.equal(readSessionHeaderFromLog('sub-header-only')?.origin, 'subagent')
+      assert.equal(readSessionHeaderFromLog('deep-header')?.delegationDepth, 2)
+      assert.equal(readSessionHeaderFromLog('fork-of-root')?.parentSession, 'list-root')
+      assert.equal(readSessionHeaderFromLog('fork-of-root')?.origin, undefined)
+      assert.equal(readSessionHeaderFromLog('no-such-log-at-all'), undefined, 'no log is "unknown", never "root"')
+    })
+
+    const listed = new Set(['list-delegated'])
+    const headerDeps = () => ({
+      currentSessionId: () => 'bound-session',
+      liveSessionIds: () => new Set<string>(),
+      isSubagentOrDescendant: (id: string) => listed.has(id),
+    })
+    const result = collectUnspokenSessionIds(headerDeps())
+
+    check('a run whose own header says origin:subagent is spared (the boot-time listing never saw it)', () => {
+      assert.equal(reasonOf(result, 'sub-header-only'), 'subagent')
+      assert.ok(!result.ids.includes('sub-header-only'))
+      assert.ok(existsSync(logDir('sub-header-only')))
+    })
+    check('a nonzero delegationDepth alone is delegation too (upstream keeps it optional)', () => {
+      assert.equal(reasonOf(result, 'deep-header'), 'subagent')
+      assert.ok(!result.ids.includes('deep-header'))
+    })
+    check('a fork of a listed delegated run is spared as a descendant', () => {
+      assert.equal(reasonOf(result, 'fork-of-delegated'), 'subagent')
+    })
+    check('a fork whose ancestor is delegated by its OWN header is spared too', () => {
+      assert.equal(reasonOf(result, 'fork-of-header-delegated'), 'subagent')
+      assert.ok(!result.ids.includes('fork-of-header-delegated'))
+    })
+    check('a plain fork of a non-delegated parent is NOT spared by the header rule', () => {
+      assert.ok(result.ids.includes('fork-of-root'), 'the listing decides forks; the header only adds delegation')
+    })
+    check('a fork whose inherited log carries a turn/start is spared by the log layer', () => {
+      assert.equal(reasonOf(result, 'fork-inherited-turn'), 'turn-start')
+      assert.ok(!result.ids.includes('fork-inherited-turn'))
+    })
+
+    // The negative control that makes the five assertions above mean something:
+    // the shipped pre-F-03 rule (listing cache only) really does collect the
+    // header-delegated shells — R-A's `sub-live` handed to the delete primitive.
+    const shipping = unspokenJudges(headerDeps())
+    const listingOnly = collectUnspokenSessionIds(headerDeps(), {
+      index: shipping.index,
+      log: shipping.log,
+      held: id => headerDeps().isSubagentOrDescendant(id) ? 'subagent' : undefined,
+    })
+    check('the pre-fix listing-only rule collects the header-delegated shells (this case can go red)', () => {
+      assert.ok(listingOnly.ids.includes('sub-header-only'))
+      assert.ok(listingOnly.ids.includes('deep-header'))
+      assert.ok(listingOnly.ids.includes('fork-of-header-delegated'))
+      assert.ok(!result.ids.includes('sub-header-only'), 'and the shipped rule must not')
+    })
+
+    check('an unreadable header is UNKNOWN (not "a root conversation"), and unknown cannot delete', () => {
+      assert.equal(readSessionHeaderFromLog('plain-encoding-shell'), undefined)
+      assert.ok(result.ids.includes('plain-encoding-shell'), 'with no header and no listing verdict it is a candidate')
+      const swept = sweepUnspokenSessions(headerDeps())
+      assert.equal(reasonOf(swept, 'plain-encoding-shell'), 'delete-unavailable')
+      assert.equal(existsSync(join(logDir('plain-encoding-shell'), 'session.jsonl')), true)
+    })
+  })
+
+  test('14. a session another live process holds is never swept', () => {
+    const ledgerFile = join(dataDir, 'session-mounts.json')
+    const foreignPid = process.ppid
+
+    buildTree({ 'held-elsewhere': { hasPrompt: false }, 'plain-shell': { hasPrompt: false } }, {})
+    writeLog('held-elsewhere', [])
+    writeLog('plain-shell', [])
+    // The real ledger document (`publishMounts` writes version 1 + owners). The
+    // version is module-private, so it is pinned by the reader check below: a
+    // bump fails loudly there instead of silently disarming this case.
+    writeFileSync(ledgerFile, JSON.stringify({
+      version: 1,
+      owners: [
+        { pid: foreignPid, startedAt: 1, sessionIds: ['held-elsewhere'] },
+        { pid: process.pid, startedAt: 0, sessionIds: ['plain-shell'] },
+      ],
+    }))
+    check('the fixture ledger really reaches readSessionOwners (a foreign live holder and this process)', () => {
+      const read = readMountLedgerStrict()
+      if (!read.ok) assert.fail(`the fixture ledger must parse: ${read.detail}`)
+      const owners = readSessionOwners()
+      assert.equal(owners.get('held-elsewhere')?.pid, foreignPid, 'the foreign holder must survive the live-pid filter')
+      assert.equal(owners.get('plain-shell')?.pid, process.pid)
+    })
+
+    const occupiedElsewhere = (): ReadonlySet<string> => new Set(['held-elsewhere'])
+    const result = collectUnspokenSessionIds({ ...treeDeps(), occupiedElsewhere })
+    check('a foreign holder is spared and reported with its own reason', () => {
+      assert.equal(reasonOf(result, 'held-elsewhere'), 'held-elsewhere')
+      assert.ok(!result.ids.includes('held-elsewhere'))
+    })
+    check('the same fixture with NO ledger fact is a deletion candidate (this case can go red)', () => {
+      const withoutLedger = collectUnspokenSessionIds({ ...treeDeps(), occupiedElsewhere: () => new Set<string>() })
+      assert.ok(withoutLedger.ids.includes('held-elsewhere'), 'an empty ledger is the pre-F-04 answer')
+    })
+    check('a session only this process holds is not in the foreign set (the live/bound layer covers it)', () => {
+      assert.ok(result.ids.includes('plain-shell'), 'nothing claims it, so it stays a candidate')
+      assert.equal(occupiedElsewhere().has('plain-shell'), false)
+    })
+    check('this process\'s own facts are reported before the foreign one', () => {
+      const both = collectUnspokenSessionIds({
+        ...treeDeps(),
+        liveSessionIds: () => new Set(['held-elsewhere']),
+        occupiedElsewhere,
+      })
+      assert.equal(reasonOf(both, 'held-elsewhere'), 'live-session')
+    })
+
+    const swept = sweepUnspokenSessions({ ...treeDeps(), occupiedElsewhere })
+    check('the real sweep never touches the foreign holder\'s log', () => {
+      assert.deepEqual(swept.deleted, ['plain-shell'])
+      assert.equal(existsSync(logDir('held-elsewhere')), true)
+      assert.equal(existsSync(logDir('plain-shell')), false)
+    })
+
+    // The production wiring, behaviorally: `sweepUnspokenOnExit` builds the set
+    // from the REAL ledger and keeps only the records another process wrote.
+    let captured: UnspokenSweepDeps | undefined
+    writeLog('plain-shell', [])
+    sweepUnspokenOnExit({
+      currentSessionId: () => 'cur',
+      liveSessionIds: () => new Set<string>(),
+      listedSessions: () => [{ id: 'list-root' }],
+      sweep: deps => {
+        captured = deps
+        return { deleted: [], skipped: [] }
+      },
+    })
+    check('the exit sweep wires the cross-process ledger in, filtered to foreign holders', () => {
+      const foreign = captured?.occupiedElsewhere?.()
+      assert.notEqual(foreign, undefined, 'sweepUnspokenOnExit must pass the ledger seam (F-04)')
+      assert.equal(foreign?.has('held-elsewhere'), true, 'a foreign holder must be in the spared set')
+      assert.equal(foreign?.has('plain-shell'), false, 'our own record is not a foreign holder')
+    })
+
+    check('the exit path can say WHY it had no listing (F-13: "no source" is not "no listing")', () => {
+      const gap = exitListingGap({ cachedSessions: () => [] })
+      const none = exitListingGap({ cachedSessions: () => undefined })
+      const missing = exitListingGap({})
+      const threw = exitListingGap({ cachedSessions: () => { throw new Error('cache boom') } })
+      assert.equal(gap, 'listed', 'a readable listing is reported as read, not as a gap')
+      assert.match(none, /no listing/u)
+      assert.match(missing, /no source/u)
+      assert.match(threw, /read failed/u)
+      assert.equal(new Set([none, missing, threw]).size, 3, 'the three ways to lose the listing must read differently')
     })
   })
 } finally {

@@ -18,9 +18,10 @@
  * |---|---|
  * | state schema `{blank, lastPromptAt}` | `dsh-api-session-controller/lib/types/list.js:9-12` |
  * | fold | `dsh-api-session-controller/lib/types/list.js:27-35` |
- * | registration (`stateVersion: 1`, no `init` args) | `dsh-api-session-controller/lib/types/list.js:59-66` |
+ * | registration (`stateVersion: 1`, identity `wire`, no `init` args) | `dsh-api-session-controller/lib/types/list.js:59-66` |
  * | key ownership, refs, version check, first-registration-wins | `dsh-session-projection/lib/index.js:81-93` |
  * | checkpoint writes one row per registered key | `dsh-session-projection/lib/index.js:195-207` |
+ * | every WIRE read skips a definition without `wire` | `dsh-session-projection/lib/index.js:147`, `:170`, `:249` |
  * | `stateSchema.parse`: hot read guarded, cold `restore()` NOT guarded | `dsh-session-projection/lib/index.js:255`, `:297` |
  *
  * **Any change on either side must be made on both sides.** A drifted fold or
@@ -31,13 +32,27 @@
  * with the installed host's own `applySessionListMetadata` and goes red when the
  * two disagree; run it after any host upgrade.
  *
+ * ## Why the identity wire is registered
+ *
+ * A registration without `wire` still writes its row (`index.js:195-207`), which
+ * is why the original fix looked sufficient — but every *read* face the web
+ * sidebar uses (`snapshot`, `cachedSnapshot`, `viewCheckpoint`, `restore`)
+ * returns nothing for a key whose winning definition has no `wire`
+ * (`index.js:147`, `:170`, `:249`). Because the first registration of a key
+ * keeps the key (`:81-93`), a mirror registered before the host's own definition
+ * blanked the key for that read face: `snapshot(session, ['sessionListMetadata'])`
+ * served `{values: {}}`, the sidebar fell back to `metadata?.blank ?? false` and
+ * #1342 came straight back. The wire is the identity (`view: state => state`,
+ * `list.js:64`) parsed with the VERY SAME schema object the state already
+ * passed, so it cannot be the stricter of the two `viewSchema.parse` call sites
+ * (`index.js:259`, `:305`) — it can only fail where `stateSchema` would have.
+ *
  * ## What is deliberately absent
  *
- * No `wire`, and none of the legacy spellings (`schema` / `viewSchema` / `view`).
- * The write path does not need them (`index.js:195-207` clones the *state*, and
- * `checkpoint()` is not gated on `wire`), this app has no runtime consumer of the
- * value, and a wire would add a `viewSchema.parse` call site the host does NOT
- * guard (`:259`, `:305`).
+ * No second schema, no copy of the state, and none of the legacy definition-level
+ * spellings (`schema` / `viewSchema` / `view`): those belong to older host lines
+ * whose registration shape this mirror does not speak (ADR-0011 decision 8), and
+ * a separate copy could drift into being stricter than the state it views.
  *
  * ## Failure is not an option here
  *
@@ -123,15 +138,34 @@ export function applySessionListMetadata(
 }
 
 /**
+ * The mirror's registration plus the identity wire its read faces need.
+ *
+ * {@link ProjectionRegistrationLike} is the activity store's slice and has no
+ * read face of its own, so `wire` is added here rather than there. The host's
+ * registration carries exactly these two members (`list.js:64`).
+ */
+interface WiredProjectionRegistration extends ProjectionRegistrationLike {
+  readonly wire: {
+    readonly viewSchema: { parse(value: unknown): unknown }
+    /** The identity view: the host serves the state itself, uncloned. */
+    view(state: SessionListMetadataState): SessionListMetadataState
+  }
+}
+
+/**
  * The definition handed to the host registry — the mirror's whole contract.
  * @returns one registration object (the caller owns nothing on failure).
  */
-function sessionListMetadataDefinition(): ProjectionRegistrationLike {
+function sessionListMetadataDefinition(): WiredProjectionRegistration {
   return {
     key: SESSION_LIST_METADATA_KEY,
     stateSchema: sessionListMetadataSchema,
     init: initSessionListMetadata,
     apply: applySessionListMetadata,
+    // Identity, and the SAME schema object the state was parsed with: the host
+    // parses this view outside a try (`index.js:259`, `:305`), so it must not be
+    // able to reject a value `stateSchema` accepted (`list.js:64`).
+    wire: { viewSchema: sessionListMetadataSchema, view: state => state },
     stateVersion: SESSION_LIST_METADATA_STATE_VERSION,
   }
 }

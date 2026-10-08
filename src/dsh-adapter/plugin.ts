@@ -67,7 +67,7 @@ import { openInjectChannel, type InjectController } from './inject-channel.js'
 import { startSessionMountHeartbeat, mountedSessionIds } from './session-mount-heartbeat.js'
 import { attachSessionListMetadata } from './session-list-metadata.js'
 import { delegatedSessionIds, sweepUnspokenSessions, type UnspokenSessionLineage, type UnspokenSweepDeps, type UnspokenSweepResult } from './unspoken-sessions.js'
-import { reserveMount, reserveNewSession } from '../sessionMounts.js'
+import { reserveMount, reserveNewSession, ownerIsSelf, readSessionOwners } from '../sessionMounts.js'
 import { getHostDialogStore, type TuiDialogRuntime } from './dialogs.js'
 import { getHostStatusStore, type TuiStatusRuntime } from './status.js'
 import { createActivityStore } from './activity-store.js'
@@ -1860,6 +1860,14 @@ export async function apply(ctx: Context, runtimeConfig: RuntimeConfig<Config>, 
           // Diagnostics belong to the opt-in channel; a sink that throws is
           // not a reason to skip the terminal restore that follows.
         }
+      } else {
+        // F-13: "no round" has four different causes and used to be silent, so
+        // a silently disabled layer ③ could never be told from an empty index.
+        try {
+          ctx.logger.debug(`dsh-tui: clean exit swept nothing (${exitListingGap(channel)}); the session index is spared`)
+        } catch {
+          // Same contract as the line above.
+        }
       }
       void finishExit(
         ctx,
@@ -2577,8 +2585,12 @@ export interface ExitSweepInput {
  * are removed on the normal-exit branch, and nowhere else.
  *
  * Layer ③ is bound to this process — the session behind the channel, every
- * agent the registry still lists ({@link liveExitSessionIds}), and the
- * delegated lineage of the install's last listing ({@link readExitListing}).
+ * agent the registry still lists ({@link liveExitSessionIds}), the delegated
+ * lineage of the install's last listing ({@link readExitListing}) and one
+ * candidate's own header, which the sweep reads itself — plus the sessions a
+ * LIVE peer holds ({@link foreignHeldSessionIds}), because the delete entry
+ * points refuse a session another terminal drives and an exit sweep that
+ * skipped that check could remove one out from under it (REVIEW F-04).
  *
  * Every source is a thunk and the whole round is wrapped, because this runs
  * inside the exit funnel *before* `finishExit`: a hostile dependency may cost
@@ -2602,11 +2614,37 @@ export function sweepUnspokenOnExit(input: ExitSweepInput): UnspokenSweepResult 
       currentSessionId: input.currentSessionId,
       liveSessionIds: input.liveSessionIds,
       isSubagentOrDescendant: id => delegated.has(id),
+      occupiedElsewhere: foreignHeldSessionIds,
     })
   } catch {
     // Fail-soft: an exit must never be held up by its own cleanup (D7).
     return undefined
   }
+}
+
+/**
+ * Sessions a LIVE process other than this one holds, from the mount ledger.
+ *
+ * The ledger is the mount protocol's own answer to "who is driving this log"
+ * (`sessionMounts.ts:1-30`), and the interactive delete paths already refuse a
+ * foreign occupant (`useSessionSupervisor.ts:610-616`). The read is synchronous
+ * and drops dead pids, so an exit that consults it neither waits nor honours a
+ * crashed terminal's claim.
+ *
+ * This process's own record is excluded: `liveExitSessionIds` and
+ * `currentSessionId` already cover what THIS process holds, and the ledger's
+ * self-record exists for peers, not for us. A ledger this read cannot parse
+ * reports no holders (the ledger's display read is deliberately lenient); the
+ * sweep then behaves exactly as it did before this source existed.
+ *
+ * @returns Session ids held by other live processes.
+ */
+function foreignHeldSessionIds(): ReadonlySet<string> {
+  const ids = new Set<string>()
+  for (const [sessionId, owner] of readSessionOwners()) {
+    if (!ownerIsSelf(owner)) ids.add(sessionId)
+  }
+  return ids
 }
 
 /**
@@ -2660,6 +2698,48 @@ export function readExitListing(
     }))
   } catch {
     return undefined
+  }
+}
+
+/** The ways the clean-exit sweep can end up with no listing to judge lineage by. */
+export type ExitListingGap =
+  /** The mounted channel exposes no listing cache at all (an older host line). */
+  | 'no source'
+  /** The cache answered, but nothing usable: never listed, or a rejected snapshot. */
+  | 'no listing'
+  /** The cache threw while being read. */
+  | 'read failed'
+  /** The listing was readable after all — the round must have failed elsewhere. */
+  | 'listed'
+
+/**
+ * Name the reason the clean-exit sweep had no listing (REVIEW F-13).
+ *
+ * `readExitListing` folds three different worlds into one `undefined` — a host
+ * line whose channel exposes no cache, a cache that has never produced a
+ * listing, and a listing (or stored snapshot) that no longer decodes — and the
+ * sweep treats all three as "unknown ⇒ spare the index", which is right. The
+ * exit used to say nothing at all in that case, so "layer ③ ran and found
+ * nothing" and "layer ③ silently never ran" read identically in the debug
+ * channel. This names the world.
+ *
+ * Called only when the round produced no result, so its one extra read of the
+ * cache (a synchronous in-memory or snapshot read, the same one the round
+ * already paid for) costs nothing on a normal exit. `sessions/snapshot.ts`
+ * discards a whole snapshot when one row carries an unknown kind, which is why
+ * "no listing" names both possibilities rather than inventing the distinction.
+ *
+ * @param channel - The mounted channel, for its listing cache.
+ * @returns One short reason, stable enough to grep for in a debug log.
+ */
+export function exitListingGap(
+  channel: { cachedSessions?(): readonly ListedSessionKind[] | undefined },
+): ExitListingGap {
+  if (typeof channel.cachedSessions !== 'function') return 'no source'
+  try {
+    return channel.cachedSessions() === undefined ? 'no listing' : 'listed'
+  } catch {
+    return 'read failed'
   }
 }
 

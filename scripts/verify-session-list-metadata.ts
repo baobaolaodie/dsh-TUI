@@ -13,12 +13,18 @@
  * What this script pins, and why each case exists:
  *
  * 1. **The definition handed to the registry.** Key, `stateVersion`, field
- *    names/types and `init` are a *copy* of the host's (`list.js:9-12`,
- *    `:59-66`), so every one of them is asserted against a literal here — a
- *    host-side change must break this script rather than silently re-open the
- *    issue. The legacy spellings (`schema` / `viewSchema` / `view`) must stay
- *    absent: `wire` buys this mirror nothing and adds two `viewSchema.parse`
- *    call sites that the host does NOT guard (`lib/index.js:259`, `:305`).
+ *    names/types, `init` and the **identity `wire`** are a *copy* of the host's
+ *    (`list.js:9-12`, `:59-66`), so every one of them is asserted against a
+ *    literal here — a host-side change must break this script rather than
+ *    silently re-open the issue. `wire` is not decoration: every wire read
+ *    (`snapshot` / `cachedSnapshot` / `viewCheckpoint` / `restore`) skips a
+ *    definition without it (`lib/index.js:147`, `:170`, `:249`), so a mirror
+ *    registered first used to blank the key for the web sidebar's own read
+ *    face — issue #1342 back through another door. The view is the identity
+ *    (`view: state => state`, `list.js:64`) parsed with the SAME schema the
+ *    state already passed, so it can never be the stricter of the two; the
+ *    legacy definition-level spellings (`schema` / `viewSchema` / `view`) stay
+ *    absent.
  * 2. **The fold matrix.** Including the two properties a value-only test cannot
  *    see: an event that changes nothing returns the SAME reference (the host
  *    relies on it to skip re-publication), and `blank` never goes back to true.
@@ -29,7 +35,9 @@
  * 4. **Real registry integration.** Two registrations of one key are legal iff
  *    the `stateVersion` matches; the first definition wins and the row is still
  *    written. Both orders are exercised because "who registered first" decides
- *    which `apply` runs.
+ *    which `apply` runs — and the **wire read** (`snapshot()`) is asserted in
+ *    both orders as well, because that is the read face a mirror without `wire`
+ *    silently blanks and a `checkpoint()` row cannot see.
  * 5. **Degradation.** No service / a service without `register` / a conflicting
  *    version must all leave the process running: a startup risk here would be
  *    worse than the bug.
@@ -228,6 +236,8 @@ interface ProjectionRow { readonly ver: number; readonly seq: number; readonly v
 interface HostRegistryLike {
   register(definition: unknown): () => void
   checkpoint(session: unknown): Record<string, ProjectionRow>
+  /** The wire read face: skips every definition without `wire` (`lib/index.js:147`). */
+  snapshot(session: unknown, keys?: readonly string[]): { readonly asOfSeq: number, readonly values: Record<string, unknown> }
   restore(
     checkpoint: Record<string, unknown>,
     events: readonly SessionEvent[],
@@ -282,11 +292,30 @@ check('registration carries the host stateVersion', () => {
   assert.equal(SESSION_LIST_METADATA_STATE_VERSION, 1, 'the exported constant is what gets registered')
 })
 
-check('registration carries no wire and no legacy spelling', () => {
-  assert.equal(definition.wire, undefined, 'the write path does not need wire (lib/index.js:195-207)')
+check('registration carries the identity wire and no legacy spelling', () => {
+  const wire = definition.wire as {
+    viewSchema?: { parse: (value: unknown) => unknown }
+    view?: (state: unknown) => unknown
+  } | undefined
+  assert.notEqual(
+    wire,
+    undefined,
+    'every wire read skips a definition without wire (lib/index.js:147/:170/:249), and the web sidebar reads through one',
+  )
+  assert.equal(wire?.viewSchema, definition.stateSchema, 'the view must be parsed with the SAME schema the state already passed — a second copy could be the stricter of the two, and lib/index.js:259/:305 parse outside a try')
+  assert.equal(typeof wire?.view, 'function', 'wire.view must be callable')
+  const parsed = wire?.viewSchema?.parse({ blank: true, lastPromptAt: null, extra: 1 })
+  assert.deepEqual(parsed, { blank: true, lastPromptAt: null }, 'the wire schema must accept both writers\' values like the state schema')
+  assert.throws(() => wire?.viewSchema?.parse({ blank: 1, lastPromptAt: null }), 'the wire schema is the same validator, not a looser one')
   assert.equal(definition.schema, undefined, '`schema` is the 0.1.0-rc.6 spelling — deliberately not carried')
   assert.equal(definition.viewSchema, undefined, '`viewSchema` is the 0.1.2-alpha.2 spelling — deliberately not carried')
   assert.equal(definition.view, undefined, '`view` is a legacy spelling — deliberately not carried')
+})
+
+check('the identity view hands back the very state it was given (the host relies on Object.is)', () => {
+  const state: SessionListMetadataState = { blank: false, lastPromptAt: 111 }
+  const wire = definition.wire as { view: (value: unknown) => unknown }
+  assert.equal(wire.view(state), state, 'list.js:64 registers `view: state => state`; a copy would break the host\'s reference comparison')
 })
 
 check('stateSchema is a zod-shaped parser for {blank, lastPromptAt}', () => {
@@ -517,6 +546,29 @@ function assertRowWritten(registry: HostRegistryLike, sessionLike: unknown, wher
   assert.deepEqual(row?.val, SPOKEN_STATE, `${where}: the row value is the folded state`)
 }
 
+/**
+ * Assert the WIRE read serves the key — the face the web sidebar actually reads.
+ *
+ * This is the assertion the row check cannot make: `checkpoint()` writes a row
+ * per registered key with or without `wire` (`lib/index.js:195-207`), while
+ * `snapshot()` skips every definition without one (`:147`). The shim (mirror
+ * registered first) therefore used to serve `{values: {}}` and the sidebar fell
+ * back to `?? false` — issue #1342 back through another door.
+ */
+function assertSnapshotServes(registry: HostRegistryLike, sessionLike: unknown, where: string): void {
+  const snapshot = registry.snapshot(sessionLike, [SESSION_LIST_METADATA_KEY])
+  assert.notEqual(
+    snapshot.values[SESSION_LIST_METADATA_KEY],
+    undefined,
+    `${where}: snapshot() must contain the key (lib/index.js:147 skips a definition without wire)`,
+  )
+  assert.deepEqual(
+    snapshot.values[SESSION_LIST_METADATA_KEY],
+    SPOKEN_STATE,
+    `${where}: the wire view serves the folded state`,
+  )
+}
+
 const tuiFirst = await freshRoot()
 attachSessionListMetadata(tuiFirst.ctx as never)
 await flush()
@@ -524,6 +576,10 @@ tuiFirst.registry.register(webSideDefinition())
 
 check('TUI first, host second: the row is still written', () => {
   assertRowWritten(tuiFirst.registry, session, 'tui-first')
+})
+
+check('TUI first, host second: the wire read serves the key too', () => {
+  assertSnapshotServes(tuiFirst.registry, session, 'tui-first')
 })
 
 const hostFirst = await freshRoot()
@@ -535,10 +591,20 @@ check('host first, TUI second: no throw and the row is still written', () => {
   assertRowWritten(hostFirst.registry, session, 'host-first')
 })
 
+check('host first, TUI second: the wire read serves the key too', () => {
+  assertSnapshotServes(hostFirst.registry, session, 'host-first')
+})
+
 check('registration order is not observable in the value', () => {
   const left = tuiFirst.registry.checkpoint(session)[SESSION_LIST_METADATA_KEY]
   const right = hostFirst.registry.checkpoint(session)[SESSION_LIST_METADATA_KEY]
   assert.deepEqual(left, right, 'both definitions fold identically, so "who registered first" cannot matter')
+})
+
+check('registration order is not observable in the wire read either', () => {
+  const left = tuiFirst.registry.snapshot(session, [SESSION_LIST_METADATA_KEY])
+  const right = hostFirst.registry.snapshot(session, [SESSION_LIST_METADATA_KEY])
+  assert.deepEqual(left, right, 'a shim registered first must serve the same value as one registered second (AC-2)')
 })
 
 const refs = await freshRoot()
@@ -806,6 +872,32 @@ expectRed(
   'a value-only test would not notice a missing registration',
   () => assertRowWritten(unregistered, session, 'negative control'),
   'without the registration the checkpoint has no such key — the original bug',
+)
+
+/**
+ * The mirror exactly as it shipped before the `wire` was added: same key, same
+ * version, same fold — and no wire. Registering it FIRST is the shipped layout
+ * the regression missed (F-02), because the host's own second registration only
+ * bumps `refs` and the wire-less definition keeps the key (`lib/index.js:85-93`).
+ */
+function mirrorWithoutWire(): Record<string, unknown> {
+  const { wire, ...withoutWire } = webSideDefinition() as Record<string, unknown>
+  assert.notEqual(wire, undefined, 'the fixture must actually carry a wire, or this control proves nothing')
+  return withoutWire
+}
+
+const shimFirst = await freshRegistry()
+shimFirst.register(mirrorWithoutWire())
+shimFirst.register(webSideDefinition())
+
+check('the pre-fix shim still wrote its checkpoint row (why the row assertions missed this)', () => {
+  assertRowWritten(shimFirst, session, 'shim-first')
+})
+
+expectRed(
+  'shim first without wire: the host definition is shadowed and the wire read loses the key',
+  () => assertSnapshotServes(shimFirst, session, 'shim-first'),
+  'lib/index.js:147 skips a definition without wire and the first definition keeps the key, so snapshot() serves {values:{}} — the real TUI-first reading before this fix',
 )
 
 expectRed(
