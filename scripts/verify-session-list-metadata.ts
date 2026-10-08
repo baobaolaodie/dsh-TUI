@@ -627,8 +627,67 @@ await checkAsync('the key disappears only when the last registration is released
 
 section(SECTIONS[4])
 
-check('no projection service at all: attach is a no-op', () => {
-  attachSessionListMetadata(compositionRoot({}) as never)
+/**
+ * A composition root for a host line with **no** projection plugin: `inject`
+ * records what was asked for and never fires its callback, which is what Cordis
+ * does while nothing provides `sessionProjections`. The recorder it holds is the
+ * service a registration WOULD land in, so "no definition was registered" is a
+ * fact about `attach` rather than about a fixture with nowhere to register —
+ * `withProvider()` drives the same stored callback the way a provider would and
+ * the definition must then appear (the control inside the check below).
+ * @returns The root, the request log and the recorder.
+ */
+function rootWithoutProjections(): {
+  readonly asked: unknown[]
+  readonly debug: string[]
+  readonly registry: ReturnType<typeof recordingRegistry>
+  readonly root: { inject: (deps: unknown, callback: (ctx: unknown) => unknown) => void }
+  readonly withProvider: () => void
+} {
+  const registry = recordingRegistry()
+  const asked: unknown[] = []
+  const debug: string[] = []
+  let stored: ((ctx: unknown) => unknown) | undefined
+  return {
+    asked,
+    debug,
+    registry,
+    root: {
+      inject: (deps, callback) => {
+        asked.push(deps)
+        stored = callback
+      },
+    },
+    withProvider: () => {
+      stored?.({ ...registry.services, logger: { debug: (message: string) => debug.push(message) } })
+    },
+  }
+}
+
+const noProvider = rootWithoutProjections()
+check('no projection service at all: attach asks for it, registers nothing and stays silent', () => {
+  attachSessionListMetadata(noProvider.root as never)
+  assert.equal(noProvider.asked.length, 1, 'attach subscribes exactly once: a second subscription would double-register')
+  assert.ok(
+    (noProvider.asked[0] as readonly unknown[]).includes('sessionProjections'),
+    'and it waits on the projection service by name',
+  )
+  assert.equal(noProvider.registry.definitions.length, 0, 'no provider ever appeared, so nothing may be registered')
+  assert.equal(noProvider.debug.length, 0, 'and there is nothing to report: silence is this path\'s contract')
+  // Control: the very callback `attach` handed over, fired the way a provider
+  // would fire it, DOES register — so the zero above is `attach` behaving, not
+  // an unobservable fixture (LESSONS L-044).
+  noProvider.withProvider()
+  assert.equal(noProvider.registry.definitions.length, 1, 'a provider makes this exact shape register')
+})
+
+const lateDebug: string[] = []
+check('no projection service at all: a callback that fires without the service is still a no-op', () => {
+  // The production path never fires without a provider, but the callback keeps
+  // its own guard for a composition that answers late; it must not throw and it
+  // must not report anything (there is no key to report on).
+  assert.doesNotThrow(() => attachSessionListMetadata(compositionRoot({}, lateDebug) as never))
+  assert.equal(lateDebug.length, 0, 'nothing is registered and nothing is said')
 })
 
 const noRegisterDebug: string[] = []
