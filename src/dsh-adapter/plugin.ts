@@ -64,7 +64,9 @@ import { attachHerdrIntegration } from '../herdr.js'
 import { logMouseDebug } from '../utils/debug.js'
 import { Chat } from '../screens/Chat.js'
 import { openInjectChannel, type InjectController } from './inject-channel.js'
-import { startSessionMountHeartbeat } from './session-mount-heartbeat.js'
+import { startSessionMountHeartbeat, mountedSessionIds } from './session-mount-heartbeat.js'
+import { attachSessionListMetadata } from './session-list-metadata.js'
+import { delegatedSessionIds, sweepUnspokenSessions, type UnspokenSessionLineage, type UnspokenSweepDeps, type UnspokenSweepResult } from './unspoken-sessions.js'
 import { reserveMount, reserveNewSession } from '../sessionMounts.js'
 import { getHostDialogStore, type TuiDialogRuntime } from './dialogs.js'
 import { getHostStatusStore, type TuiStatusRuntime } from './status.js'
@@ -652,6 +654,14 @@ export async function apply(ctx: Context, runtimeConfig: RuntimeConfig<Config>, 
   // empty and the channel falls back to the last-request sample — as does a
   // non-DSH session, whose id the DSH meter never projects.
   const contextOccupancyStore = createContextOccupancyStore(ctx)
+  // Write side of the mirrored session-list projection (ADR-0011): registers
+  // `sessionListMetadata` on the host's registry so `dsh web` can tell a
+  // session nobody ever spoke in from one with a conversation. Deferred
+  // through `inject` (the registry belongs to a sibling plugin) and a no-op
+  // on a host line without the seam — a hidden row must stay exactly what it
+  // is today. Registered here, before the channel opens, so the boot session's
+  // own checkpoints already carry the key.
+  attachSessionListMetadata(ctx)
   // The channel holds a backend session; this DSH one owns the resolved
   // handle (disposed by the binding when a later adoption replaces it).
   let startupSession: AgentSession
@@ -1834,11 +1844,28 @@ export async function apply(ctx: Context, runtimeConfig: RuntimeConfig<Config>, 
       }
       // Same resumability as the markers above.
       refreshLastRunRecord()
+      // ADR-0012 decision 3: this branch — and only this branch — sweeps the
+      // shells nobody ever spoke in. The round has to finish before the call,
+      // because finishExit writes its notice right after the terminal cleanup
+      // (D6); it is synchronous and fail-soft, so it cannot hold the exit up.
+      const swept = sweepUnspokenOnExit({
+        currentSessionId: () => channel.agentId,
+        liveSessionIds: () => liveExitSessionIds(ctx, channel.agentId),
+        listedSessions: () => readExitListing(channel),
+      })
+      if (swept !== undefined) {
+        try {
+          ctx.logger.debug(`dsh-tui: clean exit swept ${swept.deleted.length} unspoken session(s), spared ${swept.skipped.length}`)
+        } catch {
+          // Diagnostics belong to the opt-in channel; a sink that throws is
+          // not a reason to skip the terminal restore that follows.
+        }
+      }
       void finishExit(
         ctx,
         instance,
         bootedFullscreen,
-        hint,
+        composeExitNotice(hint, swept?.deleted.length ?? 0),
         undefined,
         () => disposeRootAndExit(ctx, 0),
       )
@@ -2519,6 +2546,136 @@ type InkShutdownState = {
   drainStdin?: () => void
   frontFrame?: { cursor?: { x: number; y: number } }
   displayCursor?: { x: number; y: number } | null
+}
+
+/** One listed session, as much of it as the sweep's lineage layer reads. */
+export interface ListedSessionKind {
+  readonly id: string
+  readonly kind: { readonly kind: string, readonly parent?: string | undefined }
+}
+
+/** What the clean-exit sweep needs from the process around it. */
+export interface ExitSweepInput {
+  /** The session behind the channel right now; never a candidate. */
+  readonly currentSessionId: () => string | undefined
+  /** Live agents this process still holds. */
+  readonly liveSessionIds: () => ReadonlySet<string>
+  /**
+   * This install's synchronous session listing (`ChannelUi.cachedSessions`),
+   * or undefined when it has never listed. See {@link readExitListing}.
+   */
+  readonly listedSessions: () => readonly UnspokenSessionLineage[] | undefined
+  /**
+   * The round to run. Injected only by the exit regression (fault injection
+   * and deps capture); production always uses the shipping sweep.
+   */
+  readonly sweep?: (deps: UnspokenSweepDeps) => UnspokenSweepResult
+}
+
+/**
+ * The clean-exit sweep (ADR-0012 decision 3): the shells nobody ever spoke in
+ * are removed on the normal-exit branch, and nowhere else.
+ *
+ * Layer ③ is bound to this process — the session behind the channel, every
+ * agent the registry still lists ({@link liveExitSessionIds}), and the
+ * delegated lineage of the install's last listing ({@link readExitListing}).
+ *
+ * Every source is a thunk and the whole round is wrapped, because this runs
+ * inside the exit funnel *before* `finishExit`: a hostile dependency may cost
+ * the round, never the shutdown. The round is synchronous and bounded on
+ * purpose — the notice it feeds is written immediately after the terminal
+ * cleanup, so an awaited sweep could not reach it (DESIGN D6/D7).
+ *
+ * @param input - The process facts, the listing, and the round's own seam.
+ * @returns The round's result, or undefined when nothing could be proven.
+ */
+export function sweepUnspokenOnExit(input: ExitSweepInput): UnspokenSweepResult | undefined {
+  try {
+    const listed = input.listedSessions()
+    // No listing has ever completed ⇒ layer ③ cannot tell a delegated run
+    // from a conversation, and guessing would widen the delete set. The index
+    // is spared instead (ADR-0012: an unknown stays).
+    if (listed === undefined) return undefined
+    const delegated = delegatedSessionIds(listed)
+    const sweep = input.sweep ?? sweepUnspokenSessions
+    return sweep({
+      currentSessionId: input.currentSessionId,
+      liveSessionIds: input.liveSessionIds,
+      isSubagentOrDescendant: id => delegated.has(id),
+    })
+  } catch {
+    // Fail-soft: an exit must never be held up by its own cleanup (D7).
+    return undefined
+  }
+}
+
+/**
+ * Layer ③'s live set: the bound session plus every agent the registry still
+ * lists ({@link mountedSessionIds}, which already drops sub-agent runs — those
+ * are layer ③'s other half, through {@link delegatedSessionIds}).
+ *
+ * The registry read is duck-typed and yields nothing when the composition
+ * serves no `agents` service; the bound id is then the only entry, and the
+ * round spares less than it could. That limitation is recorded in the task's
+ * SUMMARY rather than papered over with a guess.
+ *
+ * @param ctx - Plugin context, for the agent registry.
+ * @param currentSessionId - The session behind the channel.
+ * @returns Session ids that must never be swept.
+ */
+export function liveExitSessionIds(ctx: Context, currentSessionId: string | undefined): ReadonlySet<string> {
+  const ids = new Set<string>()
+  if (currentSessionId !== undefined) ids.add(currentSessionId)
+  for (const id of mountedSessionIds(ctx)) ids.add(id)
+  return ids
+}
+
+/**
+ * The sweep's lineage input, from the channel's own synchronous listing cache.
+ *
+ * Never a fresh scan: the exit path must not wait on the store, so this reads
+ * what the picker or agent view already computed (`cachedSessions` — its
+ * in-memory last listing, else a previous run's snapshot). A host without that
+ * method, a throwing read, and "never listed" all report unknown, and the
+ * sweep then spares the index instead of classifying from nothing.
+ *
+ * @param channel - The mounted channel, for its listing cache.
+ * @returns One lineage row per listed session, or undefined when unknown.
+ */
+export function readExitListing(
+  channel: { cachedSessions?(): readonly ListedSessionKind[] | undefined },
+): readonly UnspokenSessionLineage[] | undefined {
+  try {
+    const rows = channel.cachedSessions?.()
+    return rows?.map(row => ({
+      id: row.id,
+      // The listed kinds are a closed sum this structural view cannot see the
+      // members of (`sessions/header.ts` classify is the authority). Anything
+      // that is neither a root conversation nor a fork therefore counts as
+      // delegated: over-marking only ever SPARES a session, while guessing the
+      // other way would widen the delete surface (ADR-0012: when in doubt,
+      // keep it).
+      delegated: row.kind.kind !== 'root' && row.kind.kind !== 'fork',
+      parent: row.kind.kind === 'root' ? undefined : row.kind.parent,
+    }))
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * The clean exit's notice: the resume hint the user already gets, plus the
+ * sweep's one line — and only when the round removed something, so a quiet
+ * exit reads byte-for-byte as it did before (ADR-0012 decision 4).
+ *
+ * @param hint - The existing resume hint, when the session is resumable.
+ * @param cleaned - Sessions the sweep deleted.
+ * @returns The notice for `finishExit`, or undefined when there is none.
+ */
+export function composeExitNotice(hint: string | undefined, cleaned: number): string | undefined {
+  if (cleaned <= 0) return hint
+  const line = t('exit-cleaned-unspoken-sessions', { count: cleaned })
+  return hint === undefined ? line : `${hint}\n${line}`
 }
 
 /**
