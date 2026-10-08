@@ -405,7 +405,7 @@ those sessions as usual — "no registration" is not "no history".
 
 On a normal exit (`/exit`, `/quit`, `/q`, a double `Ctrl+C` while idle, `Ctrl+D`), the TUI
 removes sessions **no human has ever spoken in** — leftovers from earlier runs included —
-and reports the count in its exit notice.
+and, when anything was cleaned, reports the count in its exit notice.
 
 - Only that path sweeps: hand-offs (`/update`, kernel switch, `/restart`), crashes and
   signal-driven exits leave sessions alone.
@@ -419,7 +419,7 @@ and reports the count in its exit notice.
 - `Ctrl+S` to reveal delegated runs.
 - `Ctrl+A` this-project/all-projects.
 - `Ctrl+B` branch filter.
-- `Tab` preview, `Ctrl+R` rename, `Ctrl+D` delete (DSH sessions have no delete entry; `Ctrl+X` stops a background session, it is not an empty-session cleanup).
+- `Tab` preview, `Ctrl+R` rename, `Ctrl+D` delete, `Ctrl+X` clearing empty sessions.
 - Pinning is still reachable by clicking the row's `★`.
 - Not returned to the new screen: dispatching a background session and replying to one,
   the `Space` peek panel, and `Shift+Enter` dispatch-and-attach. After `/bg`, reach a
