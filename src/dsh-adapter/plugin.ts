@@ -70,7 +70,8 @@ import { Chat } from '../screens/Chat.js'
 import { openInjectChannel, type InjectController } from './inject-channel.js'
 import { startSessionMountHeartbeat, mountedSessionIds } from './session-mount-heartbeat.js'
 import { attachSessionListMetadata } from './session-list-metadata.js'
-import { delegatedSessionIds, sweepUnspokenSessions, type UnspokenSessionLineage, type UnspokenSweepDeps, type UnspokenSweepResult } from './unspoken-sessions.js'
+import { delegatedSessionIds, provenWriteLeaseFree, sweepUnspokenSessions, type UnspokenSessionLineage, type UnspokenSweepDeps, type UnspokenSweepResult } from './unspoken-sessions.js'
+import { createWriteLeaseProbe } from './compat/writeLease.js'
 import { reserveMount, reserveNewSession, ownerIsSelf, readSessionOwners } from '../sessionMounts.js'
 import { getHostDialogStore, type TuiDialogRuntime } from './dialogs.js'
 import { getHostStatusStore, type TuiStatusRuntime } from './status.js'
@@ -1927,35 +1928,51 @@ export async function apply(ctx: Context, runtimeConfig: RuntimeConfig<Config>, 
       // shells nobody ever spoke in. The round has to finish before the call,
       // because finishExit writes its notice right after the terminal cleanup
       // (D6); it is synchronous and fail-soft, so it cannot hold the exit up.
-      const swept = sweepUnspokenOnExit({
-        currentSessionId: () => channel.agentId,
-        liveSessionIds: () => liveExitSessionIds(ctx, channel.agentId),
-        listedSessions: () => readExitListing(channel),
-      })
-      if (swept !== undefined) {
+      // Its one asynchronous input — the host's own write lease, which is what
+      // a `dsh web` session is held by and what the mount ledger cannot see
+      // (CR-2) — is proved here, BEFORE the round, so the round and the notice
+      // below still read one finished answer.
+      void (async () => {
+        // Fail-closed: a pre-pass that cannot run proves nothing, and nothing
+        // proven is nothing deleted. Every probe failure inside it already
+        // leaves its own session unproven; this guards the pre-pass itself.
+        let writeLeaseFree: (sessionId: string) => boolean = () => false
         try {
-          ctx.logger.debug(`dsh-tui: clean exit swept ${swept.deleted.length} unspoken session(s), spared ${swept.skipped.length}`)
+          writeLeaseFree = await provenWriteLeaseFree(createWriteLeaseProbe(() => ctx.get('sessionPersistence')))
         } catch {
-          // Diagnostics belong to the opt-in channel; a sink that throws is
-          // not a reason to skip the terminal restore that follows.
+          // The initial predicate stands.
         }
-      } else {
-        // F-13: "no round" has four different causes and used to be silent, so
-        // a silently disabled layer ③ could never be told from an empty index.
-        try {
-          ctx.logger.debug(`dsh-tui: clean exit swept nothing (${exitListingGap(channel)}); the session index is spared`)
-        } catch {
-          // Same contract as the line above.
+        const swept = sweepUnspokenOnExit({
+          currentSessionId: () => channel.agentId,
+          liveSessionIds: () => liveExitSessionIds(ctx, channel.agentId),
+          listedSessions: () => readExitListing(channel),
+          writeLeaseFree,
+        })
+        if (swept !== undefined) {
+          try {
+            ctx.logger.debug(`dsh-tui: clean exit swept ${swept.deleted.length} unspoken session(s), spared ${swept.skipped.length}`)
+          } catch {
+            // Diagnostics belong to the opt-in channel; a sink that throws is
+            // not a reason to skip the terminal restore that follows.
+          }
+        } else {
+          // F-13: "no round" has four different causes and used to be silent, so
+          // a silently disabled layer ③ could never be told from an empty index.
+          try {
+            ctx.logger.debug(`dsh-tui: clean exit swept nothing (${exitListingGap(channel)}); the session index is spared`)
+          } catch {
+            // Same contract as the line above.
+          }
         }
-      }
-      void finishExit(
-        ctx,
-        instance,
-        bootedFullscreen,
-        composeExitNotice(hint, swept?.deleted.length ?? 0),
-        undefined,
-        () => disposeRootAndExit(ctx, 0),
-      )
+        void finishExit(
+          ctx,
+          instance,
+          bootedFullscreen,
+          composeExitNotice(hint, swept?.deleted.length ?? 0),
+          undefined,
+          () => disposeRootAndExit(ctx, 0),
+        )
+      })()
     },
   })
   const handleExit = funnel.handleExit
@@ -2655,6 +2672,13 @@ export interface ExitSweepInput {
    */
   readonly listedSessions: () => readonly UnspokenSessionLineage[] | undefined
   /**
+   * The write-lease proof the round's last gate reads, gathered by the caller
+   * through {@link provenWriteLeaseFree} (the probe is asynchronous and the
+   * round is not). Absent leaves the host's lease unconsulted, which is the
+   * behaviour every caller but this branch wants.
+   */
+  readonly writeLeaseFree?: (sessionId: string) => boolean
+  /**
    * The round to run. Injected only by the exit regression (fault injection
    * and deps capture); production always uses the shipping sweep.
    */
@@ -2669,15 +2693,22 @@ export interface ExitSweepInput {
  * agent the registry still lists ({@link liveExitSessionIds}), the delegated
  * lineage of the install's last listing ({@link readExitListing}) and one
  * candidate's own header, which the sweep reads itself — plus the sessions a
- * LIVE peer holds ({@link foreignHeldSessionIds}), because the delete entry
- * points refuse a session another terminal drives and an exit sweep that
- * skipped that check could remove one out from under it (REVIEW F-04).
+ * LIVE peer holds ({@link foreignHeldSessionIds}) and the sessions whose
+ * exclusive write lease nothing else holds ({@link ExitSweepInput.writeLeaseFree},
+ * gathered through `provenWriteLeaseFree`). The ledger half is there because
+ * the delete entry points refuse a session another terminal drives and an exit
+ * sweep that skipped that check could remove one out from under it (REVIEW
+ * F-04); the lease half is there because the ledger only knows TUI mounts and
+ * a `dsh web` session is held by a writer that never writes it (REVIEW CR-2).
  *
  * Every source is a thunk and the whole round is wrapped, because this runs
  * inside the exit funnel *before* `finishExit`: a hostile dependency may cost
  * the round, never the shutdown. The round is synchronous and bounded on
  * purpose — the notice it feeds is written immediately after the terminal
- * cleanup, so an awaited sweep could not reach it (DESIGN D6/D7).
+ * cleanup, so a round that awaited its own inputs could not reach it
+ * (DESIGN D6/D7). The one asynchronous input, the host write lease, is
+ * therefore gathered by the caller before this call rather than awaited
+ * inside it.
  *
  * @param input - The process facts, the listing, and the round's own seam.
  * @returns The round's result, or undefined when nothing could be proven.
@@ -2696,6 +2727,7 @@ export function sweepUnspokenOnExit(input: ExitSweepInput): UnspokenSweepResult 
       liveSessionIds: input.liveSessionIds,
       isSubagentOrDescendant: id => delegated.has(id),
       occupiedElsewhere: foreignHeldSessionIds,
+      writeLeaseFree: input.writeLeaseFree,
     })
   } catch {
     // Fail-soft: an exit must never be held up by its own cleanup (D7).

@@ -52,6 +52,16 @@
  *     check could delete a session another terminal is still driving
  *     (REVIEW F-04).
  *
+ *     The ledger only knows TUI mounts, so a session a NON-TUI writer holds is
+ *     invisible to it: `dsh web` keeps its own "new session" placeholder in the
+ *     shared store without ever writing the ledger, and that placeholder is a
+ *     promptless shell with a real log — every layer above would collect it.
+ *     The host's exclusive write lease is the arbiter that does cover it, and
+ *     {@link UnspokenSweepDeps.writeLeaseFree} is how a caller that can afford
+ *     the probe feeds it in (REVIEW CR-2, {@link provenWriteLeaseFree}). It is
+ *     a separate fact from the ledger rather than more of it, and it reports
+ *     its own reason, because the two disagree exactly where this bug lives.
+ *
  * The action is the existing primitive plus the same per-session note cleanup
  * the picker's delete uses (`channel/session-metadata.ts:233-242`):
  * `deleteSessionLog` → `forgetSession` → `forgetAgentViewSession` → drop the
@@ -67,6 +77,10 @@
  * nothing here throws, retries, or spawns a process — an exit path must never
  * be blocked by its own cleanup. Synchronous on purpose: an exit funnel can
  * call it inline without leaving pending I/O or an unawaited promise behind.
+ * The one asynchronous fact it cannot produce itself is the host write lease,
+ * so that is gathered BEFORE the round by {@link provenWriteLeaseFree} and
+ * handed in as {@link UnspokenSweepDeps.writeLeaseFree}: the decision pipeline
+ * stays a synchronous function of its facts.
  *
  * The four seeded channel actions (`/model`, `/fork`, `/rewind`, `/tree`) share
  * this module's reading of the cut they offer a child, so neither rule is
@@ -79,6 +93,7 @@
  */
 import { clearResumeTarget, forgetAgentViewSession, forgetSession, readResumeTarget } from '../sessionHistory.js'
 import { deleteSessionLog, findSessionLogFile, readSessionEventsFromLog } from './compat/sessionLog.js'
+import type { WriteLeaseState } from './compat/writeLease.js'
 import { INITIAL_POLICY_EVENTS } from './fresh-agent.js'
 import { readHeader, type RawSessionHeader } from './sessions/header.js'
 import { decodeFrame, readWindow, walkFrames } from './sessions/frames.js'
@@ -204,6 +219,13 @@ export type UnspokenSkipReason =
   | 'subagent'
   /** ③ Another LIVE process holds the session in the mount ledger. */
   | 'held-elsewhere'
+  /**
+   * ③ A writer's exclusive lease on the session log is held by another
+   * process, or could not be disproved. Distinct from `held-elsewhere` on
+   * purpose: the ledger only knows TUI mounts, while this fact is the host
+   * persistence layer's own arbiter — the one that sees `dsh web` (CR-2).
+   */
+  | 'write-leased'
   /** Sweep only: the delete primitive declined (absent or uncontained). */
   | 'delete-unavailable'
   /** A dependency threw; the session is spared rather than guessed at. */
@@ -269,6 +291,18 @@ export interface UnspokenSweepDeps {
    * everywhere except the exit path, which is the only caller that has one.
    */
   readonly occupiedElsewhere?: () => ReadonlySet<string>
+  /**
+   * ③ Whether this process PROVED that no writer holds the session log's
+   * exclusive lease ({@link provenWriteLeaseFree}). True is a proof — only a
+   * proof lets the session be removed; false, a throw, or an id this pre-pass
+   * never proved all spare it with `write-leased`.
+   *
+   * Absent means the layer was not consulted, which is the shipping behaviour
+   * of every caller but the exit path: the probe is a kernel round-trip per
+   * candidate, so it is opted into rather than defaulted (see
+   * {@link UnspokenSweepDeps.occupiedElsewhere} for the same shape).
+   */
+  readonly writeLeaseFree?: (sessionId: string) => boolean
   /** Remove one session's log directory. Defaults to `deleteSessionLog`. */
   readonly deleteLog?: (sessionId: string) => 'deleted' | 'unavailable'
   /** Forget a deleted session's notes. Defaults to the picker's own trio. */
@@ -594,8 +628,78 @@ export function collectUnspokenSessionIds(
 }
 
 /**
+ * One session's write-lease probe: the session and the `cwd` its own header
+ * records, resolving to what the host's arbiter answered.
+ */
+export type WriteLeaseProbe = (sessionId: string, cwd: string) => Promise<WriteLeaseState>
+
+/**
+ * The write-lease pre-pass: prove which unspoken index entries no writer holds,
+ * one kernel probe per entry.
+ *
+ * The round itself must stay synchronous (an exit funnel calls it inline), and
+ * a lease can only be asked for asynchronously — so the one process fact that
+ * needs a round-trip is gathered here, before the round, exactly as the other
+ * process-layer facts are: as data the synchronous pipeline reads.
+ *
+ * Only layer ①'s surface is probed, because a candidate's lease cannot be
+ * named before its `cwd` is known and that comes from its own log header: the
+ * entries that pass "no person prompted here" are the only ones the round can
+ * ever collect. Nothing is deleted here and nothing is cached across rounds —
+ * the answer is a predicate over this round's observations.
+ *
+ * Bounded and fail-soft by construction: at most
+ * {@link DEFAULT_MAX_CANDIDATES} entries, in the round's own stable order with
+ * the round's own cap, so a bounded exit probes what the round would examine. A
+ * missing `cwd` or a failing probe costs that entry alone, an index this read
+ * cannot produce proves nothing at all — and an unproven session is spared.
+ *
+ * @param probe - One session's lease probe ({@link WriteLeaseProbe}).
+ * @param deps - The store seams this pre-pass reads. The defaults are the
+ *   shipping index and the shipping header reader, so the exit path injects
+ *   nothing; a regression injects the same fixtures its round uses.
+ * @returns A predicate: true only for ids this round PROVED unheld.
+ */
+export async function provenWriteLeaseFree(
+  probe: WriteLeaseProbe,
+  deps: Pick<UnspokenSweepDeps, 'readIndex' | 'readSessionHeader' | 'maxCandidates'> = {},
+): Promise<(sessionId: string) => boolean> {
+  const free = new Set<string>()
+  const readIdx: () => ReadonlyMap<string, UnspokenIndexEntry> = deps.readIndex ?? readSessionIndex
+  const readHeader: (sessionId: string) => RawSessionHeader | undefined = deps.readSessionHeader ?? readSessionHeaderFromLog
+  const maxCandidates = deps.maxCandidates ?? DEFAULT_MAX_CANDIDATES
+  let index: ReadonlyMap<string, UnspokenIndexEntry>
+  try {
+    index = readIdx()
+  } catch {
+    // An unreadable index is not an empty index: it proves nothing.
+    return () => false
+  }
+  const entries = [...index.entries()].sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0)
+  let examined = 0
+  for (const [id, entry] of entries) {
+    if (entry.derived === undefined || entry.derived.hasPrompt) continue
+    if (examined >= maxCandidates) break
+    examined += 1
+    try {
+      const cwd = readHeader(id)?.cwd
+      if (cwd === undefined) continue
+      if (await probe(id, cwd) === 'free') free.add(id)
+    } catch {
+      // One unprovable entry costs that entry; the round still runs on the rest.
+    }
+  }
+  return id => free.has(id)
+}
+
+/**
  * Collect, then delete. Never throws; a refused or throwing delete is
  * reported as `delete-unavailable` and leaves the artifact in place.
+ *
+ * The last gate before the primitive is the write-lease proof, when the caller
+ * supplied one: a candidate whose log may still be held is spared here rather
+ * than collected-and-deleted, so the ledger's `held-elsewhere` and the host
+ * lease's `write-leased` stay separately reportable.
  *
  * @param deps - See {@link collectUnspokenSessionIds}.
  * @param judges - See {@link collectUnspokenSessionIds}.
@@ -610,7 +714,21 @@ export function sweepUnspokenSessions(
   const skipped: UnspokenSkip[] = [...collected.skipped]
   const removeLog: (sessionId: string) => 'deleted' | 'unavailable' = deps.deleteLog ?? deleteSessionLog
   const forgetState = deps.forgetState ?? defaultForgetState
+  const writeLeaseFree = deps.writeLeaseFree
   for (const id of collected.ids) {
+    if (writeLeaseFree !== undefined) {
+      let free: boolean
+      try {
+        free = writeLeaseFree(id)
+      } catch {
+        // A proof that throws is not a proof; the session stays.
+        free = false
+      }
+      if (!free) {
+        skipped.push({ id, reason: 'write-leased' })
+        continue
+      }
+    }
     let outcome: 'deleted' | 'unavailable'
     try {
       outcome = removeLog(id)

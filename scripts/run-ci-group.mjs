@@ -638,6 +638,15 @@ const GROUPS = {
 // 预算、依赖抛错不中止本轮（fail-soft）；分区恰好覆盖索引一次（不静默丢），
 // 真 sweep 只删收集到的 id、索引不动、last-used/agent-view/resume 记录被遗忘。
     ["verify-unspoken-session-sweep", ['node', '--import', 'tsx/esm', 'scripts/verify-unspoken-session-sweep.tsx']],
+// 会话写租约回归（CR-2 / T-FIX-18）：真实 JSONL 持久化后端在临时 sessions 根上为
+// 夹具会话持有独占写租约（Windows 命名内核信号量 / POSIX flock），验证退出清扫
+// 「探不到就不删」——① 被别的写者持有的空壳保留、记为 write-leased（与挂载账本的
+// held-elsewhere 可区分）、日志仍在盘上；② 同一形态但无人持有照旧删除；③ 探针不可用
+// （平台不支持 / 非争用失败）保留；④ 恒返回 free 的探针必须让 ① 变红（锁着的会话
+// 被删）——「完全不看租约」正是修复前那个世界。另覆盖探针失败分类（无服务 / 无方法 /
+// 释放失败 ⇒ unknown）、预扫描的预算与顺序、索引不可读则一无所证，以及退出接线的锚：
+// 先取证 → 再本轮 → 最后组通知。
+    ["verify-session-write-lease", ['node', '--import', 'tsx/esm', 'scripts/verify-session-write-lease.ts']],
 // /resume 会话浏览器按键流回归：子运行折叠/展开、空会话不列出、搜索、
 // Esc 先清查询再退出、rename 后光标按 id 跟随目标（不是按行号）、
 // confirm-delete 只认无修饰 Enter、Esc 取消。真实 Chat 渲染驱动。
