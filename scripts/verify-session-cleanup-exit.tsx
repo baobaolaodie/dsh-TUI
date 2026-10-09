@@ -35,7 +35,10 @@
  * declaration) — the brittleness F-10 names:
  *
  *   - `attachSessionListMetadata(ctx)` is invoked exactly once, at the
- *     composition root (`plugin.ts:664`);
+ *     composition root — no line number pinned here; the order this needs is
+ *     asserted in `scripts/verify-session-list-metadata.ts` under
+ *     `order: the session-list mirror is registered before the boot agent is
+ *     resolved`;
  *   - the crash / update / kernel-switch / restart / startup branches still
  *     pass their own notice texts (`crashLine,` / `hintText,` /
  *     `t('restart-starting'),` / `formatHandoffNotice(` /

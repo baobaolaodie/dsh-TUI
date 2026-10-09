@@ -344,7 +344,9 @@ export function acquireCodexHub(host: BackendHost, settings: HubSettings): Codex
     `auth.json` → `unknown`（**评审修订**：已登录用户不能被判成 missing）；否则 `missing`。
     `missing` 不置灰：Codex 声明 `loginInSession`（N7），内核行可选并提示"启动后用 /login 登录"。
   - 版本低于 `MIN_CODEX_VERSION`：独立的"版本过旧"原因并保留升级 hint（**评审修订**：不能显示成
-    "未安装"——Codex 没有安装向导，用户需要知道该升级）。
+    "未安装"——Codex 没有安装向导，用户需要知道该升级）。**P0 起**这个原因来自
+    `BackendDetection.stale`（检测侧自己声明），宿主 UI 不再按 `id === 'codex'` 分支
+    （任何后端过旧都会自动得到同一行文案）。
 
 ### 5.5 `backend.ts`
 
@@ -716,7 +718,7 @@ thread 时 `thread/resume` 返回 `-32600`，message `thread <id> already has an
 | --- | --- |
 | `/review [base <branch> \| commit <sha> \| <自定义说明>]` | `review/start{threadId, target, delivery:'inline'}`；无参数 = `uncommittedChanges` |
 | `/diff` | 显示最近的 `turn/diff/updated` 聚合 diff（作为本地 diff 卡/`local-output` 行）；没有则 `gitDiffToRemote`（若可用）或提示 |
-| `/plan [prompt]` | 切到 Plan 模式（同 `modes.set('plan')`）；带 prompt 时随即以 Plan 模式发出（官方 `/plan` 语义） |
+| `/plan [on\|off\|prompt]` | 切到 Plan 模式（同 `modes.set('plan')`）；`on` 是 TUI 补全目录自己的状态词、归一为裸开关，`off` 退回进入 Plan 前的权限档；带 prompt 时随即以 Plan 模式发出（官方 `/plan` 语义） |
 | `/usage` | 以 `local-output` 行列出 `account/rateLimits/read` 的各窗口（已用 %、重置时间）与 credits |
 | `/<skill-name> [args]` | `turn/start{input:[{type:'skill', name, path}, {type:'text', text: args}]}`（skill 的 path 来自 `skills/list`） |
 
@@ -773,6 +775,7 @@ thread 时 `thread/resume` 返回 `-32600`，message `thread <id> already has an
 | N5 | 带真实行号的 unified patch | `channel-view.ts` `ToolFileDiff` 改为联合：`{path, oldText, newText}` \| `{path, patch, change?: 'add'\|'delete'\|'update', movePath?}`；`SplitDiffView`（及 diff 卡）对 `patch` 分支用已导入的 `JsDiff.parsePatch`（缺文件头时补 `--- a/<path>\n+++ b/<path>\n`）按 hunk 渲染真实新旧行号；`(+N -M)` 统计从 hunk 计算 | 旧分支零改动；窄宽度/CJK/超长行走现有换行与截断辅助 | C2 |
 | N6 | 目标预算 | `ChannelGoal.budget?: {tokensUsed, tokenBudget: number\|null, timeUsedSeconds}`；目标面板/状态行有 `budget` 时显示 `已用 12.3k / 50k tokens · 4m` 替代轮次；新能力 `goals?: { set(objective, {tokenBudget?}); pause(); resume(); clear() }`，核心 `/goal` 在会话无 `native.dsh` 时委托它 | DSH 目标不带 `budget`，显示不变 | C4 |
 | N7 | 内核注册数据化 | `kernelPrefs.ts` `KERNEL_IDS` 加 `'codex'`、`KERNEL_INFO.codex = {labelKey:'kernel-label-codex', product:'codex-cli'}`、`kernelDisplayName`；`dsh-adapter/backends.ts` `BACKEND_LOADERS.codex`；安装能力改为按内核（`installable(id)`，Codex 不可一键安装，只给 hint）；`BackendDetection.loginInSession?: true`（为真时 `auth:'missing'` 仍可选，行内提示"启动后 /login"）；`plugin.ts` 中 `kernel: 'dsh' \| 'claude'` 改 `KernelBackendId`；配置 Schema 与 `--backend`/`DSH_TUI_BACKEND` 接受 `codex` | 现有两内核行为不变 | C1 |
+| — | **后续（P0 后端注册表）**：N7 这套"往闭集里加 id"的接法已被取代——每个内置后端自此都有 `manifest.ts`，`KERNEL_IDS`/`KERNEL_INFO`/`kernelDisplayName`/`BACKEND_LOADERS` 不再存在，第 4 个后端只需新增一个目录。历史记录保留在此，接新后端请看 [agent-backend-design.md](agent-backend-design.md#接入新后端) 与 [ADAPTER.md](../ADAPTER.md) 的「后端 manifest」 | 三内核行为逐字不变 | — |
 | N8 | 用量与上下文占用的中立通道（**评审修订**） | **N8a** 新事件 `{ type:'usage'; turn; step?; usage: UsageDelta; time; model? }`：投影器只记账（tokens、费用分桶、`lastUsage`、回合账本），不建行、不改行，`/trace` 与导出不收录。取代 C1 评审修复里的 `assistant.message.usageOnly` 标志（R-D1）——"一条不是消息的消息"会让每个消费 `assistant.message` 的地方都得特判它；独立事件让不关心的消费者走默认分支自然忽略。**N8b** 投影器记住最近的 `context.usage{used,max}`，核心的上下文占用（`resolveContextOccupancy`）在没有 DSH 投影值时**优先**用它，其次才是计费样本 | DSH/Claude 都不发这两个事件（已核对三个翻译器），行为不变；`verify:agent-domain` 登记 | C2（第一项） |
 | N9 | 可选的 `init` 能力（**评审修订**） | `SessionCapabilities.init?: { run(): Promise<void> }`；核心 `/init` 在会话没有 `native.dsh` 且声明了 `init` 时委托它，否则维持现状（DSH 扩展生成模板 / 明确不可用） | DSH 不变；Claude 可顺带声明（提交 CLI 的 `/init`），恢复目前被本地名字遮住的 `/init` | C2 |
 
@@ -849,7 +852,7 @@ thread 时 `thread/resume` 返回 `-32600`，message `thread <id> already has an
 | `sleep` | `tool.call{name:'sleep', generic}` | `tool.result` |
 | `collabAgentToolCall` | `tool.call{presentation:{card:'subagent'}}`（抑制卡片） | `tool.result`（抑制） |
 | `subAgentActivity` | §5.13 | — |
-| `contextCompaction` | `compaction.start{trigger: 本地发起 compact ? 'manual' : 'auto', cancellable:false}` | `compaction.end{ok:true}` |
+| `contextCompaction` | `compaction.start{trigger: 本地发起 compact ? 'manual' : 'auto', cancellable:false}` | `compaction.end{ok:true, contextReplaced:true}`（清理旧上下文分类估算；占用仍等后端的新读数） |
 | `enteredReviewMode` | `notice{level:'info', text:t('codex-review-start',{review}), key:'review:'+id}` | — |
 | `exitedReviewMode` | — | `assistant.message`（review 文本作为 markdown 正文，独立 attempt） |
 | 其他未知 `type` | 调试日志 + `custom{nativeType:'codex/'+type, data:item}`（插件渲染器可接；默认不显示） | 同 |
@@ -887,7 +890,7 @@ thread 时 `thread/resume` 返回 `-32600`，message `thread <id> already has an
 | `mcpServer/startupStatus/updated` | 刷新 MCP 状态缓存；失败状态 → warning notice（`key: mcp:<name>`） |
 | `skills/changed` | 重新 `skills/list` → `commands.changed` |
 | `account/updated`、`account/login/completed` | 刷新 auth 状态；登录失败 → error notice |
-| `thread/compacted`（旧） | 若本回合已有 `contextCompaction` item 则忽略，否则 `compaction.end{ok:true}` |
+| `thread/compacted`（旧） | 若本回合已有 `contextCompaction` item 则忽略，否则 `compaction.end{ok:true, contextReplaced:true}` |
 | `thread/closed`、`thread/archived`、`thread/deleted` | 当前 thread 被别处关闭/归档 → warning notice（会话保持，可继续） |
 | `model/verification`、`modelProvider/authRecovery*`、`turn/moderationMetadata`、`model/safetyBuffering/updated` | 调试日志（C4 评估是否需要提示） |
 | 其余（realtime、fs、process、windows*、remoteControl、fuzzy、plugin/app、externalAgentConfig、command/exec/*） | 忽略（已在 optOut 的不会到达） |

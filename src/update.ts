@@ -8,7 +8,7 @@ import { gte, gt, lt, valid } from 'semver'
 import { shellQuote } from './utils/shellQuote.js'
 import { DATA_DIR } from './utils/paths.js'
 import { stripResumeArgs } from './sessionHistory.js'
-import { KERNEL_SWITCH_HANDOFF_ENV, isKernelId, kernelDisplayName, type KernelBackendId } from './kernelPrefs.js'
+import { KERNEL_SWITCH_HANDOFF_ENV, RESUME_BACKEND_ENV, parseBackendId, type KernelBackendId } from './kernelPrefs.js'
 import { classifyReplacementOutcome, formatHandoffNotice, handoffEventTag, writeHandoffStage } from './handoffEvents.js'
 import { HANDOFF_ACK_FD_ENV, HANDOFF_ATTEMPT_ENV, HANDOFF_SCREEN_ENV, parseHandoffAckLine } from './handoffAck.js'
 import { DISABLE_KITTY_KEYBOARD, DISABLE_MODIFY_OTHER_KEYS, DISABLE_WIN32_INPUT_MODE } from './ink/termio/csi.js'
@@ -152,11 +152,16 @@ export function readLastRunRecord(file: string = LAST_RUN_FILE): LastRunRecord |
     const parsed: unknown = JSON.parse(readFileSync(file, 'utf8'))
     if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return undefined
     const record = parsed as Record<string, unknown>
-    if (!isKernelId(record.backendId)) return undefined
+    // The syntax gate only: this module is also loaded by the launcher's retry
+    // path, which must not pull the registry (and cannot, without compiled
+    // modules). A record naming an uninstalled plugin reads back fine — the boot
+    // then falls back to dsh with a warning, like any unknown value (P0 D1).
+    const backendId = parseBackendId(record.backendId)
+    if (backendId === undefined) return undefined
     if (typeof record.sessionId !== 'string' || typeof record.cwd !== 'string' || typeof record.attemptId !== 'string') return undefined
     if (typeof record.updatedAt !== 'number' || !Number.isFinite(record.updatedAt)) return undefined
     return {
-      backendId: record.backendId,
+      backendId,
       sessionId: record.sessionId,
       cwd: record.cwd,
       attemptId: record.attemptId,
@@ -1116,7 +1121,12 @@ function allowBuildsKeyLine(key: string): string {
  * ERR_PNPM_IGNORED_BUILDS diagnostic stays the visible fallback.
  */
 export function ensureProfileAllowBuilds(profile: string): AllowBuildsOutcome | undefined {
-  const yamlPath = profileWorkspaceYamlPath(profile)
+  return ensureWorkspaceAllowBuilds(profileWorkspaceYamlPath(profile))
+}
+
+/** Path-based core of {@link ensureProfileAllowBuilds} for callers that hold
+ *  the profile directory itself (the Claude SDK installer's heal pass). */
+export function ensureWorkspaceAllowBuilds(yamlPath: string): AllowBuildsOutcome | undefined {
   try {
     if (!existsSafe(dirname(yamlPath))) return undefined
     let text = ''
@@ -1286,6 +1296,53 @@ export function ensureProfileReleaseAgeExclude(
   }
 }
 
+/** What ensureWorkspaceStoreDir did to the profile workspace file. */
+export interface StoreDirOutcome {
+  /** True when the file was written (the pin was appended). */
+  readonly changed: boolean
+}
+
+/**
+ * pnpm resolves its content-addressable store from the environment when no
+ * explicit setting exists: a pnpm run under a redirected \u0060XDG_DATA_HOME\u0060
+ * (sandbox, relay, container) silently records THAT location in the
+ * profile's \u0060node_modules/.modules.yaml\u0060, and every later pnpm run in the
+ * profile — dsh's own updates, plugin installs, the Claude SDK wizard —
+ * dies with ERR_PNPM_UNEXPECTED_STORE until node_modules is rebuilt by
+ * hand. Pin \u0060storeDir\u0060 in the profile's pnpm-workspace.yaml so all of them
+ * resolve the same store whatever the environment says. The value is
+ * relative on purpose: pnpm resolves it against the workspace file\u0027s
+ * directory, landing on \u0060<dsh home>/.pnpm-store\u0060 beside the profiles root
+ * for every user and surviving a relocated \u0060DSH_HOME\u0060. Same best-effort,
+ * idempotent pattern as {@link ensureProfileAllowBuilds}: an existing
+ * top-level \u0060storeDir:\u0060 is never overwritten (an explicit user decision
+ * wins), a missing file is created, and any failure resolves to undefined —
+ * pnpm's own diagnostic stays the visible fallback, and the installer's
+ * store-mismatch self-heal catches what a failed pin leaves behind.
+ */
+export function ensureWorkspaceStoreDir(yamlPath: string): StoreDirOutcome | undefined {
+  try {
+    if (!existsSafe(dirname(yamlPath))) return undefined
+    let text = ''
+    try {
+      text = readFileSync(yamlPath, 'utf8')
+    } catch {
+      // Missing file — start from an empty document; writeFileSync creates it.
+    }
+    const lines = text.split(/\r?\n/u)
+    for (const line of lines) {
+      if (line !== '' && line === line.trimStart() && /^storeDir:/u.test(line)) {
+        return { changed: false }
+      }
+    }
+    if (lines.length > 0 && lines[lines.length - 1] !== '') lines.push('')
+    lines.push('storeDir: ../../.pnpm-store')
+    writeFileSync(yamlPath, `${lines.join('\n')}\n`)
+    return { changed: true }
+  } catch {
+    return undefined
+  }
+}
 function existsSafe(path: string): boolean {
   try {
     statSync(path)
@@ -2009,9 +2066,8 @@ export function detachHandoffStdin(
  * reported synchronously (a raw inherit write can vanish mid-handoff). A
  * late exit is quiet — by then the user owned a working TUI session.
  *
- * @param sessionId - Session to resume in the replacement process (ignored
- *   when `options.backend` switches kernels — the new backend starts a
- *   fresh session).
+ * @param sessionId - Session to resume in the replacement process; empty
+ *   starts fresh. Ignored when `options.backend` switches kernels.
  * @param options - `kind: 'update'` drops the /restart boot-diagnosis
  *   marker and tags restart.log events for the update flow; `env` adds
  *   marker variables for the replacement (e.g. DSH_TUI_UPDATED_FROM);
@@ -2036,6 +2092,13 @@ export interface TuiRestartOptions {
    * new kernel starts a new session.
    */
   backend?: KernelBackendId
+  /**
+   * The chosen kernel's display name (its manifest's short label), resolved by
+   * the caller from the registry entry: THIS module prints it and has no registry
+   * of its own (`bin/dsh-tui.js` shares that constraint). Absent → the raw id,
+   * which is what an unregistered/uninstalled backend would show anyway.
+   */
+  backendName?: string
   /**
    * 'alt' (fullscreen kernel switch only): this process keeps the alternate
    * screen open through the spawn, the replacement adopts it without a
@@ -2074,6 +2137,9 @@ export function restartChildEnv(
     ...(kind === 'restart' ? { [RESTART_CHILD_ENV]: '1' } : {}),
     ...options.env,
   }
+  // The Config schema preserves '', so an absent session must be represented
+  // by removing the marker, including one inherited from the previous launch.
+  if (sessionId === '') delete childEnv.DSH_TUI_RESUME_SESSION
   // A stale handoff override never leaks into a plain replacement: the var is
   // one-shot (consumed at this process's own boot), and a child that is NOT
   // switching kernels keeps this process's kernel by config/env/memory as
@@ -2085,6 +2151,11 @@ export function restartChildEnv(
   delete childEnv[HANDOFF_SCREEN_ENV]
   delete childEnv[HANDOFF_ACK_FD_ENV]
   delete childEnv[HANDOFF_ATTEMPT_ENV]
+  // A derived resume target's provenance is never inherited: whatever survives
+  // here was built by THIS process, and on a kernel switch even the target itself
+  // goes (below). Keeping a stale mark would make the replacement revoke a target
+  // nobody derived (see resolveResumeTarget in kernelPrefs.ts).
+  delete childEnv[RESUME_BACKEND_ENV]
   if (options.backend === undefined && options.kernel !== undefined) childEnv[KERNEL_SWITCH_HANDOFF_ENV] = options.kernel
   if (options.backend !== undefined) {
     childEnv.DSH_TUI_BACKEND = options.backend
@@ -2104,12 +2175,11 @@ export function restartChildEnv(
 export async function restartTui(sessionId: string, options: TuiRestartOptions = {}): Promise<number> {
   const kind = options.kind ?? 'restart'
   const tag = options.backend !== undefined ? 'backend-switch' : kind === 'update' ? 'update-restart' : 'restart'
-  // A kernel switch must not hand the replacement THIS kernel's resume
-  // flags: an inherited `--resume <id>` in argv would send the new kernel
-  // looking for a session that belongs to the kernel it just left — the
-  // same reason DSH_TUI_RESUME_SESSION is deleted below.
+  // A fresh replacement must not inherit resume flags from the original
+  // launch: after /new they name the previous session, and after a kernel
+  // switch they name a session of the previous backend.
   const appArgs = process.argv.slice(1)
-  const argv = [...process.execArgv, ...(options.backend === undefined ? appArgs : stripResumeArgs(appArgs))]
+  const argv = [...process.execArgv, ...(options.backend === undefined && sessionId !== '' ? appArgs : stripResumeArgs(appArgs))]
   logRestartEvent(`${tag}: spawning replacement`, {
     node: process.execPath,
     argv,
@@ -2136,7 +2206,7 @@ export async function restartTui(sessionId: string, options: TuiRestartOptions =
   if (options.backend !== undefined) {
     await writeHandoffStage(
       process.stdout,
-      formatHandoffNotice('stage-start', { name: kernelDisplayName(options.backend), color: process.stdout.isTTY === true }) + '\n',
+      formatHandoffNotice('stage-start', { name: options.backendName ?? options.backend, color: process.stdout.isTTY === true }) + '\n',
     )
     logRestartEvent(handoffEventTag('stage-start'), { backend: options.backend, ...(attemptId === undefined ? {} : { attemptId }) })
   }
@@ -2263,7 +2333,7 @@ export async function restartTui(sessionId: string, options: TuiRestartOptions =
         logRestartEvent(handoffEventTag('failed'), { reason: 'spawn-error', message: error.message })
         writeHandoffNotice(
           formatHandoffNotice('failed', {
-            name: kernelDisplayName(options.backend),
+            name: options.backendName ?? options.backend,
             reason: 'spawn-error',
             safeHint: true,
             color: process.stderr.isTTY === true,
@@ -2305,7 +2375,7 @@ export async function restartTui(sessionId: string, options: TuiRestartOptions =
           const suffix = childStderr.trim() === '' ? '' : `\n${childStderr.trimEnd()}`
           writeHandoffNotice(
             formatHandoffNotice('failed', {
-              name: kernelDisplayName(options.backend),
+              name: options.backendName ?? options.backend,
               reason: outcome.reason,
               safeHint: true,
               color: process.stderr.isTTY === true,
@@ -2317,7 +2387,7 @@ export async function restartTui(sessionId: string, options: TuiRestartOptions =
           if (handoff && signal !== null) restoreHandoffScreen()
           writeHandoffNotice(
             '\n' + formatHandoffNotice('crashed', {
-              name: kernelDisplayName(options.backend),
+              name: options.backendName ?? options.backend,
               code: outcome.code,
               safeHint: true,
               color: process.stderr.isTTY === true,

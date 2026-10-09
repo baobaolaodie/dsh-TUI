@@ -128,7 +128,7 @@ import { KernelPicker } from '../components/KernelPicker.js'
 import { SdkInstallWizard, type SdkInstallPhase } from '../components/SdkInstallWizard.js'
 import type { SdkInstaller, SdkInstallTarget } from '../agent/backend.js'
 import { ChannelPicker } from '../components/ChannelPicker.js'
-import type { KernelStatus } from '../components/kernelCatalog.js'
+import type { KernelEntry, KernelStatus } from '../components/kernelCatalog.js'
 import type { KernelBackendId } from '../kernelPrefs.js'
 import { modeDisplayName } from '../sessionModes.js'
 import { PlanPicker } from '../components/PlanPicker.js'
@@ -364,6 +364,8 @@ let fallbackStatusStore: TuiStatusStore | undefined
 let fallbackActivityStore: ActivityStore | undefined
 const noCouponSubscription = (): (() => void) => () => undefined
 const noCouponSnapshot = (): null => null
+/** Stable identity for hosts that supply no kernel entries (bare embeds, tests). */
+const EMPTY_KERNEL_ENTRIES: readonly KernelEntry[] = []
 
 /** Identity of one caret-preview dismissal: the token (its title) on the
  *  image, so the same image staged twice is dismissed per token. */
@@ -387,6 +389,7 @@ export function Chat({
   onSwitchBackend,
   onRestartFreshSession,
   onProbeKernels,
+  kernelEntries = EMPTY_KERNEL_ENTRIES,
   onResolveSdkInstallTarget,
   onStartSdkInstall,
   onCheckPnpm,
@@ -451,6 +454,16 @@ export function Chat({
    * 调一次并缓存结果；探测失败按「未安装」处理。
    */
   onProbeKernels?: () => Promise<Record<string, KernelStatus>>
+  /**
+   * The host's projection of the backend registry, in picker order (P0):
+   * `{ id, label, shortLabel, alwaysAvailable, product, installable }`.
+   *
+   * Passed in rather than imported: the UI layers may not import
+   * `src/dsh-adapter/**` (values) nor `src/backends/**` at all, and Chat is the
+   * one place that fans the list out to the picker, the launchpad corner and the
+   * launchpad's action row. Absent (bare embeds, older hosts): no kernel rows.
+   */
+  kernelEntries?: readonly KernelEntry[]
   /**
    * SDK 安装向导（组合根注入，同上不 import 具体后端）。resolveTarget 同步
    * 快（argv + 文件系统判定）；start 在 profile 目录跑 `pnpm add`，返回可
@@ -838,8 +851,11 @@ export function Chat({
   const canInstallSdk = onResolveSdkInstallTarget !== undefined && onStartSdkInstall !== undefined
     && onCheckPnpm !== undefined && sdkInstallPinned !== undefined
   const { currentId: kernelCurrentId, options: kernelOptions, open: openKernelPicker, pick: pickKernel, reprobe: reprobeKernels } = useKernelPicker({
-    channel, kernelVersion, launchpadShown, onProbeKernels, onSwitchBackend, canInstallSdk, dispatchOverlay,
+    channel, kernelVersion, kernelEntries, launchpadShown, onProbeKernels, onSwitchBackend, canInstallSdk, dispatchOverlay,
   })
+  /** 当前内核那一行：短名给落地页入口、PromptInput 的不可用提示等消费（同源，
+   *  不按 id 查表；目录里没有（宿主未接线/未知后端）就没有名字）。 */
+  const kernelCurrentOption = kernelOptions.find(option => option.current)
   /**
    * SDK 安装向导的步骤态（异步进程状态，按 chatOverlay 的分工留在 Chat，
    * 不进 overlay union）。生命周期约定：向导打开时从 idle 初始化，安装
@@ -878,7 +894,7 @@ export function Chat({
       if (result.kind === 'ok') {
         // 装好了：重探内核（灰行变亮，无需重启进程），停在完成面板。
         reprobeKernels()
-        setSdkPhase({ kind: 'done' })
+        setSdkPhase({ kind: 'done', rebuiltStore: result.rebuiltStore === true })
       } else if (result.kind === 'failed') {
         setSdkPhase({ kind: 'failed', exitCode: result.exitCode, tail: result.tail, dir, version: sdkInstallPinned.version, specifier: sdkInstallPinned.specifier })
       } else if (result.kind === 'pnpm-missing') {
@@ -3543,15 +3559,21 @@ export function Chat({
       }
       case 'plan': {
         // Registered by dsh-plan-mode: bare `/plan` opens an on/off picker
-        // marked with the current state instead of toggling blindly; Enter
-        // dispatches `/plan` or `/plan off`. Arguments pass through verbatim
-        // (`/plan off`). Availability comes from the shared capability facts
-        // (the same read Shift+Tab uses), not from a second command-list
-        // scan; with no registry command the line falls through to the model,
-        // exactly as before.
+        // marked with the current state instead of toggling blindly; the
+        // picker's own rows dispatch the bare command and ` off`, never the
+        // catalog token. The catalog's `on` child (the only producer of that
+        // literal argument) is normalized back to the bare command:
+        // upstream's grammar is `/plan [off|message]`, so a verbatim `on`
+        // would enter plan mode AND steer the word "on" into the next step as
+        // a user message. Every other argument — `/plan off` and
+        // `/plan <message>` — passes through verbatim. Availability comes from
+        // the shared capability facts (the same read Shift+Tab uses), not from
+        // a second command-list scan; with no registry command the line falls
+        // through to the model, exactly as before.
         const plan = channel.capabilities().plan
         const mounted = plan.route !== 'none'
         const parts = rawInput.trim().split(/\s+/).filter(Boolean)
+        const argument = parts.length === 1 && parts[0] === 'on' ? '' : rawInput
         if (mounted && parts.length === 0) {
           setHelpOpen(false)
           dispatchOverlay({
@@ -3562,7 +3584,7 @@ export function Chat({
         }
         if (mounted) {
           setHelpOpen(false)
-          return runExternalCommand('plan', rawInput, images)
+          return runExternalCommand('plan', argument, images)
         }
         return false
       }
@@ -6129,8 +6151,10 @@ export function Chat({
       ),
       updateAvailable: launchpadUpdateAvailable,
       starDue: launchpadStarDue,
-      // 内核入口带名（「内核 · Claude」）：backendId 是内核身份的唯一来源。
+      // 内核入口带名（「内核 · Claude」）：backendId 是内核身份的唯一来源，
+      // 名字取同一份选择器目录里的短品牌名（manifest 的 shortLabel）。
       backendId: kernelCurrentId,
+      backendLabel: kernelCurrentOption?.shortLabel,
     })
     const launchpad = (
       <Launchpad
@@ -6345,6 +6369,7 @@ export function Chat({
         focus={sidePanel.focus}
         onActivateChat={sidePanel.focusChat}
         onActivatePanel={sidePanel.focusPanel}
+        onResize={sidePanel.resize}
         side={
           <SidePanelColumn
             width={sidePanel.panelColumns}
@@ -6698,6 +6723,8 @@ export function Chat({
             agentViewOpenSessionRef.current = channel.agentId
             setSupervisorOpen(true)
           }}
+          // 当前内核的短品牌名：与选择器、落地页铭牌同一份 manifest 数据（P0 D2）。
+          backendLabel={kernelCurrentOption?.shortLabel}
           backgroundAgentsNeedingInput={
             // Only the real channel supplies the seam; pre-agent-view test
             // stubs must not grow the footer row (layout-dependent

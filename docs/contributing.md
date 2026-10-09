@@ -39,6 +39,24 @@
 `.github/APPROVED_CONTRIBUTORS`。两者都不是就拒绝开 PR，引导去 bug 表单或
 Discussions。人不能用「私下批准」、关联 issue 或粘贴维护者评论来绕过。
 
+### 贡献纪律
+
+适用于所有贡献者与编码 Agent，是提交前的自律基线，与门禁、CI 互补：
+
+- **贡献以实质价值衡量**：不以提交数、PR 数或代码行数计贡献。不做拆分
+  凑数式提交；改动保持最小必要、代码精简，不引入冗余封装与重复实现
+  让代码膨胀。
+- **AI 生成代码必须人类把关**：允许 AI 辅助开发，但禁止全自动流入
+  `main`——任何改动必须经人类审查与人类合并决策（ruleset 要求的
+  approving review 即为此设）；CodeRabbit 等 bot 审查只是第二双眼睛，
+  不替代人工。
+- **AI 辅助开发尽量用强模型**：允许 vibe coding 式快速迭代，但尽量选用
+  能力较强的模型：弱模型输出更容易代码膨胀、幻觉 API 与隐性回归，
+  返工成本高于模型差价。
+- **PR 前必须本地实际验证**：跑过改动面对应的构建与聚焦回归（见
+  「验证」），终端可见改动在真实终端走过受影响流程。没跑的检查如实
+  写进 PR 的 Verification 段，不把「应该能过」写成「已验证」。
+
 ### 门禁与提案流程的生效时间
 
 功能提案流程只对 2026-08-24 起新建的 PR 生效。PR 白名单门禁只对门禁合入后
@@ -493,6 +511,7 @@ TypeScript 源的脚本在头部声明 `node --import tsx/esm <script>` 形式�
 | 用户可见的文档化行为 | 中英文 README，适用的配置注释/帮助文本与 `docs/` 双语页；新增用户手册同时改 `scripts/guide-sources.mjs` 清单、`guide/dsh-tui-guide/SKILL.md` 路由，再 `node scripts/build-guide.mjs` / `node scripts/verify-guide.mjs`（不手改副本） |
 | 贡献入口或 PR 门禁 | `.mergify.yml`、`docs/contributing.md`、`docs/contributing.en.md`、`.github/workflows/pr-gate.yml`、`.github/scripts/pr-intake/`、`.github/APPROVED_CONTRIBUTORS` |
 | 包版本或依赖 | `package.json`、`pnpm-lock.yaml`、适用时的生成/发布产物；不要顺手搅动旧 npm 锁文件 |
+| 新增或改动后端 | 新建 `src/backends/<id>/`（`manifest.ts` + 实现），并提交 `pnpm compile` 重新生成的 `src/dsh-adapter/backends.generated.ts`（入库的生成产物，过期会被 `verify-backend-registry` 判红）：构建期索引由 `scripts/gen-backend-index.mjs` 生成，**不要**手改 `src/kernelPrefs.ts`、`src/dsh-adapter/backends.ts`（目录与身份断言都按 ID 取项，新增目录不必同步任何回归）；边界门禁的厂商包/`native.<id>` 规则由 manifest 派生，但派生结果与 `scripts/verify-adapter-boundary.ts` 的 `EXPECTED_*` 快照**逐字比对**——声明了非空 `vendorPackages` 或 `nativeKey` 的后端必须把该快照与 `ADAPTER.md` 一并更新（门禁报错会写明），只声明 `vendorPackages: []`、不声明 `nativeKey` 的后端无需改动；`installable` / `sdkInstall` 是排他特权，非宿主可装的那个 id 声明它会被注册闸门当场拒绝（本仓库只有 Claude 一个安装向导，Stage B 才放开）；名字走 manifest（插件用 `kind:'literal'`，绝不进 i18n 字典）；模块级/进程级资源池声明 `unloadExport`，会话级资源仍归 `session.dispose()`；`id`、`label` 与 `installable` 的边界见 `ADAPTER.md` 的「后端 manifest」；新增后端要把聚焦回归登记进 `scripts/run-ci-group.mjs`，注册表门禁是 `scripts/verify-backend-registry.ts`；用户可见取值（`--backend`、配置行）同步双 README 与 `docs/configuration{,.en}.md` |
 | Claude Agent SDK 版本 | `package.json` 的 optional peer 与 dev 两处精确版本、`pnpm-lock.yaml`、`src/backends/claude/contract.ts`（`VALIDATED_SDK_VERSION`/`VALIDATED_CLI_VERSIONS`）、`docs/claude-backend{,.en}.md` 的安装命令；`verify:claude-contract` 检查一致 |
 | Codex 协议/验证版本 | 用 `scripts/codex-protocol-sync.mjs` 正规生成类型、更新 `src/backends/codex/contract.ts`、方法表/fixture/脱敏与 live/replay 回归、双语 Codex 用户说明；不添加 Codex SDK npm 依赖，不拿最低版本当全部实验接口已验证 |
 | 上游验证线 bump | `src/dsh-adapter/contract.ts`、`src/dsh-adapter/oauth/`、`package.json` peer+dev 两组范围、`pnpm-workspace.yaml`、`.github/workflows/ci.yml` alpha-compat 的上游 SHA、`scripts/verify-{alpha-source,patch-surface,web-coexistence,upstream-contract}` 内的版本常量、`patch-surface.snapshot.json`、`ADAPTER.md`、`docs/user-guide.md`；步骤见 [ADAPTER.md](../ADAPTER.md) 升级流程 |
@@ -521,7 +540,7 @@ TypeScript 源的脚本在头部声明 `node --import tsx/esm <script>` 形式�
     在原正文后面，绝不覆盖。
   - 补发已有 tag 的 Release note：Actions → Publish → Run workflow → 填 tag，
     只处理正文，不发布 npm、不构建整合包。
-  - 手写摘要中来自外部贡献者的条目在末尾标 `（#PR号 by @用户名）`，
-    维护者自己的条目不标；裸写 `#123` 与 `@user`，GitHub 渲染成链接。
+  - 手写摘要中每条都在末尾标 `（#PR号 by @用户名）`，维护者与外部
+    贡献者一视同仁；裸写 `#123` 与 `@user`，GitHub 渲染成链接。
 - 移交代码改动前检查 `git diff --check`、源码 diff、生成 diff 与 `git status`，
   并如实报告跑了哪些验证、哪些平台/凭证相关的检查没跑。

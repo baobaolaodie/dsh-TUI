@@ -14,6 +14,13 @@ export interface BackendDetection {
    */
   readonly auth?: 'ok' | 'missing' | 'unknown'
   readonly version?: string
+  /**
+   * Not installed, yet a version was read: the CLI is there but older than
+   * this backend supports (codex's "too old"). The picker then says "upgrade"
+   * instead of "not installed", which is what the detection hint explains.
+   * Replaces the host's `id === 'codex'` branch (P0 D5-2).
+   */
+  readonly stale?: true
   /** A version outside the validated range (warn, never block). */
   readonly drift?: string
   /** How to install or sign in when unavailable. */
@@ -37,9 +44,12 @@ export type SdkInstallTarget =
   | { readonly kind: 'standalone' }
   | { readonly kind: 'no-profile' }
 
-/** How `pnpm add` ended; `tail` carries the captured output's last lines. */
+/** How \u0060pnpm add\u0060 ended; \u0060tail\u0060 carries the captured output's last lines.
+ *  \u0060ok.rebuiltStore\u0060 marks the self-healed path: pnpm reported
+ *  ERR_PNPM_UNEXPECTED_STORE and the installer rebuilt node_modules under
+ *  the pinned store before the add succeeded. */
 export type SdkInstallResult =
-  | { readonly kind: 'ok' }
+  | { readonly kind: 'ok'; readonly rebuiltStore?: boolean }
   | { readonly kind: 'cancelled' }
   | { readonly kind: 'pnpm-missing' }
   | { readonly kind: 'failed'; readonly exitCode: number; readonly tail: readonly string[] }
@@ -48,6 +58,27 @@ export type SdkInstallResult =
 export interface SdkInstaller {
   readonly result: Promise<SdkInstallResult>
   readonly cancel: () => void
+}
+
+/**
+ * The **data** half of an install surface: what to install, at which pin. A
+ * backend's manifest declares it (`BackendManifest.sdkInstall`, P0 D5-1) so the
+ * picker's wizard reads the target from the registry entry instead of a host
+ * constant. The implementation half stays with the host, which ships exactly
+ * one wizard today (Claude's — the manifest describes, it does not act).
+ */
+export interface SdkInstallSpec {
+  /** `@scope/name@<version>`, as handed to `pnpm add`. */
+  readonly specifier: string
+  /** The validated version, shown in the confirm panel. */
+  readonly version: string
+}
+
+/** The host's install wizard: the spec above plus the actions it needs. */
+export interface SdkInstallSurface extends SdkInstallSpec {
+  readonly resolveTarget: () => SdkInstallTarget
+  readonly start: (dir: string) => SdkInstaller
+  readonly checkPnpm: () => Promise<boolean>
 }
 
 /** Which session to open. */

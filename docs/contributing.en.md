@@ -53,6 +53,30 @@ account has write access or appears in `.github/APPROVED_CONTRIBUTORS`.
 - A human cannot bypass this with a private approval, an issue link, or a pasted
   maintainer comment.
 
+### Contribution Discipline
+
+Applies to every contributor and coding agent — a baseline of self-discipline
+before submission, complementary to the gates and CI:
+
+- **Value over volume**: contribution is measured by substance, not by commit
+  count, PR count, or lines of code. No split-up filler submissions; keep
+  changes minimal and code lean — do not bloat it with redundant wrappers or
+  duplicate implementations.
+- **Humans gate AI-written code**: AI-assisted development is allowed, but
+  nothing flows into `main` automatically — every change requires human
+  review and a human merge decision (the required approving review exists for
+  this). Bot reviews such as CodeRabbit are a second pair of eyes, not a
+  replacement.
+- **Prefer stronger models for AI-assisted work**: vibe coding is allowed, but
+  pick the strongest model available: weaker outputs are more prone to bloat,
+  hallucinated APIs, and hidden regressions — rework costs more than the
+  model difference.
+- **Verify locally before opening a PR**: actually run the builds and focused
+  regressions for the changed area (see "Verification"), and walk
+  terminal-visible changes through the affected flows in a real terminal.
+  State plainly what was not run in the PR's Verification section — never
+  dress "should pass" as "verified".
+
 ### When the gates take effect
 
 The feature proposal flow applies only to pull requests opened on or after
@@ -655,6 +679,7 @@ guide owns detailed contracts such as the toolchain and verification matrix.
 | User-facing documented behavior | Both READMEs, applicable config/help text and bilingual `docs/` pages; a new bundled guide also needs `scripts/guide-sources.mjs` and `guide/dsh-tui-guide/SKILL.md` routing, then `node scripts/build-guide.mjs` / `node scripts/verify-guide.mjs` (do not edit copies by hand) |
 | Contribution intake or PR gate | `.mergify.yml`, `docs/contributing.md`, `docs/contributing.en.md`, `.github/workflows/pr-gate.yml`, `.github/scripts/pr-intake/`, `.github/APPROVED_CONTRIBUTORS` |
 | Package version or dependency | `package.json`, `pnpm-lock.yaml`, generated/published artifacts as applicable; do not churn the legacy npm lock incidentally |
+| Adding or changing a backend | A new `src/backends/<id>/` (`manifest.ts` + implementation), plus the regenerated `src/dsh-adapter/backends.generated.ts` that `pnpm compile` writes (a checked-in generated file; `verify-backend-registry` fails when it is stale): the build-time index comes from `scripts/gen-backend-index.mjs` — do **not** hand-edit `src/kernelPrefs.ts` or `src/dsh-adapter/backends.ts` (the directory and identity assertions look entries up by id, so a new directory needs no regression sync). The boundary gate derives its vendor-package and `native.<id>` rules from the manifest but compares them verbatim against the `EXPECTED_*` snapshot in `scripts/verify-adapter-boundary.ts`: a backend declaring a non-empty `vendorPackages` or a `nativeKey` must update that snapshot together with `ADAPTER.md` (the gate's failure says so), while declaring neither needs no change. `installable` / `sdkInstall` is an exclusive privilege instead: any backend but the one this host can install is refused outright at registration (the repository ships exactly one install wizard, Claude's; Stage B opens it up). Names come from the manifest (a plugin uses `kind:'literal'`, never the i18n catalog); module-level/process-wide pools declare `unloadExport`, session-scoped resources stay with `session.dispose()`; the `id`, `label` and `installable` boundaries are in the "backend manifest" section of `ADAPTER.md`. Register a new backend's focused regressions in `scripts/run-ci-group.mjs`; the registry gate is `scripts/verify-backend-registry.ts`; user-visible values (`--backend`, the config row) go into both READMEs and `docs/configuration{,.en}.md` |
 | Claude Agent SDK version | The exact version in both the optional peer and dev entries of `package.json`, `pnpm-lock.yaml`, `src/backends/claude/contract.ts` (`VALIDATED_SDK_VERSION`/`VALIDATED_CLI_VERSIONS`), the install command in `docs/claude-backend{,.en}.md`; `verify:claude-contract` checks they agree |
 | Codex protocol/validated version | Regenerate through `scripts/codex-protocol-sync.mjs`, update `src/backends/codex/contract.ts`, method tables/fixtures/redaction/live-replay regressions and bilingual Codex guides; do not add a Codex SDK npm dependency or claim the minimum validates every experimental API |
 | Upstream validated-line bump | `src/dsh-adapter/contract.ts`, `src/dsh-adapter/oauth/`, both peer and dev ranges in `package.json`, `pnpm-workspace.yaml`, the upstream SHA in the `alpha-compat` job of `.github/workflows/ci.yml`, the version constants in `scripts/verify-{alpha-source,patch-surface,web-coexistence,upstream-contract}`, `patch-surface.snapshot.json`, `ADAPTER.md`, `docs/user-guide.md`; steps in the upgrade section of [ADAPTER.md](../ADAPTER.md) |
@@ -694,8 +719,8 @@ guide owns detailed contracts such as the toolchain and verification matrix.
   - To backfill notes for an existing tag, run Actions → Publish → Run
     workflow with that tag. It only touches the notes; it skips npm publish
     and bundle builds.
-  - In the hand-written summary, entries from external contributors end with
-    `(#PR by @user)`; the maintainer's own entries are unmarked.
+  - In the hand-written summary, every entry ends with `(#PR by @user)` —
+    maintainers and external contributors alike.
   - Write bare `#123` and `@user` — GitHub renders them as links.
 - Before handing off a code change, inspect `git diff --check`, the source diff,
   the generated diff, and `git status`. Report exactly which verification ran

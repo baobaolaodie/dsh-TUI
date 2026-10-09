@@ -81,7 +81,7 @@ Config；旧版仍使用 `~/.dsh/settings.yaml`。不要把旧文件路径当成
 | `terminalImages` | `true` | 允许在支持的终端预览图片；`false` 保留文字信息，跳过图片探测与预览解码。修改后重启生效 |
 | `preset` | 名册默认 `standard` | 新会话 Agent preset；显式配置优先于持久化偏好 |
 | `sessionId` | 未设置 | 要恢复的会话 ID，通常由 Windows `--resume` 启动器注入 |
-| `backend` | 未设置（`/kernel` 记住的选择，否则 `dsh`） | 会话后端：`dsh`，或实验性的 `claude` / `codex`（不区分大小写，未知值按 `dsh`）。profile 行读取 `DSH_TUI_BACKEND`，`dsh-tui --backend <id>` 会设置它。见 [Claude 后端](claude-backend.md) |
+| `backend` | 未设置（`/kernel` 记住的选择，否则 `dsh`） | 会话后端：内置 `dsh`，或已装的后端（实验性的 `claude` / `codex`，以及插件后端；不区分大小写）。**未安装或未知的取值一律按 `dsh` 启动并告警**，不会崩。profile 行读取 `DSH_TUI_BACKEND`，`dsh-tui --backend <id>` 会设置它。见 [Claude 后端](claude-backend.md) |
 
 ### 优先级与强制关闭
 
@@ -178,6 +178,44 @@ Config；旧版仍使用 `~/.dsh/settings.yaml`。不要把旧文件路径当成
 - 环境变量 `DSH_TUI_LIANGSHEN_BASH_PATH` 可显式指定 `bash.exe` 绝对路径。
 - 设置后即为唯一候选；找不到即告警并跳过注册，首轮直接放开完整工具目录。
 
+### Windows bash 工具（winbash）
+
+`presets/winbash.mjs` 是随包分发的 Windows `bash` 工具插件，挂载在 host 层后
+**对任意 Agent preset 生效**（与梁神模式无关、不进 `/preset` 名单）。行为对齐官方
+`dsh-tool-bash`——官方 bash 执行器 `dsh-bash-local` 为 POSIX-only，Windows 不适用，故有此件。
+
+- 每次调用在新 shell 中执行（`bash -c`），状态不跨调用保留；`description` 必填（UI 标题）。
+- `run_in_background: true`：命令登记为后台 job，立即返回 job id；`job_output`/`job_kill`
+  收集与停止，后台运行无超时。
+- 前台命令到超时不杀：转后台继续跑并返回 job id（`promoteOnTimeout`，可配置关闭）。
+- 非零退出以 `[exit code: N]` 标记报告，不算工具错误。
+- 无 job registry 的组合自动降级为纯前台（超时即杀），不暴露 `run_in_background`。
+- Git Bash 探测链与梁神模式相同（见上节）；环境变量 `DSH_TUI_WINBASH_BASH_PATH`
+  （兼容旧名 `DSH_TUI_LIANGSHEN_BASH_PATH`）可显式指定 `bash.exe`。
+
+挂载：把 `presets/winbash.mjs` 复制到 profile 根目录，在 `cordis.patch.yml`
+的插件列表追加：
+
+```yaml
+- id: windows-bash
+  name: './custom-bash.mjs'
+  disabled: !!js process.platform !== 'win32'
+```
+
+配置项（挂载行的 `config`）：
+
+| 键 | 默认 | 说明 |
+|---|---|---|
+| `timeoutMs` | `120000` | 前台默认超时（毫秒） |
+| `maxTimeoutMs` | `600000` | 单次调用超时上限（带 job 时也是工具级硬顶） |
+| `maxOutputBytes` | `64000` | 单流输出内存上限 |
+| `enableRunInBackground` | `true` | 是否暴露后台参数（需 job registry 在场） |
+| `promoteOnTimeout` | `true` | 前台超时是否转后台而非杀 |
+| `bashPath` | — | 显式指定 `bash.exe`（同环境变量） |
+
+> 与梁神模式内置的 `custom-bash` 注册同名工具 `bash`：同一 profile 只挂其一。
+> 同时使用梁神 preset 时把本行 `disabled` 置 `true`（梁神内置那份为前台版）。
+
 ### 自定义 preset
 
 0.1.7 通过 profile/bundle 声明 `@deepseek-ai/dsh-agent-preset`，配置包含 `id`、
@@ -234,7 +272,8 @@ Profile 模式不再使用旧的 `DSH_TUI_COMPACT_RATIO`、`DSH_TUI_COMPACT_RETA
 | `DSH_TUI_DISABLE_TERMINAL_IMAGES` | 设为 `1` 时强制关闭 Kitty/Sixel 探测、预览读取/解码与终端图片渲染，优先于 config 和 /settings；保留文字信息 |
 | `DSH_TUI_IMAGE_PROTOCOL` | `auto`（默认）、`kitty`、`sixel` 或 `none`；覆盖协议选择，但不绕过图片预览偏好、禁用开关、非全屏、无障碍和多路复用器限制 |
 | `DSH_TUI_RESUME_SESSION` | 启动时恢复指定会话，通常由启动器设置 |
-| `DSH_TUI_BACKEND` | 会话后端（`dsh` / `claude`），通常由 `dsh-tui --backend` 设置 |
+| `DSH_TUI_RESUME_BACKEND` | `DSH_TUI_RESUME_SESSION` 的来源后端，只在启动器**派生**恢复目标时（裸 `--resume` 读该后端的上次会话、安全模式重试按最后运行记录）设置；boot 若落在别的后端（未装的 id 回落 `dsh`、没给 `DSH_TUI_BACKEND` 时跟随记住的内核）就撤销该目标并告警。裸 `--resume` 请求仍保留，改读最终后端自己的上次会话；用户显式给出的 id 不带此标记、原样透传 |
+| `DSH_TUI_BACKEND` | 会话后端（内置 `dsh` / `claude` / `codex`，或已装的插件后端），通常由 `dsh-tui --backend` 设置；未安装或写错的 id 按 `dsh` 启动并告警 |
 | `DSH_TUI_CLAUDE_PERMISSION_MODE` | Claude 后端的起始权限模式（`default`/`acceptEdits`/`plan`/`dontAsk`/`bypassPermissions`），优先于 `/permission` 记住的选择 |
 | `DSH_TUI_WORKSPACE_TARGET` | 启动时解析的工作区路径或 URI，通常由 `dsh-tui <目标>` 设置 |
 | `DSH_TUI_SESSION_ROOT` | 覆盖 JSONL 会话根目录；profile 默认 `$DSH_HOME/sessions`，裸 `cordis.yml` 默认 `~/.dsh-tui/sessions` |
