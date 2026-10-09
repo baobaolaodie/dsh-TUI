@@ -114,7 +114,15 @@ function deferInitialPolicy(ctx: Context, session: FilteredSession, writer: Sess
   })().finally(() => { draining = undefined })
 
   const guardedFlush = async (): Promise<void> => {
-    start()
+    // Counterpart of guardedClose: a flush does not publish a session either
+    // while it only holds initialization. Host consumers checkpoint a session
+    // without any real work — the projection cache flushes from its
+    // `session/created` hook and from its own event throttle — and an
+    // unconditional drain here re-materialized exactly the permission-only
+    // shell the deferral exists to keep out of JSONL. The listener still
+    // participates, so `ctx.sessions.flush()` keeps reporting a durability
+    // listener; it just has nothing to record before the first real event.
+    if (!started) return
     await drain()
     await flush.call(writer)
   }

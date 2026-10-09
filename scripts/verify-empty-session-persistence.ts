@@ -5,11 +5,32 @@
  * write failure/retry, disposal, concurrent factories and saved history.
  * Restart/update cases spawn real replacements, parse the real Config and
  * create/resume through the real Agent registry; no installer is invoked.
+ *
+ * A flush is not a publication either: the host projection cache checkpoints a
+ * session from its `session/created` hook and from its own event throttle, and
+ * draining on those checkpoints re-materialized exactly the permission-only
+ * shell the deferral keeps out of JSONL. The checkpoint still participates, and
+ * the first real event still publishes the complete log from seq 0. The five
+ * channel actions that created sessions outside the gate are covered by their
+ * creation shape.
+ *
  * Run: node --import tsx/esm scripts/verify-empty-session-persistence.ts
+ *
+ * Negative controls:
+ *   1. In-process (re-runnable): add `--negative-controls`. It replays the
+ *      pre-fix `guardedFlush` (start, drain the live snapshot, flush) on the
+ *      same creation shape and asserts the shell DOES appear — the pair is what
+ *      makes "the create-time checkpoint does not publish the permission-only
+ *      shell" a discriminating assertion instead of a vacuous one.
+ *   2. Real revert: restore `start(); await drain()` at the head of
+ *      `guardedFlush` in src/dsh-adapter/fresh-agent.ts, then
+ *      `node --import tsx/esm scripts/verify-empty-session-persistence.ts`
+ *      → expect FAIL "the create-time checkpoint does not publish the
+ *      permission-only shell" (plus the two narrowed checkpoint cases).
  */
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
-import { existsSync, mkdtempSync, rmSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { setImmediate } from 'node:timers/promises'
@@ -78,6 +99,9 @@ const { createFreshAgent, isUnstoredFreshSession } = await import('../src/dsh-ad
 const { createChannel } = await import('../src/dsh-adapter/channel.js')
 const { isExitResumable } = await import('../src/dsh-adapter/plugin.js')
 const { concreteService } = await import('../src/dsh-adapter/host-access.js')
+const { liveSessionCreateOptions } = await import('../src/dsh-adapter/compat/index.js')
+
+const negativeControls = process.argv.includes('--negative-controls')
 
 class ScriptedAdapter extends LlmAdapter {
   async resolveModel(provider: string, model: string) { return { provider, id: model, name: model } }
@@ -110,13 +134,42 @@ async function verify(compression: 'zstd' | 'none'): Promise<SessionId> {
     const backend = await ctx.plugin(JsonlSessionPersistence, { root: sessionsRoot, compression })
     await ctx.plugin(AgentLoop, { agents: [] })
     ctx.llm.registerAdapter(['scripted'], new ScriptedAdapter())
-    // Reproduce the official permission service's session/created pinning.
+    // Reproduce the official permission service's session/created pinning, plus
+    // the host projection cache's create-time checkpoint: both are listeners of
+    // the same event, and the cache's `flushSoft('create')` reaches
+    // `ctx.sessions.flush(session)` from inside the creation transaction.
+    const createFlushes = new Set<string>()
+    const writers = new Map<string, { writer: { append(events: readonly SessionEvent[]): Promise<void> }; flush: () => Promise<void> }>()
+    let preFixId = ''
     ctx.on('session/created', session => {
       if (session.seq !== 0) return
       const append = session.append as (type: string, data: Record<string, unknown>) => unknown
       append.call(session, 'permission/preset', { preset: 'workspace-write' })
       session.append('sandbox/mode', { mode: 'workspace-write' })
       session.append('approval/policy', { policy: 'ask' })
+      const id = String(session.id)
+      if (!createFlushes.has(id)) return
+      const captured = writers.get(id)
+      if (negativeControls && id === preFixId && captured !== undefined) {
+        // Pre-fix `guardedFlush`: start(), drain the live snapshot, then flush.
+        const events = session.snapshotEvents()
+        void (async () => {
+          try {
+            if (events.length > 0) await captured.writer.append(events)
+            await captured.flush()
+          } catch (error) { ctx.logger.warn(`negative control: pre-fix flush failed: ${String(error)}`) }
+        })()
+        return
+      }
+      void ctx.sessions.flush(session)
+    })
+    // Informational: a listener on a foreign fiber still observes a deferred
+    // session (the gate only mutes the JSONL provider's own routing), which is
+    // why the cache's event throttle also reaches the gate.
+    const foreignSeen = new Map<string, number>()
+    ctx.on('session/event', session => {
+      const id = String(session.id)
+      foreignSeen.set(id, (foreignSeen.get(id) ?? 0) + 1)
     })
     const seen = new Map<Session, SessionEvent[]>()
     ctx.on('session/event', (session, event) => {
@@ -195,14 +248,109 @@ async function verify(compression: 'zstd' | 'none'): Promise<SessionId> {
     channel.releaseContributions()
     channel = undefined
 
-    // An explicit checkpoint retains the persistence contract, even before a prompt.
-    const explicit = await fresh('explicit-flush')
-    await ctx.sessions.flush(explicit.agent.session)
-    assert.equal(isUnstoredFreshSession(explicit.agent.session), false, 'an explicitly saved empty session can be handed off')
-    await assertComplete(explicit.agent.session)
-    const serviceFlush = await fresh('service-flush')
-    await persistence.flush()
-    await assertComplete(serviceFlush.agent.session)
+    // A checkpoint is not a publication: the host projection cache checkpoints
+    // from `session/created` (and from its event throttle) while the session
+    // still holds only initialization, so draining there re-materialized the
+    // exact shell the deferral keeps out of JSONL. The checkpoint still
+    // participates — callers keep observing a durability listener — and the
+    // first real event still publishes the complete log from seq 0.
+    persistence.create = async function (header, config) {
+      const writer = await originalCreate.call(this, header, config)
+      writers.set(String(header.id), { writer, flush: writer.flush.bind(writer) })
+      return writer
+    }
+    const verifyCheckpointPublication = async (): Promise<void> => {
+      const createFlushId = String(options('create-flush').sessionId)
+      createFlushes.add(createFlushId)
+      const createFlushed = await fresh('create-flush')
+      assert.deepEqual(createFlushed.agent.session.snapshotEvents().map(event => event.type), policyTypes)
+      await sleep(250) // 固定窗:探针 — beyond JSONL's 200ms live drain timer.
+      assert.equal(existsSync(artifact(createFlushed.agent.session)), false, 'the create-time checkpoint does not publish the permission-only shell')
+      assert.equal(isUnstoredFreshSession(createFlushed.agent.session), true, 'the create-time checkpoint does not hand the session off')
+      console.log(`INFO deferred create-flush session: foreign listeners observed ${String(foreignSeen.get(createFlushId) ?? 0)} events`)
+      title(createFlushed.agent.session, 'first real event')
+      await ctx.sessions.flush(createFlushed.agent.session)
+      assert.equal(isUnstoredFreshSession(createFlushed.agent.session), false, 'the first real event still hands the checkpointed session off')
+      await assertComplete(createFlushed.agent.session)
+      assert.deepEqual((await stored(createFlushed.agent.session)).map(event => event.seq), [0, 1, 2, 3], 'the published log is contiguous from seq 0')
+
+      const explicit = await fresh('explicit-flush')
+      assert.equal(await ctx.sessions.flush(explicit.agent.session), true, 'an idle checkpoint still reaches a participating listener')
+      assert.equal(isUnstoredFreshSession(explicit.agent.session), true, 'an idle checkpoint does not publish the initialization')
+      assert.equal(existsSync(artifact(explicit.agent.session)), false)
+      title(explicit.agent.session, 'explicitly flushed')
+      await ctx.sessions.flush(explicit.agent.session)
+      assert.equal(isUnstoredFreshSession(explicit.agent.session), false, 'the first real event still hands the session off')
+      await assertComplete(explicit.agent.session)
+      const serviceFlush = await fresh('service-flush')
+      await persistence.flush()
+      assert.equal(existsSync(artifact(serviceFlush.agent.session)), false, 'the backend sweep does not publish an untouched session')
+      title(serviceFlush.agent.session, 'after the sweep')
+      await persistence.flush()
+      await assertComplete(serviceFlush.agent.session)
+
+      // The five channel actions that reached `agents.create` directly.
+      // `/bg` starts an unseeded session, so it shares the gate: its creation
+      // shape stays unpublished while idle, and the same shape without the gate
+      // still publishes (this pair is what makes the case discriminative).
+      const backgrounded = await fresh('channel-background-action')
+      await sleep(250)
+      assert.equal(existsSync(artifact(backgrounded.agent.session)), false, 'the /bg creation shape stays unpublished while idle')
+      const ungated = await ctx.agents.create(options('channel-background-action-ungated'))
+      handles.push(ungated)
+      assert.ok(await settled(() => existsSync(artifact(ungated.agent.session))), 'the ungated /bg shape still publishes the shell')
+      await ungated.dispose()
+
+      // The other four copy a source prefix into the child. The host appends
+      // that prefix through the writer BEFORE `session/created`
+      // (dsh-agent-loop `appendUnstoredSuffix` → writer.append → the JSONL
+      // backend materializes on the first batch), so a flush-side gate cannot
+      // unmake a seeded child's artifact: the file IS the inherited prefix.
+      // Verified shape, not silence: an idle seeded child stores exactly its own
+      // log — the inherited prefix plus the child's own seed marker — and no
+      // create-time checkpoint adds anything to it.
+      const seedSource = await fresh('channel-seed-source')
+      const seed = seedSource.agent.session.snapshotEvents()
+      assert.deepEqual(seed.map(event => event.type), policyTypes)
+      const seededSites: readonly { name: string; parentSession: SessionId | undefined }[] = [
+        { name: 'channel-model-switch', parentSession: undefined },
+        { name: 'channel-session-fork', parentSession: undefined },
+        { name: 'channel-session-rewind', parentSession: seedSource.agent.session.id },
+        { name: 'channel-session-tree-actions', parentSession: seedSource.agent.session.id },
+      ]
+      for (const site of seededSites) {
+        const id = options(site.name).sessionId
+        createFlushes.add(String(id))
+        const child = await ctx.agents.create(liveSessionCreateOptions({
+          sessionId: id,
+          seed,
+          runtimeSession: seedSource.agent.session,
+          inheritedCount: seed.length,
+          cwd: root,
+          ...(site.parentSession === undefined ? {} : { parentSession: site.parentSession }),
+          agentOptions: { provider: 'scripted', model: 'scripted' },
+        }))
+        handles.push(child)
+        await sleep(250)
+        const persisted = await stored(child.agent.session)
+        assert.deepEqual(persisted, child.agent.session.snapshotEvents(), `${site.name}: an idle seeded child stores exactly its own log (inherited prefix plus the child's seed marker)`)
+        assert.deepEqual(persisted.slice(0, 3).map(event => event.type), policyTypes, `${site.name}: no create-time checkpoint adds a suffix`)
+      }
+
+      // Negative control (--negative-controls): replay the pre-fix
+      // `guardedFlush` — start, drain the live snapshot, flush — for the same
+      // creation shape and assert the shell DOES materialize.
+      if (negativeControls) {
+        preFixId = String(options('negative-control').sessionId)
+        createFlushes.add(preFixId)
+        const preFix = await fresh('negative-control')
+        await sleep(250)
+        assert.equal(existsSync(artifact(preFix.agent.session)), true, 'negative control: an unconditional drain+flush on the create checkpoint publishes the shell')
+        console.log('PASS negative control: the pre-fix drain-on-flush semantics publish the shell')
+      }
+    }
+    await verifyCheckpointPublication()
+    persistence.create = originalCreate
 
     // Hold the first suffix in the public writer while more events arrive,
     // then fail the next suffix. A checkpoint must retry that exact prefix.
@@ -344,6 +492,20 @@ async function verify(compression: 'zstd' | 'none'): Promise<SessionId> {
   return savedId!
 }
 
+/**
+ * `/bg` is the one channel create that starts an unseeded session, so it is the
+ * one that can share the gate. The shape checks above drive `createFreshAgent`
+ * directly and would stay green if the action went back to the ungated factory,
+ * so pin the wiring itself.
+ */
+function verifyChannelWiring(): void {
+  const source = readFileSync(new URL('../src/dsh-adapter/channel/background-action.ts', import.meta.url), 'utf8')
+  assert.match(source, /import \{ createFreshAgent \} from '\.\.\/fresh-agent\.js'/, '/bg imports the fresh-session gate')
+  assert.match(source, /createFreshAgent\(ctx, agents, \{/, '/bg creates through the gate')
+  assert.equal(source.includes('agents.create('), false, '/bg no longer calls the ungated factory')
+  console.log('PASS /bg creation wiring')
+}
+
 function verifyHandoffs(savedId: SessionId): void {
   const cases = [
     { name: 'startup empty /restart', kind: 'restart', session: '', args: [], expected: [] },
@@ -372,6 +534,7 @@ function verifyHandoffs(savedId: SessionId): void {
 }
 
 try {
+  verifyChannelWiring()
   const savedId = await verify('none')
   await verify('zstd')
   verifyHandoffs(savedId)
