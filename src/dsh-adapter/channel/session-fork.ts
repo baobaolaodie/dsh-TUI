@@ -5,9 +5,10 @@ import { randomUUID } from 'node:crypto'
 import { t } from '../../i18n.js'
 import { WORKING_GATE_NOTICES } from '../../commands.js'
 import { resolveDshProfileName } from '../../update.js'
-import { appendSessionTitle, liveSessionCreateOptions, sliceLiveSessionSeed } from '../compat/index.js'
+import { appendSessionTitle, liveSessionCreateOptions, sliceLiveSessionSeed, snapshotLiveSessionEvents } from '../compat/index.js'
 import { createFreshAgent, isUnstoredFreshSession } from '../fresh-agent.js'
 import { composePreset, runningPresetOf } from '../presets.js'
+import { unspokenJudges } from '../unspoken-sessions.js'
 import { attachSessionToWorkspace } from '../workspace.js'
 import { reserveMount, type MountReservation } from '../../sessionMounts.js'
 import { mountFailureText } from '../../sessions/resumeFailure.js'
@@ -15,6 +16,21 @@ import type { ChannelOwner } from './owner.js'
 import type { ChannelState } from './types.js'
 
 type ForkState = Pick<ChannelState, 'working' | 'cwd' | 'provider' | 'model' | 'modelDisplay' | 'sessionTitle'>
+
+/**
+ * The exit sweep's own "did a person speak here" rule, asked through its
+ * exported judges instead of restated here: `unspokenJudges().log` IS
+ * `unspoken-sessions.ts`'s `conversationEvidence` (a `turn/start` or a human
+ * message). A FOURTH human-speech rule is exactly what the three existing ones
+ * must not become (KNOWN-ISSUES B-1). Its three process-layer facts are read
+ * lazily by the `held` rule, which is never asked here, so they stay inert
+ * rather than fabricated.
+ */
+const CONVERSATION_EVIDENCE = unspokenJudges({
+  currentSessionId: () => undefined,
+  liveSessionIds: () => new Set<string>(),
+  isSubagentOrDescendant: () => false,
+})
 
 /** Create a detached `/fork` copy without adopting it into the foreground. */
 export function createForkSessionAction(
@@ -42,24 +58,32 @@ export function createForkSessionAction(
     }
     await deps.settleCompaction()
     const source = deps.source()
-    // A session nobody has typed into holds initialization, not a conversation.
-    // A seed would copy that prefix, and the host stores every seed at
-    // publication (agent-loop `appendUnstoredSuffix`), so the fork's log would
-    // exist before its first real event — the permission-only shell the
-    // fresh-session deferral keeps out of JSONL. There is nothing to copy
-    // anyway: the fork starts unseeded, as an ordinary fresh session.
-    const neverUsed = isUnstoredFreshSession(source)
-    const childId = SessionId(randomUUID())
+    // A source that holds no conversation is not one to continue, whether the
+    // shell came from the deferral this process installed (the never-used
+    // verdict) or was already on disk when the process started. A seed would
+    // copy that shell, and the host stores every seed at publication
+    // (agent-loop `appendUnstoredSuffix`), so the fork's log would exist before
+    // its first real event — the permission-only shell the fresh-session
+    // deferral keeps out of JSONL. The evidence is read from the live snapshot
+    // already in hand (in memory, never a second read of the log), so a shell
+    // left behind by an earlier process counts exactly like a local one; the
+    // fresh verdict answers first, so a deferred session is not even
+    // snapshotted. There is nothing to copy anyway: the fork starts unseeded,
+    // as an ordinary fresh session.
+    let sourceHoldsNoConversation: boolean
     let seed: readonly SessionEvent[]
     try {
+      sourceHoldsNoConversation = isUnstoredFreshSession(source)
+        || CONVERSATION_EVIDENCE.log({ events: snapshotLiveSessionEvents(source), complete: true }) === undefined
       // No boundary: the whole (turn-closed) source log. Slice the SOURCE
       // snapshot — sessions.fork() would register a child and append
       // session/end-seed, so snapshot.length is not a lineage cut.
-      seed = neverUsed ? [] : sliceLiveSessionSeed(source)
+      seed = sourceHoldsNoConversation ? [] : sliceLiveSessionSeed(source)
     } catch (error) {
       deps.notify(t('fork-failed', { err: error instanceof Error ? error.message : String(error) }), { color: 'error' })
       return false
     }
+    const childId = SessionId(randomUUID())
     const forkComposed = await composePreset(ctx, runningPresetOf(source))
     // Reserve BEFORE the factory, and hold it past `detached.release()`.
     //
@@ -74,7 +98,7 @@ export function createForkSessionAction(
     const reservation: MountReservation = reserved.ok ? reserved.reservation : { settle: () => {}, abandon: () => {} }
     let detached: { handle: AgentHandle; release(): Promise<void> }
     try {
-      detached = await deps.createDetachedHandle(() => neverUsed
+      detached = await deps.createDetachedHandle(() => sourceHoldsNoConversation
         ? createFreshAgent(ctx, agents, {
           sessionId: childId,
           meta: { cwd: state.cwd, ...(forkComposed.agentPreset === undefined ? {} : { agentPreset: forkComposed.agentPreset }) },
@@ -113,6 +137,10 @@ export function createForkSessionAction(
     }
     try {
       const sourceTitle = state.sessionTitle.trim()
+      // For a source that holds no conversation this is a silent no-op
+      // (`appendSessionTitle` reports 'unavailable' for a missing log): the
+      // child has no log yet, and a detached fork is released before it can
+      // have one.
       appendSessionTitle(String(childId), `Fork: ${sourceTitle === '' ? String(source.id).slice(0, 8) : sourceTitle}`)
     } finally {
       // The offline title write is the last touch; from here the fork is the
@@ -124,7 +152,13 @@ export function createForkSessionAction(
     const command = process.platform === 'win32'
       ? `dsh-tui --resume ${childId}`
       : `DSH_TUI_RESUME_SESSION=${childId} ${boot}`
-    deps.notify(t('fork-done', { id: String(childId), command }), { timeoutMs: 8000 })
+    // Only a fork that HAS a log may be advertised for resume. The unseeded
+    // branch keeps no artifact before its first real event, so the command
+    // would name a session that does not exist — the notice says what is
+    // missing instead ('fork-done-unstored').
+    deps.notify(sourceHoldsNoConversation
+      ? t('fork-done-unstored', { id: String(childId) })
+      : t('fork-done', { id: String(childId), command }), { timeoutMs: 8000 })
     return true
   }
 }

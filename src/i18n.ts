@@ -636,6 +636,14 @@ const dict = {
     zh: '已分叉（{{id}}）——仍在原会话中\n新进程进入分叉：{{command}}',
     en: 'Forked ({{id}}) — still in the original session\nEnter the fork in a new process: {{command}}',
   },
+  // A fork of a session that holds no conversation keeps NO log until its own
+  // first real event (the fresh-session deferral), so there is no artifact a
+  // resume command could enter. This notice says that instead of printing a
+  // command that cannot work yet.
+  'fork-done-unstored': {
+    zh: '已分叉（{{id}}）——仍在原会话中\n源会话还没有内容，分叉副本没有日志可恢复',
+    en: 'Forked ({{id}}) — still in the original session\nThe source session has no content yet, so the fork has no log to resume',
+  },
   // ── /tree screen (session family tree) ─────────────────────────────────
   'tree-title': { zh: '会话树', en: 'Session tree' },
   'tree-sessions': { zh: '会话', en: 'sessions' },

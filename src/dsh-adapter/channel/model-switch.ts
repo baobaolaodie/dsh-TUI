@@ -8,9 +8,10 @@ import { WORKING_GATE_NOTICES } from '../../commands.js'
 import { writeModelPref } from '../../modelPrefs.js'
 import { touchSession } from '../../sessionHistory.js'
 import { createDshSession, dshHandleOf } from '../backend/session.js'
-import { liveSessionCreateOptions, sliceLiveSessionSeed } from '../compat/index.js'
+import { liveSessionCreateOptions, sliceLiveSessionSeed, snapshotLiveSessionEvents } from '../compat/index.js'
 import { createFreshAgent, isUnstoredFreshSession } from '../fresh-agent.js'
 import { composePreset, runningPresetOf } from '../presets.js'
+import { unspokenJudges } from '../unspoken-sessions.js'
 import { reserveNewSession } from '../../sessionMounts.js'
 import { attachSessionToWorkspace } from '../workspace.js'
 import type { DshChannelBinding } from './binding.js'
@@ -22,6 +23,21 @@ import type { ChannelState } from './types.js'
 type Binding = DshChannelBinding
 type SwitchState = Parameters<typeof resetSessionProjection>[0] & Pick<ChannelState,
   'cwd' | 'working' | 'status' | 'agentId' | 'sessionId' | 'agentPreset' | 'provider' | 'model' | 'contextWindow' | 'effortLevels' | 'reasoningEffort' | 'emit'>
+
+/**
+ * The exit sweep's own "did a person speak here" rule, asked through its
+ * exported judges instead of restated here: `unspokenJudges().log` IS
+ * `unspoken-sessions.ts`'s `conversationEvidence` (a `turn/start` or a human
+ * message). A FOURTH human-speech rule is exactly what the three existing ones
+ * must not become (KNOWN-ISSUES B-1). Its three process-layer facts are read
+ * lazily by the `held` rule, which is never asked here, so they stay inert
+ * rather than fabricated.
+ */
+const CONVERSATION_EVIDENCE = unspokenJudges({
+  currentSessionId: () => undefined,
+  liveSessionIds: () => new Set<string>(),
+  isSubagentOrDescendant: () => false,
+})
 
 /** Model-route adoption transaction. It settles compaction before its fork snapshot and owns the post-commit reset. */
 export function createModelSwitchAction(
@@ -52,21 +68,30 @@ export function createModelSwitchAction(
     const agents = ctx.get('agents') as { create(options: CreateAgentOptions): Promise<AgentHandle> } | undefined
     if (agents === undefined) { deps.notify(t('model-switch-unavailable'), { color: 'error' }); return false }
     const source = deps.binding.agent.session
-    // A session nobody has typed into is not a conversation to continue. A
-    // seed would copy its initialization, and the host stores every seed at
-    // publication (agent-loop `appendUnstoredSuffix`), so the replacement's log
-    // would exist before its first real event — the permission-only shell the
-    // fresh-session deferral keeps out of JSONL. The replacement therefore
-    // starts unseeded, as an ordinary fresh session, under that same deferral.
-    const neverUsed = isUnstoredFreshSession(source)
+    // A source that holds no conversation is not one to continue, whether the
+    // shell came from the deferral this process installed (the never-used
+    // verdict) or was already on disk when the process started. A seed would
+    // copy that shell, and the host stores every seed at publication (agent-loop
+    // `appendUnstoredSuffix`), so the replacement's log would exist before its
+    // first real event — the permission-only shell the fresh-session deferral
+    // keeps out of JSONL. The evidence is read from the live snapshot in hand
+    // (in memory, never a second read of the log), so a shell left behind by an
+    // earlier process counts exactly like a local one; the fresh verdict answers
+    // first, so a deferred session is not even snapshotted. The replacement
+    // therefore starts unseeded, as an ordinary fresh session, under that same
+    // deferral.
+    let sourceHoldsNoConversation: boolean
     let seed: readonly SessionEvent[]
     try {
-      // A compaction checkpoint may not settle after the model fork snapshot.
+      // A compaction checkpoint may not settle after the model fork snapshot —
+      // and the verdict must be read from the settled log, never from before it.
       await deps.settleCompaction()
+      sourceHoldsNoConversation = isUnstoredFreshSession(source)
+        || CONVERSATION_EVIDENCE.log({ events: snapshotLiveSessionEvents(source), complete: true }) === undefined
       // No boundary = the whole source log (continue the conversation). Slice
       // the SOURCE snapshot: sessions.fork() registers a real child, and its
       // snapshot length is not the inherited cut.
-      seed = neverUsed ? [] : sliceLiveSessionSeed(source)
+      seed = sourceHoldsNoConversation ? [] : sliceLiveSessionSeed(source)
     } catch (error) { deps.notify(t('model-switch-fork-failed', { err: error instanceof Error ? error.message : String(error) }), { color: 'error' }); return false }
     const childId = SessionId(randomUUID())
     // Announce the id before the factory: from the moment `agents.create`
@@ -76,8 +101,8 @@ export function createModelSwitchAction(
     const composed = await composePreset(ctx, runningPresetOf(source))
     let candidate: AgentSession
     try {
-      const create = (): Promise<AgentHandle> => neverUsed
-        // No seed and no parent either: a never-used session has no conversation
+      const create = (): Promise<AgentHandle> => sourceHoldsNoConversation
+        // No seed and no parent either: a conversation-less session has nothing
         // for lineage to describe, and the child stands as its own root
         // (session-lineage.ts).
         ? createFreshAgent(ctx, agents, {

@@ -17,11 +17,18 @@
  * copied a source nobody had used, and the host stores a seed at publication
  * (`dsh-agent-loop` `appendUnstoredSuffix` → `writer.append`) — so the copy,
  * not a flush, is what puts the child's log on disk before its first real
- * event. Each of them now asks `isUnstoredFreshSession` (the repo's own
- * never-used verdict, `src/dsh-adapter/fresh-agent.ts`) and starts an unseeded
- * fresh session instead. Both halves are pinned here: the creation shapes below
- * drive the real host, and `verifySeededWiring` reads the four actions to prove
- * the verdict is what selects the unseeded branch.
+ * event. Each of them now asks whether the SOURCE HOLDS NO CONVERSATION: the
+ * deferral's own `isUnstoredFreshSession` (`src/dsh-adapter/fresh-agent.ts`)
+ * first, then the exit sweep's evidence rule (`src/dsh-adapter/unspoken-sessions.ts`'s
+ * `conversationEvidence`, asked through its exported judges, read from the live
+ * snapshot the seed is cut from). The second half is what an already-stored
+ * shell satisfies and the first cannot see: a shell left by an earlier process,
+ * one web created, or one whose `agent-preset/selected` already started the
+ * deferral. A conversation-less source starts an unseeded fresh session
+ * instead. Both halves are pinned here: the creation shapes below drive the
+ * real host, `/fork` is driven end to end from an on-disk shell, and
+ * `verifySeededWiring` reads the four actions to prove the verdict is what
+ * selects the unseeded branch.
  *
  * Run: node --import tsx/esm scripts/verify-empty-session-persistence.ts
  *
@@ -31,9 +38,12 @@
  *      same creation shape and asserts the shell DOES appear — the pair is what
  *      makes "the create-time checkpoint does not publish the permission-only
  *      shell" a discriminating assertion instead of a vacuous one. It also
- *      replays the pre-fix SEED for the same never-used sources, and reverses
- *      the four wiring checks (`=> neverUsed` → `=> false`, and the verdict
- *      dropped) to prove those checks can fail (LESSONS L-044 / L-048).
+ *      replays the pre-fix SEED for the same never-used sources and for an
+ *      on-disk shell (asserting that the child DOES appear and that the pre-fix
+ *      notice DOES advertise a resume command), and reverses the four wiring
+ *      checks three ways — `=> sourceHoldsNoConversation` → `=> false`, the
+ *      widened evidence line removed, and the verdict dropped entirely — to
+ *      prove those checks can fail (LESSONS L-044 / L-048).
  *   2. Real revert (flush): restore `start(); await drain()` at the head of
  *      `guardedFlush` in src/dsh-adapter/fresh-agent.ts, then
  *      `node --import tsx/esm scripts/verify-empty-session-persistence.ts`
@@ -41,11 +51,20 @@
  *      permission-only shell" (plus the two narrowed checkpoint cases).
  *   3. Real revert (seed): make one action seed unconditionally — e.g. in
  *      src/dsh-adapter/channel/model-switch.ts replace
- *      `const create = (): Promise<AgentHandle> => neverUsed` with `=> false` —
- *      then the same command → expect FAIL "channel-model-switch: the
- *      never-used verdict selects the unseeded branch". The creation-shape
- *      cases stay green there: they drive the creation, the wiring check reads
- *      the action.
+ *      `=> sourceHoldsNoConversation` with `=> false` — then the same command →
+ *      expect FAIL "channel-model-switch: the never-used verdict selects the
+ *      unseeded branch". The creation-shape cases stay green there: they drive
+ *      the creation, the wiring check reads the action.
+ *   4. Real revert (verdict narrowed): put the widening back to T-FIX-10's
+ *      criterion in src/dsh-adapter/channel/session-fork.ts — replace the two
+ *      lines `sourceHoldsNoConversation = isUnstoredFreshSession(source)` +
+ *      `|| CONVERSATION_EVIDENCE.log({ … }) === undefined` with
+ *      `sourceHoldsNoConversation = isUnstoredFreshSession(source)` — then the
+ *      same command → expect FAIL "the fork notice for a conversation-less
+ *      source is the new-session wording", FAIL "the /fork action took its
+ *      unseeded branch for an on-disk shell" and FAIL "a fork of an on-disk
+ *      shell publishes no child", plus the `channel-session-fork` wiring FAIL.
+ *      The creation-shape cases stay green there too.
  */
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
@@ -116,10 +135,12 @@ process.env.DSH_HOME = join(root, 'home')
 process.env.DSH_TUI_LANG = 'en'
 const { createFreshAgent, isUnstoredFreshSession } = await import('../src/dsh-adapter/fresh-agent.js')
 const { createChannel } = await import('../src/dsh-adapter/channel.js')
+const { createForkSessionAction } = await import('../src/dsh-adapter/channel/session-fork.js')
 const { extractEntries } = await import('../src/dsh-adapter/sessionTree.js')
 const { isExitResumable } = await import('../src/dsh-adapter/plugin.js')
 const { concreteService } = await import('../src/dsh-adapter/host-access.js')
 const { liveSessionCreateOptions } = await import('../src/dsh-adapter/compat/index.js')
+const { t } = await import('../src/i18n.js')
 
 const negativeControls = process.argv.includes('--negative-controls')
 
@@ -459,6 +480,123 @@ async function verify(compression: 'zstd' | 'none'): Promise<SessionId> {
     }
     await verifySeededFamily()
 
+    /**
+     * The face T-FIX-10's verdict could not see: a shell that is ALREADY on
+     * disk. `isUnstoredFreshSession` answers for the deferral THIS process
+     * installed, so a shell left behind by an earlier process — or one whose
+     * `agent-preset/selected` already started the gate, or one web created — is
+     * not in its WeakSet. The widened verdict asks what the source's log holds
+     * instead, from the live snapshot in hand.
+     *
+     * The real `/fork` action is driven here, not just the creation shape it
+     * takes: its notice is the user-facing half of the same decision, and a
+     * seeded child would publish an artifact. Narrowing the verdict back to
+     * `isUnstoredFreshSession` therefore reddens this case on all three counts.
+     * The same action is then driven over a source that HAS content, which must
+     * keep the seeded path exactly as it was.
+     */
+    const verifyOnDiskShellSource = async (): Promise<void> => {
+      const shell = await ctx.agents.create(options('on-disk-shell'))
+      handles.push(shell)
+      assert.ok(await settled(() => existsSync(artifact(shell.agent.session))), 'the ungated shell publishes at creation')
+      await shell.dispose()
+      const resumed = await ctx.agents.resume({ resumeSessionId: options('on-disk-shell').sessionId })
+      handles.push(resumed)
+      const shellEvents = resumed.agent.session.snapshotEvents()
+      // The shell's log is the shape an earlier process leaves behind: the
+      // initialization it was created with (plus the constructor's own
+      // `session/end-seed`), and nothing a person ever said.
+      assert.deepEqual((await stored(resumed.agent.session)).slice(0, 3).map(event => event.type), policyTypes, 'the log on disk keeps the initialization it was created with')
+      assert.equal(shellEvents.some(event => event.type === 'turn/start' || event.type === 'user/message'), false, 'the resumed shell carries no conversation evidence in the snapshot the verdict reads')
+      assert.equal(isUnstoredFreshSession(resumed.agent.session), false, 'the never-used verdict cannot see a shell that is already on disk — the face this widening adds')
+
+      const forks: AgentHandle[] = []
+      const notices: string[] = []
+      const created: string[] = []
+      const fork = createForkSessionAction(
+        ctx,
+        { working: false, cwd: root, provider: 'scripted', model: 'scripted', sessionTitle: 'shell' },
+        {
+          owner: { current: () => true },
+          settleCompaction: async () => {},
+          notify: text => { notices.push(text) },
+          source: () => resumed.agent.session,
+          createDetachedHandle: async create => {
+            const handle = await create()
+            forks.push(handle)
+            return { handle, release: async () => { await handle.dispose() } }
+          },
+        },
+      )
+      const driveFork = async (): Promise<string> => {
+        notices.length = 0
+        forks.length = 0
+        created.length = 0
+        persistence.create = async function (header, config) {
+          created.push(String(header.id))
+          return originalCreate.call(this, header, config)
+        }
+        try {
+          assert.equal(await fork(), true, 'the /fork action completes')
+        } finally { persistence.create = originalCreate }
+        await sleep(250) // 固定窗:探针 — beyond JSONL's 200ms live drain timer.
+        assert.equal(created.length, 1, 'the fork creates exactly one session')
+        return created[0]!
+      }
+
+      // (a) A shell on disk: no notice may promise a resume, and no child log
+      // may exist before the child's own first real event.
+      const childId = await driveFork()
+      const child = forks[0]!
+      assert.equal(isUnstoredFreshSession(child.agent.session), true, 'the /fork action took its unseeded branch for an on-disk shell')
+      assert.equal(existsSync(artifact(child.agent.session)), false, 'a fork of an on-disk shell publishes no child')
+      const notice = notices.at(-1) ?? ''
+      assert.equal(notice, t('fork-done-unstored', { id: childId }), 'the fork notice for a conversation-less source is the new-session wording')
+      assert.equal(notice.includes('--resume'), false, 'a fork of a conversation-less source must not print a --resume command')
+      assert.equal(notice.includes('DSH_TUI_RESUME_SESSION'), false, 'nor the POSIX resume form')
+
+      // (b) The other direction at the same level: a source WITH content keeps
+      // the seeded branch — a widening that swallowed every source would fail
+      // here, and the copied prefix is still byte for byte the source log.
+      const usedChannel = createChannel(ctx, resumed.agent, { handle: resumed, cwd: root, provider: 'scripted', model: 'scripted', activity: false })
+      try {
+        usedChannel.submit('a real prompt')
+        assert.ok(await settled(() => usedChannel.rows.some(row => row.text === 'saved reply') && !usedChannel.working))
+      } finally { usedChannel.releaseContributions() }
+      await ctx.sessions.flush(resumed.agent.session)
+      const usedEvents = resumed.agent.session.snapshotEvents()
+      assert.ok(usedEvents.some(event => event.type === 'turn/start'), 'the source now holds a turn')
+      const seededId = await driveFork()
+      const seededChild = forks[0]!
+      const seededNotice = notices.at(-1) ?? ''
+      assert.equal(isUnstoredFreshSession(seededChild.agent.session), false, 'a source with real content still takes the seeded branch')
+      assert.equal(existsSync(artifact(seededChild.agent.session)), true, '…and its child still publishes the copied prefix')
+      assert.equal(seededNotice.includes(`--resume ${seededId}`) || seededNotice.includes(`DSH_TUI_RESUME_SESSION=${seededId}`), true, '…and the notice still says how to enter it')
+      assert.deepEqual((await stored(seededChild.agent.session)).slice(0, usedEvents.length), usedEvents, 'the copied prefix is byte for byte the source log')
+      console.log('PASS /fork on an on-disk shell: no resume command, no child log, and a used source still seeds')
+
+      if (negativeControls) {
+        // The pre-fix DECISION for the same on-disk shell: copy its
+        // initialization into a child and advertise the resume command. Both
+        // assertions above must be able to see this (L-044 / L-048).
+        const preFixId = String(options('on-disk-shell-pre-fix').sessionId)
+        const preFix = await ctx.agents.create(liveSessionCreateOptions({
+          sessionId: SessionId(preFixId),
+          seed: shellEvents,
+          runtimeSession: resumed.agent.session,
+          inheritedCount: shellEvents.length,
+          cwd: root,
+          agentOptions: { provider: 'scripted', model: 'scripted' },
+        }))
+        handles.push(preFix)
+        assert.equal(isUnstoredFreshSession(preFix.agent.session), false, 'negative control: a seeded child of an on-disk shell is not an unstored fresh session')
+        assert.equal(existsSync(artifact(preFix.agent.session)), true, 'negative control: seeding an on-disk shell publishes its child')
+        assert.equal(t('fork-done', { id: preFixId, command: `dsh-tui --resume ${preFixId}` }).includes('--resume'), true, 'negative control: the pre-fix notice advertises a resume command')
+        console.log('PASS negative control: seeding an on-disk shell publishes its child and the pre-fix notice advertises a resume command')
+      }
+    }
+    await verifyOnDiskShellSource()
+
     // Hold the first suffix in the public writer while more events arrive,
     // then fail the next suffix. A checkpoint must retry that exact prefix.
     const entered = Promise.withResolvers<void>()
@@ -615,29 +753,39 @@ function verifyChannelWiring(): void {
 
 /**
  * The four seeded channel actions. `verifySeededFamily` drives the creation
- * SHAPES through the real host; it would stay green if an action went back to
- * seeding unconditionally, because the shapes are driven here rather than by
- * the action. So pin the wiring: each action must ask the never-used verdict
- * and let THAT verdict select the unseeded branch, in that order. Every marker
- * is guarded (a missing or reordered marker fails instead of passing on an
- * empty window — LESSONS L-048), and `--negative-controls` reverses the wiring
- * to prove the checks can fail (L-044).
+ * SHAPES through the real host and `verifyOnDiskShellSource` drives `/fork`
+ * itself; the SHAPES alone would stay green if an action went back to seeding
+ * unconditionally, because they drive the creation rather than the action. So
+ * pin the wiring: each action must ask the conversation verdict — the deferral's
+ * `isUnstoredFreshSession` AND the sweep's evidence rule — and let THAT verdict
+ * select the unseeded branch, in that order. Every marker is guarded (a missing
+ * or reordered marker fails instead of passing on an empty window — LESSONS
+ * L-048), and `--negative-controls` reverses the decision to prove the checks
+ * can fail (L-044): seeded unconditionally, the widening narrowed back to
+ * `isUnstoredFreshSession`, the verdict dropped, and `/fork`'s notice reverting
+ * to an advertised resume command.
  */
 const SEEDED_SITES: readonly {
   readonly name: string
   readonly file: string
-  /** The expression the verdict is read from, for the negative control. */
+  /** The widening's own line: the evidence rule the verdict now also asks. */
+  readonly evidence: string
+  /** The session expression the verdict is read from, for the "verdict dropped" reversal. */
   readonly subject: string
+  /** A notice line, when the site has one, for the "resume command is back" reversal. */
+  readonly notice?: string
   readonly markers: readonly string[]
 }[] = [
   {
     name: 'channel-model-switch',
     file: 'model-switch.ts',
+    evidence: '|| CONVERSATION_EVIDENCE.log({ events: snapshotLiveSessionEvents(source), complete: true }) === undefined',
     subject: 'source',
     markers: [
-      'const neverUsed = isUnstoredFreshSession(source)',
-      'seed = neverUsed ? [] : sliceLiveSessionSeed(source)',
-      'const create = (): Promise<AgentHandle> => neverUsed',
+      'sourceHoldsNoConversation = isUnstoredFreshSession(source)',
+      '|| CONVERSATION_EVIDENCE.log({ events: snapshotLiveSessionEvents(source), complete: true }) === undefined',
+      'seed = sourceHoldsNoConversation ? [] : sliceLiveSessionSeed(source)',
+      'const create = (): Promise<AgentHandle> => sourceHoldsNoConversation',
       '? createFreshAgent(ctx, agents, {',
       ': agents.create(liveSessionCreateOptions({',
     ],
@@ -645,23 +793,29 @@ const SEEDED_SITES: readonly {
   {
     name: 'channel-session-fork',
     file: 'session-fork.ts',
+    evidence: '|| CONVERSATION_EVIDENCE.log({ events: snapshotLiveSessionEvents(source), complete: true }) === undefined',
     subject: 'source',
+    notice: "? t('fork-done-unstored', { id: String(childId) })",
     markers: [
-      'const neverUsed = isUnstoredFreshSession(source)',
-      'seed = neverUsed ? [] : sliceLiveSessionSeed(source)',
-      'deps.createDetachedHandle(() => neverUsed',
+      'sourceHoldsNoConversation = isUnstoredFreshSession(source)',
+      '|| CONVERSATION_EVIDENCE.log({ events: snapshotLiveSessionEvents(source), complete: true }) === undefined',
+      'seed = sourceHoldsNoConversation ? [] : sliceLiveSessionSeed(source)',
+      'deps.createDetachedHandle(() => sourceHoldsNoConversation',
       '? createFreshAgent(ctx, agents, {',
       ': agents.create(liveSessionCreateOptions({',
+      "? t('fork-done-unstored', { id: String(childId) })",
     ],
   },
   {
     name: 'channel-session-rewind',
     file: 'session-rewind.ts',
+    evidence: '|| CONVERSATION_EVIDENCE.log({ events: snapshotLiveSessionEvents(source), complete: true }) === undefined',
     subject: 'source',
     markers: [
-      'const neverUsed = isUnstoredFreshSession(source)',
-      'seed = neverUsed ? [] : sliceLiveSessionSeed(source, boundary)',
-      'const create = (): Promise<AgentHandle> => neverUsed',
+      'sourceHoldsNoConversation = isUnstoredFreshSession(source)',
+      '|| CONVERSATION_EVIDENCE.log({ events: snapshotLiveSessionEvents(source), complete: true }) === undefined',
+      'seed = sourceHoldsNoConversation ? [] : sliceLiveSessionSeed(source, boundary)',
+      'const create = (): Promise<AgentHandle> => sourceHoldsNoConversation',
       '? createFreshAgent(ctx, agents, {',
       ': agents.create(liveSessionCreateOptions({',
     ],
@@ -669,13 +823,15 @@ const SEEDED_SITES: readonly {
   {
     name: 'channel-session-tree-actions',
     file: 'session-tree-actions.ts',
+    evidence: '|| CONVERSATION_EVIDENCE.log({ events: sourceEvents, complete: true }) === undefined',
     subject: 'entrySession',
     markers: [
       // A persisted foreign source is on disk and never in this state, so the
       // verdict is asked about the LIVE source only.
-      'const neverUsed = forkFromLive && isUnstoredFreshSession(entrySession)',
-      'const seed = neverUsed ? [] : sourceEvents.filter(event => event.seq <= target.boundary)',
-      'const create = (): Promise<AgentHandle> => neverUsed',
+      'const sourceHoldsNoConversation = forkFromLive && (isUnstoredFreshSession(entrySession)',
+      '|| CONVERSATION_EVIDENCE.log({ events: sourceEvents, complete: true }) === undefined',
+      'const seed = sourceHoldsNoConversation ? [] : sourceEvents.filter(event => event.seq <= target.boundary)',
+      'const create = (): Promise<AgentHandle> => sourceHoldsNoConversation',
       '? createFreshAgent(ctx, agents, {',
       ': agents.create(liveSessionCreateOptions({',
     ],
@@ -690,6 +846,9 @@ function seededWiringViolations(
   const violations: string[] = []
   if (!/import \{ createFreshAgent, isUnstoredFreshSession \} from '\.\.\/fresh-agent\.js'/.test(source)) {
     violations.push('does not import createFreshAgent + isUnstoredFreshSession')
+  }
+  if (!/import \{ unspokenJudges \} from '\.\.\/unspoken-sessions\.js'/.test(source)) {
+    violations.push('does not ask the sweep evidence rule through unspokenJudges')
   }
   let cursor = -1
   for (const marker of site.markers) {
@@ -707,13 +866,23 @@ function verifySeededWiring(): void {
     const source = readFileSync(path, 'utf8')
     assert.deepEqual(seededWiringViolations(site, source), [], `${site.name}: the never-used verdict selects the unseeded branch`)
     if (negativeControls) {
-      // The exact revert this task forbids — seed unconditionally — and the
-      // verdict dropped entirely. Both must be caught (L-044 / L-048).
-      const unconditional = seededWiringViolations(site, source.replaceAll('=> neverUsed', '=> false'))
+      // The reversals this task forbids — seed unconditionally, narrow the
+      // widened verdict back to T-FIX-10's criterion, drop the verdict, and put
+      // the resume command back in `/fork`'s notice. Every one must be caught
+      // (L-044 / L-048).
+      const unconditional = seededWiringViolations(site, source.replaceAll('=> sourceHoldsNoConversation', '=> false'))
       assert.ok(unconditional.length > 0, `negative control: ${site.name} wiring catches seeding unconditionally`)
+      const narrowed = seededWiringViolations(site, source.replace(site.evidence, ''))
+      assert.ok(narrowed.length > 0, `negative control: ${site.name} wiring catches the widened verdict narrowed back to isUnstoredFreshSession`)
       const verdictless = seededWiringViolations(site, source.replaceAll(`isUnstoredFreshSession(${site.subject})`, 'false'))
       assert.ok(verdictless.length > 0, `negative control: ${site.name} wiring catches a dropped verdict`)
-      console.log(`PASS negative control: ${site.name} wiring catches "seed unconditionally" and a dropped verdict`)
+      const notice = site.notice === undefined
+        ? []
+        : seededWiringViolations(site, source.replace(site.notice, "t('fork-done', { id: String(childId), command })"))
+      if (site.notice !== undefined) {
+        assert.ok(notice.length > 0, `negative control: ${site.name} wiring catches a notice that advertises a resume command again`)
+      }
+      console.log(`PASS negative control: ${site.name} wiring catches "seed unconditionally", the widening narrowed away, a dropped verdict${site.notice === undefined ? '' : ' and the resume notice coming back'}`)
     }
     console.log(`PASS ${site.name} seeded wiring`)
   }

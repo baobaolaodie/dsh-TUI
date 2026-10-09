@@ -10,6 +10,7 @@ import { createFreshAgent, isUnstoredFreshSession } from '../fresh-agent.js'
 import { dispatchTuiDecision } from '../extension-events.js'
 import { normalizeRewindDoneSummary } from './decisions.js'
 import { composePreset, runningPresetOf } from '../presets.js'
+import { unspokenJudges } from '../unspoken-sessions.js'
 import { attachSessionToWorkspace } from '../workspace.js'
 import { reserveNewSession } from '../../sessionMounts.js'
 import type { DshChannelBinding } from './binding.js'
@@ -18,6 +19,21 @@ import type { ChannelState, ChatRow } from './types.js'
 
 type Binding = DshChannelBinding
 type RewindState = Pick<ChannelState, 'working' | 'cwd' | 'provider' | 'model'>
+
+/**
+ * The exit sweep's own "did a person speak here" rule, asked through its
+ * exported judges instead of restated here: `unspokenJudges().log` IS
+ * `unspoken-sessions.ts`'s `conversationEvidence` (a `turn/start` or a human
+ * message). A FOURTH human-speech rule is exactly what the three existing ones
+ * must not become (KNOWN-ISSUES B-1). Its three process-layer facts are read
+ * lazily by the `held` rule, which is never asked here, so they stay inert
+ * rather than fabricated.
+ */
+const CONVERSATION_EVIDENCE = unspokenJudges({
+  currentSessionId: () => undefined,
+  liveSessionIds: () => new Set<string>(),
+  isSubagentOrDescendant: () => false,
+})
 
 async function waitForTurnEnd(
   session: unknown,
@@ -72,21 +88,28 @@ export function createRewindToAction(
       if (event.type === 'turn/end') break
     }
     const source = deps.binding.agent.session
-    // A session nobody has typed into holds initialization, not a conversation.
-    // A seed would copy that prefix, and the host stores every seed at
-    // publication (agent-loop `appendUnstoredSuffix`), so the child's log would
-    // exist before its first real event — the permission-only shell the
-    // fresh-session deferral keeps out of JSONL. There is no history to cut,
-    // so a never-used source yields an unseeded child instead.
-    const neverUsed = isUnstoredFreshSession(source)
+    // A source that holds no conversation is not one to continue, whether the
+    // shell came from the deferral this process installed (the never-used
+    // verdict) or was already on disk when the process started. A seed would
+    // copy that shell, and the host stores every seed at publication (agent-loop
+    // `appendUnstoredSuffix`), so the child's log would exist before its first
+    // real event — the permission-only shell the fresh-session deferral keeps
+    // out of JSONL. There is no history to cut, so such a source yields an
+    // unseeded child instead; the evidence is read from the live snapshot in
+    // hand (in memory, never a second read of the log). Reaching this branch at
+    // all still needs a rewind row, and only real content offers one
+    // (`Chat.tsx`), so it is the depth behind `/model` and `/fork`.
+    let sourceHoldsNoConversation: boolean
     let seed: readonly SessionEvent[]
     try {
       if (boundary < 0) throw new Error('cannot rewind to the very first message')
+      sourceHoldsNoConversation = isUnstoredFreshSession(source)
+        || CONVERSATION_EVIDENCE.log({ events: snapshotLiveSessionEvents(source), complete: true }) === undefined
       // Slice the SOURCE snapshot through an inclusive seq. Never
       // sessions.fork(): that registers a real child whose snapshot includes
       // child-owned session/end-seed, so snapshot.length is not the inherited
       // cut. agents.create owns the new session id.
-      seed = neverUsed ? [] : sliceLiveSessionSeed(source, boundary)
+      seed = sourceHoldsNoConversation ? [] : sliceLiveSessionSeed(source, boundary)
     } catch (error) {
       deps.notify(t('rewind-fork-failed', { err: error instanceof Error ? error.message : String(error) }), { color: 'error' })
       return null
@@ -98,9 +121,9 @@ export function createRewindToAction(
     const { reservation } = await reserveNewSession(String(childId))
     let candidate: AgentSession
     try {
-      const create = (): Promise<AgentHandle> => neverUsed
-        // No seed and no parent: a never-used session has no history to cut and
-        // no conversation for lineage to describe, so the child is an ordinary
+      const create = (): Promise<AgentHandle> => sourceHoldsNoConversation
+        // No seed and no parent: a conversation-less session has no history to
+        // cut and nothing for lineage to describe, so the child is an ordinary
         // fresh session and stands as its own root (session-lineage.ts).
         ? createFreshAgent(ctx, agents, {
           sessionId: childId,
