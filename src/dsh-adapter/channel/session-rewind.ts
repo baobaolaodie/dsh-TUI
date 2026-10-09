@@ -6,6 +6,7 @@ import { randomUUID } from 'node:crypto'
 import { t } from '../../i18n.js'
 import { createDshSession, dshHandleOf } from '../backend/session.js'
 import { liveSessionCreateOptions, liveSessionOffset, sliceLiveSessionSeed, snapshotLiveSessionEvents } from '../compat/index.js'
+import { createFreshAgent, isUnstoredFreshSession } from '../fresh-agent.js'
 import { dispatchTuiDecision } from '../extension-events.js'
 import { normalizeRewindDoneSummary } from './decisions.js'
 import { composePreset, runningPresetOf } from '../presets.js'
@@ -70,6 +71,14 @@ export function createRewindToAction(
       if (event.type === 'turn/start') { boundary = event.seq - 1; break }
       if (event.type === 'turn/end') break
     }
+    const source = deps.binding.agent.session
+    // A session nobody has typed into holds initialization, not a conversation.
+    // A seed would copy that prefix, and the host stores every seed at
+    // publication (agent-loop `appendUnstoredSuffix`), so the child's log would
+    // exist before its first real event — the permission-only shell the
+    // fresh-session deferral keeps out of JSONL. There is no history to cut,
+    // so a never-used source yields an unseeded child instead.
+    const neverUsed = isUnstoredFreshSession(source)
     let seed: readonly SessionEvent[]
     try {
       if (boundary < 0) throw new Error('cannot rewind to the very first message')
@@ -77,36 +86,47 @@ export function createRewindToAction(
       // sessions.fork(): that registers a real child whose snapshot includes
       // child-owned session/end-seed, so snapshot.length is not the inherited
       // cut. agents.create owns the new session id.
-      seed = sliceLiveSessionSeed(deps.binding.agent.session, boundary)
+      seed = neverUsed ? [] : sliceLiveSessionSeed(source, boundary)
     } catch (error) {
       deps.notify(t('rewind-fork-failed', { err: error instanceof Error ? error.message : String(error) }), { color: 'error' })
       return null
     }
-    const composed = await composePreset(ctx, runningPresetOf(deps.binding.agent.session))
+    const composed = await composePreset(ctx, runningPresetOf(source))
     // Announce the id before the factory: the rewind creates the child's log
     // here, and the publisher only learns the id from the registry on its next
     // beat.
     const { reservation } = await reserveNewSession(String(childId))
     let candidate: AgentSession
     try {
-      candidate = await deps.binding.prepare(adoption, async () => createDshSession(ctx, await agents.create(liveSessionCreateOptions({
-        sessionId: childId,
-        seed,
-        runtimeSession: deps.binding.agent.session,
-        inheritedCount: seed.length,
-        cwd: state.cwd,
-        parentSession: deps.binding.agent.session.id,
-        agentPreset: composed.agentPreset,
-        agentOptions: { provider: state.provider, model: state.model },
-        setup: async (agentCtx, agent) => {
-          // The cut keeps pre-turn inbox insertions but drops their claims.
-          // Newer hosts replay those inherited splices, so cancel the restored
-          // queue durably in the CHILD before publication or preset setup.
-          // Clearing only state.pending would hide, not revoke, the old work.
-          agent.inbox.clear()
-          return composed.setup?.(agentCtx, agent)
-        },
-      }))))
+      const create = (): Promise<AgentHandle> => neverUsed
+        // No seed and no parent: a never-used session has no history to cut and
+        // no conversation for lineage to describe, so the child is an ordinary
+        // fresh session and stands as its own root (session-lineage.ts).
+        ? createFreshAgent(ctx, agents, {
+          sessionId: childId,
+          meta: { cwd: state.cwd, ...(composed.agentPreset === undefined ? {} : { agentPreset: composed.agentPreset }) },
+          agentOptions: { provider: state.provider, model: state.model },
+          setup: composed.setup,
+        })
+        : agents.create(liveSessionCreateOptions({
+          sessionId: childId,
+          seed,
+          runtimeSession: source,
+          inheritedCount: seed.length,
+          cwd: state.cwd,
+          parentSession: source.id,
+          agentPreset: composed.agentPreset,
+          agentOptions: { provider: state.provider, model: state.model },
+          setup: async (agentCtx, agent) => {
+            // The cut keeps pre-turn inbox insertions but drops their claims.
+            // Newer hosts replay those inherited splices, so cancel the restored
+            // queue durably in the CHILD before publication or preset setup.
+            // Clearing only state.pending would hide, not revoke, the old work.
+            agent.inbox.clear()
+            return composed.setup?.(agentCtx, agent)
+          },
+        }))
+      candidate = await deps.binding.prepare(adoption, async () => createDshSession(ctx, await create()))
     } catch {
       reservation.abandon()
       deps.notify(t('rewind-create-failed'), { color: 'error' })

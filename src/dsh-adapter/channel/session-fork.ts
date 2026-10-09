@@ -6,6 +6,7 @@ import { t } from '../../i18n.js'
 import { WORKING_GATE_NOTICES } from '../../commands.js'
 import { resolveDshProfileName } from '../../update.js'
 import { appendSessionTitle, liveSessionCreateOptions, sliceLiveSessionSeed } from '../compat/index.js'
+import { createFreshAgent, isUnstoredFreshSession } from '../fresh-agent.js'
 import { composePreset, runningPresetOf } from '../presets.js'
 import { attachSessionToWorkspace } from '../workspace.js'
 import { reserveMount, type MountReservation } from '../../sessionMounts.js'
@@ -41,13 +42,20 @@ export function createForkSessionAction(
     }
     await deps.settleCompaction()
     const source = deps.source()
+    // A session nobody has typed into holds initialization, not a conversation.
+    // A seed would copy that prefix, and the host stores every seed at
+    // publication (agent-loop `appendUnstoredSuffix`), so the fork's log would
+    // exist before its first real event — the permission-only shell the
+    // fresh-session deferral keeps out of JSONL. There is nothing to copy
+    // anyway: the fork starts unseeded, as an ordinary fresh session.
+    const neverUsed = isUnstoredFreshSession(source)
     const childId = SessionId(randomUUID())
     let seed: readonly SessionEvent[]
     try {
       // No boundary: the whole (turn-closed) source log. Slice the SOURCE
       // snapshot — sessions.fork() would register a child and append
       // session/end-seed, so snapshot.length is not a lineage cut.
-      seed = sliceLiveSessionSeed(source)
+      seed = neverUsed ? [] : sliceLiveSessionSeed(source)
     } catch (error) {
       deps.notify(t('fork-failed', { err: error instanceof Error ? error.message : String(error) }), { color: 'error' })
       return false
@@ -66,19 +74,26 @@ export function createForkSessionAction(
     const reservation: MountReservation = reserved.ok ? reserved.reservation : { settle: () => {}, abandon: () => {} }
     let detached: { handle: AgentHandle; release(): Promise<void> }
     try {
-      detached = await deps.createDetachedHandle(() => agents.create(liveSessionCreateOptions({
-        sessionId: childId,
-        seed,
-        runtimeSession: source,
-        inheritedCount: seed.length,
-        cwd: state.cwd,
-        // NO parentSession: a /fork copy is an independent conversation
-        // (kimi-code semantics), not a rewind branch — recording lineage
-        // would fold it into the source's family in /resume.
-        agentPreset: forkComposed.agentPreset,
-        agentOptions: { provider: state.provider, model: state.model },
-        setup: forkComposed.setup,
-      })))
+      detached = await deps.createDetachedHandle(() => neverUsed
+        ? createFreshAgent(ctx, agents, {
+          sessionId: childId,
+          meta: { cwd: state.cwd, ...(forkComposed.agentPreset === undefined ? {} : { agentPreset: forkComposed.agentPreset }) },
+          agentOptions: { provider: state.provider, model: state.model },
+          setup: forkComposed.setup,
+        })
+        : agents.create(liveSessionCreateOptions({
+          sessionId: childId,
+          seed,
+          runtimeSession: source,
+          inheritedCount: seed.length,
+          cwd: state.cwd,
+          // NO parentSession: a /fork copy is an independent conversation
+          // (kimi-code semantics), not a rewind branch — recording lineage
+          // would fold it into the source's family in /resume.
+          agentPreset: forkComposed.agentPreset,
+          agentOptions: { provider: state.provider, model: state.model },
+          setup: forkComposed.setup,
+        })))
     } catch {
       reservation.abandon()
       deps.notify(t('fork-create-failed'), { color: 'error' })

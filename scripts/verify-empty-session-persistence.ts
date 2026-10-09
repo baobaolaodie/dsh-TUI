@@ -10,9 +10,18 @@
  * session from its `session/created` hook and from its own event throttle, and
  * draining on those checkpoints re-materialized exactly the permission-only
  * shell the deferral keeps out of JSONL. The checkpoint still participates, and
- * the first real event still publishes the complete log from seq 0. The five
- * channel actions that created sessions outside the gate are covered by their
- * creation shape.
+ * the first real event still publishes the complete log from seq 0.
+ *
+ * The other side of the same shell is the SEED. The four channel actions that
+ * create a child from a source prefix (`/model`, `/fork`, `/rewind`, `/tree`)
+ * copied a source nobody had used, and the host stores a seed at publication
+ * (`dsh-agent-loop` `appendUnstoredSuffix` → `writer.append`) — so the copy,
+ * not a flush, is what puts the child's log on disk before its first real
+ * event. Each of them now asks `isUnstoredFreshSession` (the repo's own
+ * never-used verdict, `src/dsh-adapter/fresh-agent.ts`) and starts an unseeded
+ * fresh session instead. Both halves are pinned here: the creation shapes below
+ * drive the real host, and `verifySeededWiring` reads the four actions to prove
+ * the verdict is what selects the unseeded branch.
  *
  * Run: node --import tsx/esm scripts/verify-empty-session-persistence.ts
  *
@@ -21,12 +30,22 @@
  *      pre-fix `guardedFlush` (start, drain the live snapshot, flush) on the
  *      same creation shape and asserts the shell DOES appear — the pair is what
  *      makes "the create-time checkpoint does not publish the permission-only
- *      shell" a discriminating assertion instead of a vacuous one.
- *   2. Real revert: restore `start(); await drain()` at the head of
+ *      shell" a discriminating assertion instead of a vacuous one. It also
+ *      replays the pre-fix SEED for the same never-used sources, and reverses
+ *      the four wiring checks (`=> neverUsed` → `=> false`, and the verdict
+ *      dropped) to prove those checks can fail (LESSONS L-044 / L-048).
+ *   2. Real revert (flush): restore `start(); await drain()` at the head of
  *      `guardedFlush` in src/dsh-adapter/fresh-agent.ts, then
  *      `node --import tsx/esm scripts/verify-empty-session-persistence.ts`
  *      → expect FAIL "the create-time checkpoint does not publish the
  *      permission-only shell" (plus the two narrowed checkpoint cases).
+ *   3. Real revert (seed): make one action seed unconditionally — e.g. in
+ *      src/dsh-adapter/channel/model-switch.ts replace
+ *      `const create = (): Promise<AgentHandle> => neverUsed` with `=> false` —
+ *      then the same command → expect FAIL "channel-model-switch: the
+ *      never-used verdict selects the unseeded branch". The creation-shape
+ *      cases stay green there: they drive the creation, the wiring check reads
+ *      the action.
  */
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
@@ -97,6 +116,7 @@ process.env.DSH_HOME = join(root, 'home')
 process.env.DSH_TUI_LANG = 'en'
 const { createFreshAgent, isUnstoredFreshSession } = await import('../src/dsh-adapter/fresh-agent.js')
 const { createChannel } = await import('../src/dsh-adapter/channel.js')
+const { extractEntries } = await import('../src/dsh-adapter/sessionTree.js')
 const { isExitResumable } = await import('../src/dsh-adapter/plugin.js')
 const { concreteService } = await import('../src/dsh-adapter/host-access.js')
 const { liveSessionCreateOptions } = await import('../src/dsh-adapter/compat/index.js')
@@ -301,41 +321,13 @@ async function verify(compression: 'zstd' | 'none'): Promise<SessionId> {
       assert.ok(await settled(() => existsSync(artifact(ungated.agent.session))), 'the ungated /bg shape still publishes the shell')
       await ungated.dispose()
 
-      // The other four copy a source prefix into the child. The host appends
-      // that prefix through the writer BEFORE `session/created`
-      // (dsh-agent-loop `appendUnstoredSuffix` → writer.append → the JSONL
-      // backend materializes on the first batch), so a flush-side gate cannot
-      // unmake a seeded child's artifact: the file IS the inherited prefix.
-      // Verified shape, not silence: an idle seeded child stores exactly its own
-      // log — the inherited prefix plus the child's own seed marker — and no
-      // create-time checkpoint adds anything to it.
-      const seedSource = await fresh('channel-seed-source')
-      const seed = seedSource.agent.session.snapshotEvents()
-      assert.deepEqual(seed.map(event => event.type), policyTypes)
-      const seededSites: readonly { name: string; parentSession: SessionId | undefined }[] = [
-        { name: 'channel-model-switch', parentSession: undefined },
-        { name: 'channel-session-fork', parentSession: undefined },
-        { name: 'channel-session-rewind', parentSession: seedSource.agent.session.id },
-        { name: 'channel-session-tree-actions', parentSession: seedSource.agent.session.id },
-      ]
-      for (const site of seededSites) {
-        const id = options(site.name).sessionId
-        createFlushes.add(String(id))
-        const child = await ctx.agents.create(liveSessionCreateOptions({
-          sessionId: id,
-          seed,
-          runtimeSession: seedSource.agent.session,
-          inheritedCount: seed.length,
-          cwd: root,
-          ...(site.parentSession === undefined ? {} : { parentSession: site.parentSession }),
-          agentOptions: { provider: 'scripted', model: 'scripted' },
-        }))
-        handles.push(child)
-        await sleep(250)
-        const persisted = await stored(child.agent.session)
-        assert.deepEqual(persisted, child.agent.session.snapshotEvents(), `${site.name}: an idle seeded child stores exactly its own log (inherited prefix plus the child's seed marker)`)
-        assert.deepEqual(persisted.slice(0, 3).map(event => event.type), policyTypes, `${site.name}: no create-time checkpoint adds a suffix`)
-      }
+      // The other four channel actions (`/model`, `/fork`, `/rewind`, `/tree`)
+      // copy a source prefix into the child, and the host appends that prefix
+      // through the writer BEFORE `session/created` (dsh-agent-loop
+      // `appendUnstoredSuffix` → writer.append → the JSONL backend materializes
+      // on the first batch), so a flush-side gate cannot unmake a seeded child's
+      // artifact: the file IS the inherited prefix. They are covered by
+      // `verifySeededFamily` below, which is about the SOURCE they copy from.
 
       // Negative control (--negative-controls): replay the pre-fix
       // `guardedFlush` — start, drain the live snapshot, flush — for the same
@@ -351,6 +343,121 @@ async function verify(compression: 'zstd' | 'none'): Promise<SessionId> {
     }
     await verifyCheckpointPublication()
     persistence.create = originalCreate
+
+    /**
+     * The SEEDED family (`/model`, `/fork`, `/rewind`, `/tree`). Each of the
+     * four copies a source prefix into a child, and the host stores a seed at
+     * publication — the copy, not a flush, is what materializes the child. The
+     * cases below drive BOTH shapes on real sources:
+     *
+     *  (a) a never-used source (`isUnstoredFreshSession` true) and the unseeded
+     *      shape the action now takes: the create-time checkpoint still fires
+     *      and the child's log must NOT appear until a real event, which then
+     *      publishes it completely from seq 0;
+     *  (b) a used source and the unchanged seeded shape: the whole prefix is
+     *      copied and the child's log is complete at publication.
+     *
+     * `verifySeededWiring` pins which shape each action takes; these two halves
+     * together are what make the pair discriminating.
+     */
+    const verifySeededFamily = async (): Promise<void> => {
+      const unusedSource = await fresh('channel-seed-unused-source')
+      assert.equal(isUnstoredFreshSession(unusedSource.agent.session), true, 'an untouched fresh session is the never-used verdict the four actions key on')
+      const unusedSeed = unusedSource.agent.session.snapshotEvents()
+      assert.deepEqual(unusedSeed.map(event => event.type), policyTypes, 'a never-used source holds initialization only')
+
+      // Boundary of this change's coverage, asserted rather than argued: the
+      // `/rewind` and `/tree` branches below are defense-in-depth while a
+      // never-used source cannot be reached by either. Chat.tsx's rewind list
+      // is human `user` rows only, and a tree entry comes from `extractEntries`
+      // — both need real content, so a never-used source offers neither. If a
+      // future projection starts offering one, this fails first and the two
+      // branches need reachable coverage of their own.
+      const unusedChannel = createChannel(ctx, unusedSource.agent, { handle: unusedSource, cwd: root, provider: 'scripted', model: 'scripted', activity: false })
+      try {
+        assert.equal(unusedChannel.rows.filter(row => row.kind === 'user' && row.label === undefined).length, 0, 'a never-used source offers no /rewind candidate (Chat.tsx rewindRows)')
+      } finally { unusedChannel.releaseContributions() }
+      assert.equal(extractEntries(String(unusedSource.agent.session.id), unusedSeed).length, 0, 'a never-used source offers no /tree entry to rewind or fork from')
+      assert.equal(isUnstoredFreshSession(unusedSource.agent.session), true, 'mounting a channel over the source does not use it up')
+
+      const usedSource = await fresh('channel-seed-used-source')
+      const usedChannel = createChannel(ctx, usedSource.agent, { handle: usedSource, cwd: root, provider: 'scripted', model: 'scripted', activity: false })
+      try {
+        usedChannel.submit('a real prompt')
+        assert.ok(await settled(() => usedChannel.rows.some(row => row.text === 'saved reply') && !usedChannel.working))
+      } finally { usedChannel.releaseContributions() }
+      await ctx.sessions.flush(usedSource.agent.session)
+      assert.equal(isUnstoredFreshSession(usedSource.agent.session), false, 'a source with a real event is no longer never-used')
+      const usedSeed = usedSource.agent.session.snapshotEvents()
+      assert.ok(usedSeed.some(event => event.type === 'turn/start'), 'the used source holds a turn')
+      assert.ok(usedSeed.some(event => event.type === 'user/message'), 'the used source holds the human prompt that started it')
+
+      const sites: readonly { readonly name: string; readonly parentSession: SessionId | undefined }[] = [
+        { name: 'channel-model-switch', parentSession: undefined },
+        { name: 'channel-session-fork', parentSession: undefined },
+        { name: 'channel-session-rewind', parentSession: usedSource.agent.session.id },
+        { name: 'channel-session-tree-actions', parentSession: usedSource.agent.session.id },
+      ]
+      for (const site of sites) {
+        // (a) The branch a never-used source takes: unseeded, and created
+        // through the fresh-session gate (the shape `/new` and `/bg` use).
+        const childId = SessionId(`${site.name}-unused`)
+        createFlushes.add(String(childId))
+        const child = await createFreshAgent(ctx, ctx.agents, {
+          sessionId: childId,
+          meta: { cwd: root },
+          agentOptions: { provider: 'scripted', model: 'scripted' },
+        })
+        handles.push(child)
+        await sleep(250) // 固定窗:探针 — beyond JSONL's 200ms live drain timer.
+        assert.equal(existsSync(artifact(child.agent.session)), false, `${site.name}: a never-used source publishes no child`)
+        assert.equal(isUnstoredFreshSession(child.agent.session), true, `${site.name}: the child starts as an unstored fresh session`)
+        assert.deepEqual(child.agent.session.snapshotEvents().map(event => event.type), policyTypes, `${site.name}: the child starts from its own initialization`)
+        title(child.agent.session, 'first real event')
+        await ctx.sessions.flush(child.agent.session)
+        assert.deepEqual((await stored(child.agent.session)).map(event => event.seq), [0, 1, 2, 3], `${site.name}: the child publishes completely from seq 0`)
+        await assertComplete(child.agent.session)
+
+        // (b) A source with real events keeps the unchanged branch: the prefix
+        // is copied, and the create-time checkpoint adds nothing to it.
+        const seededId = SessionId(`${site.name}-used`)
+        createFlushes.add(String(seededId))
+        const seeded = await ctx.agents.create(liveSessionCreateOptions({
+          sessionId: seededId,
+          seed: usedSeed,
+          runtimeSession: usedSource.agent.session,
+          inheritedCount: usedSeed.length,
+          cwd: root,
+          ...(site.parentSession === undefined ? {} : { parentSession: site.parentSession }),
+          agentOptions: { provider: 'scripted', model: 'scripted' },
+        }))
+        handles.push(seeded)
+        await sleep(250)
+        const persisted = await stored(seeded.agent.session)
+        assert.deepEqual(persisted.slice(0, usedSeed.length), usedSeed, `${site.name}: a used source still copies its whole prefix`)
+        assert.deepEqual(persisted, seeded.agent.session.snapshotEvents(), `${site.name}: the seeded child stores exactly its own log`)
+        assert.deepEqual(persisted.slice(0, 3).map(event => event.type), policyTypes, `${site.name}: no create-time checkpoint adds a suffix to the seeded child`)
+
+        // Negative control (--negative-controls): the pre-fix DECISION for the
+        // same never-used source — copy its initialization anyway. The host
+        // stores a seed at publication, so the child's log appears; this is the
+        // revert the wiring checks above refuse to let back in.
+        if (negativeControls) {
+          const preFix = await ctx.agents.create(liveSessionCreateOptions({
+            sessionId: SessionId(`${site.name}-pre-fix-seed`),
+            seed: unusedSeed,
+            runtimeSession: unusedSource.agent.session,
+            inheritedCount: unusedSeed.length,
+            cwd: root,
+            agentOptions: { provider: 'scripted', model: 'scripted' },
+          }))
+          handles.push(preFix)
+          assert.equal(existsSync(artifact(preFix.agent.session)), true, `negative control: seeding a never-used source publishes the ${site.name} child`)
+          console.log(`PASS negative control: seeding a never-used source publishes the ${site.name} child`)
+        }
+      }
+    }
+    await verifySeededFamily()
 
     // Hold the first suffix in the public writer while more events arrive,
     // then fail the next suffix. A checkpoint must retry that exact prefix.
@@ -506,6 +613,112 @@ function verifyChannelWiring(): void {
   console.log('PASS /bg creation wiring')
 }
 
+/**
+ * The four seeded channel actions. `verifySeededFamily` drives the creation
+ * SHAPES through the real host; it would stay green if an action went back to
+ * seeding unconditionally, because the shapes are driven here rather than by
+ * the action. So pin the wiring: each action must ask the never-used verdict
+ * and let THAT verdict select the unseeded branch, in that order. Every marker
+ * is guarded (a missing or reordered marker fails instead of passing on an
+ * empty window — LESSONS L-048), and `--negative-controls` reverses the wiring
+ * to prove the checks can fail (L-044).
+ */
+const SEEDED_SITES: readonly {
+  readonly name: string
+  readonly file: string
+  /** The expression the verdict is read from, for the negative control. */
+  readonly subject: string
+  readonly markers: readonly string[]
+}[] = [
+  {
+    name: 'channel-model-switch',
+    file: 'model-switch.ts',
+    subject: 'source',
+    markers: [
+      'const neverUsed = isUnstoredFreshSession(source)',
+      'seed = neverUsed ? [] : sliceLiveSessionSeed(source)',
+      'const create = (): Promise<AgentHandle> => neverUsed',
+      '? createFreshAgent(ctx, agents, {',
+      ': agents.create(liveSessionCreateOptions({',
+    ],
+  },
+  {
+    name: 'channel-session-fork',
+    file: 'session-fork.ts',
+    subject: 'source',
+    markers: [
+      'const neverUsed = isUnstoredFreshSession(source)',
+      'seed = neverUsed ? [] : sliceLiveSessionSeed(source)',
+      'deps.createDetachedHandle(() => neverUsed',
+      '? createFreshAgent(ctx, agents, {',
+      ': agents.create(liveSessionCreateOptions({',
+    ],
+  },
+  {
+    name: 'channel-session-rewind',
+    file: 'session-rewind.ts',
+    subject: 'source',
+    markers: [
+      'const neverUsed = isUnstoredFreshSession(source)',
+      'seed = neverUsed ? [] : sliceLiveSessionSeed(source, boundary)',
+      'const create = (): Promise<AgentHandle> => neverUsed',
+      '? createFreshAgent(ctx, agents, {',
+      ': agents.create(liveSessionCreateOptions({',
+    ],
+  },
+  {
+    name: 'channel-session-tree-actions',
+    file: 'session-tree-actions.ts',
+    subject: 'entrySession',
+    markers: [
+      // A persisted foreign source is on disk and never in this state, so the
+      // verdict is asked about the LIVE source only.
+      'const neverUsed = forkFromLive && isUnstoredFreshSession(entrySession)',
+      'const seed = neverUsed ? [] : sourceEvents.filter(event => event.seq <= target.boundary)',
+      'const create = (): Promise<AgentHandle> => neverUsed',
+      '? createFreshAgent(ctx, agents, {',
+      ': agents.create(liveSessionCreateOptions({',
+    ],
+  },
+]
+
+/** Every wiring violation of one site's source text, in reading order. */
+function seededWiringViolations(
+  site: (typeof SEEDED_SITES)[number],
+  source: string,
+): string[] {
+  const violations: string[] = []
+  if (!/import \{ createFreshAgent, isUnstoredFreshSession \} from '\.\.\/fresh-agent\.js'/.test(source)) {
+    violations.push('does not import createFreshAgent + isUnstoredFreshSession')
+  }
+  let cursor = -1
+  for (const marker of site.markers) {
+    const at = source.indexOf(marker)
+    if (at === -1) { violations.push(`missing: ${marker}`); continue }
+    if (at <= cursor) violations.push(`out of order: ${marker}`)
+    cursor = at
+  }
+  return violations
+}
+
+function verifySeededWiring(): void {
+  for (const site of SEEDED_SITES) {
+    const path = new URL(`../src/dsh-adapter/channel/${site.file}`, import.meta.url)
+    const source = readFileSync(path, 'utf8')
+    assert.deepEqual(seededWiringViolations(site, source), [], `${site.name}: the never-used verdict selects the unseeded branch`)
+    if (negativeControls) {
+      // The exact revert this task forbids — seed unconditionally — and the
+      // verdict dropped entirely. Both must be caught (L-044 / L-048).
+      const unconditional = seededWiringViolations(site, source.replaceAll('=> neverUsed', '=> false'))
+      assert.ok(unconditional.length > 0, `negative control: ${site.name} wiring catches seeding unconditionally`)
+      const verdictless = seededWiringViolations(site, source.replaceAll(`isUnstoredFreshSession(${site.subject})`, 'false'))
+      assert.ok(verdictless.length > 0, `negative control: ${site.name} wiring catches a dropped verdict`)
+      console.log(`PASS negative control: ${site.name} wiring catches "seed unconditionally" and a dropped verdict`)
+    }
+    console.log(`PASS ${site.name} seeded wiring`)
+  }
+}
+
 function verifyHandoffs(savedId: SessionId): void {
   const cases = [
     { name: 'startup empty /restart', kind: 'restart', session: '', args: [], expected: [] },
@@ -535,6 +748,7 @@ function verifyHandoffs(savedId: SessionId): void {
 
 try {
   verifyChannelWiring()
+  verifySeededWiring()
   const savedId = await verify('none')
   await verify('zstd')
   verifyHandoffs(savedId)

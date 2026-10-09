@@ -8,6 +8,7 @@ import { createDshSession, dshHandleOf } from '../backend/session.js'
 import { appendInterruptedTurnEnd, liveSessionCreateOptions, liveSessionOffset, snapshotLiveSessionEvents } from '../compat/index.js'
 import { readPersistedSession, type SessionReader } from '../compat/persistence.js'
 import { closeLiveForkTurn } from '../compat/liveSession.js'
+import { createFreshAgent, isUnstoredFreshSession } from '../fresh-agent.js'
 import { composePreset, resolvePersistedPreset, runningPresetOf } from '../presets.js'
 import { attachSessionToWorkspace } from '../workspace.js'
 import { reserveNewSession } from '../../sessionMounts.js'
@@ -101,7 +102,16 @@ export function createTreeRewindAction(
       deps.notify(t('rewind-settling'), { color: 'error' })
       return null
     }
-    const seed = sourceEvents.filter(event => event.seq <= target.boundary)
+    // A LIVE source nobody has typed into holds initialization, not a
+    // conversation. A seed would copy that prefix, and the host stores every
+    // seed at publication (agent-loop `appendUnstoredSuffix`), so the child's
+    // log would exist before its first real event — the permission-only shell
+    // the fresh-session deferral keeps out of JSONL. There is no history to
+    // cut, so the child starts unseeded instead. A persisted foreign source is
+    // never in that state: its log is on disk, and reaching its entries at all
+    // proves it holds real content.
+    const neverUsed = forkFromLive && isUnstoredFreshSession(entrySession)
+    const seed = neverUsed ? [] : sourceEvents.filter(event => event.seq <= target.boundary)
     const inheritedCount = seed.length
     const closeAfterCreate = target.closeTurn !== undefined && entrySession.header?.version >= 3
     if (target.closeTurn !== undefined && !closeAfterCreate) {
@@ -112,27 +122,38 @@ export function createTreeRewindAction(
     const { reservation } = await reserveNewSession(String(childId))
     let candidate: AgentSession
     try {
-      candidate = await deps.binding.prepare(adoption, async () => createDshSession(ctx, await agents.create(liveSessionCreateOptions({
-        sessionId: childId,
-        seed,
-        runtimeSession: entrySession,
-        inheritedCount,
-        cwd: sourceCwd,
-        parentSession: SessionId(sessionId),
-        agentPreset: composed.agentPreset,
-        agentOptions: { provider: state.provider, model: state.model },
-        setup: closeAfterCreate || mode === 'rewind' ? async (agentCtx, agent) => {
-          // V3 requires seed.length === inheritedEventCount. The constructor
-          // inserts the inherited marker, then these closers belong to the
-          // child and persist before publication, without falsifying the cut.
-          if (closeAfterCreate) closeLiveForkTurn(agent.session, target.closeTurn!)
-          // Re-editing starts with no historical pending work. Cancel through
-          // the child's Inbox so a later resume cannot resurrect the queue.
-          // A plain fork deliberately keeps its separate semantics.
-          if (mode === 'rewind') agent.inbox.clear()
-          return composed.setup?.(agentCtx, agent)
-        } : composed.setup,
-      }))))
+      const create = (): Promise<AgentHandle> => neverUsed
+        // No seed and no parent: a never-used session has no history to cut and
+        // no conversation for lineage to describe, so the child is an ordinary
+        // fresh session and stands as its own root (session-lineage.ts).
+        ? createFreshAgent(ctx, agents, {
+          sessionId: childId,
+          meta: { cwd: sourceCwd, ...(composed.agentPreset === undefined ? {} : { agentPreset: composed.agentPreset }) },
+          agentOptions: { provider: state.provider, model: state.model },
+          setup: composed.setup,
+        })
+        : agents.create(liveSessionCreateOptions({
+          sessionId: childId,
+          seed,
+          runtimeSession: entrySession,
+          inheritedCount,
+          cwd: sourceCwd,
+          parentSession: SessionId(sessionId),
+          agentPreset: composed.agentPreset,
+          agentOptions: { provider: state.provider, model: state.model },
+          setup: closeAfterCreate || mode === 'rewind' ? async (agentCtx, agent) => {
+            // V3 requires seed.length === inheritedEventCount. The constructor
+            // inserts the inherited marker, then these closers belong to the
+            // child and persist before publication, without falsifying the cut.
+            if (closeAfterCreate) closeLiveForkTurn(agent.session, target.closeTurn!)
+            // Re-editing starts with no historical pending work. Cancel through
+            // the child's Inbox so a later resume cannot resurrect the queue.
+            // A plain fork deliberately keeps its separate semantics.
+            if (mode === 'rewind') agent.inbox.clear()
+            return composed.setup?.(agentCtx, agent)
+          } : composed.setup,
+        }))
+      candidate = await deps.binding.prepare(adoption, async () => createDshSession(ctx, await create()))
     } catch {
       reservation.abandon()
       deps.notify(t('rewind-create-failed'), { color: 'error' })
