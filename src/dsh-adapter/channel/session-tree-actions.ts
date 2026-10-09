@@ -10,7 +10,7 @@ import { readPersistedSession, type SessionReader } from '../compat/persistence.
 import { closeLiveForkTurn } from '../compat/liveSession.js'
 import { createFreshAgent, isUnstoredFreshSession } from '../fresh-agent.js'
 import { composePreset, resolvePersistedPreset, runningPresetOf } from '../presets.js'
-import { unspokenJudges } from '../unspoken-sessions.js'
+import { holdsNoConversation } from '../unspoken-sessions.js'
 import { attachSessionToWorkspace } from '../workspace.js'
 import { reserveNewSession } from '../../sessionMounts.js'
 import { forkTarget, rewindTarget, turnUserText } from '../sessionTree.js'
@@ -20,21 +20,6 @@ import type { ChannelState } from './types.js'
 
 type Binding = DshChannelBinding
 type TreeRewindState = Pick<ChannelState, 'working' | 'cwd' | 'provider' | 'model'>
-
-/**
- * The exit sweep's own "did a person speak here" rule, asked through its
- * exported judges instead of restated here: `unspokenJudges().log` IS
- * `unspoken-sessions.ts`'s `conversationEvidence` (a `turn/start` or a human
- * message). A FOURTH human-speech rule is exactly what the three existing ones
- * must not become (KNOWN-ISSUES B-1). Its three process-layer facts are read
- * lazily by the `held` rule, which is never asked here, so they stay inert
- * rather than fabricated.
- */
-const CONVERSATION_EVIDENCE = unspokenJudges({
-  currentSessionId: () => undefined,
-  liveSessionIds: () => new Set<string>(),
-  isSubagentOrDescendant: () => false,
-})
 
 async function waitForTurnEnd(session: unknown, fromSeq: number, timeoutMs: number): Promise<boolean> {
   const deadline = Date.now() + timeoutMs
@@ -133,8 +118,9 @@ export function createTreeRewindAction(
     // process's own bookkeeping, and a persisted foreign source is not in it),
     // so a foreign source is judged by its cut alone.
     let seed = sourceEvents.filter(event => event.seq <= target.boundary)
+    // The cut criterion has one source: unspoken-sessions.ts.
     if ((forkFromLive && isUnstoredFreshSession(entrySession))
-      || CONVERSATION_EVIDENCE.log({ events: seed, complete: true }) === undefined) seed = []
+      || holdsNoConversation(seed)) seed = []
     const cutHoldsNoConversation = seed.length === 0
     const inheritedCount = seed.length
     const closeAfterCreate = target.closeTurn !== undefined && entrySession.header?.version >= 3

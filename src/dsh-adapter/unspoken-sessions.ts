@@ -380,6 +380,32 @@ export function unspokenJudges(deps: UnspokenSweepDeps): UnspokenJudges {
   }
 }
 
+/** The one judges instance {@link holdsNoConversation} asks; only `log` is used. */
+const CUT_JUDGES = unspokenJudges({
+  currentSessionId: () => undefined,
+  liveSessionIds: () => new Set<string>(),
+  isSubagentOrDescendant: () => false,
+})
+
+/**
+ * The cut criterion the seeded channel actions share: does this cut inherit no
+ * conversation at all? It is the exit sweep's own "did a person speak here"
+ * rule, asked through {@link unspokenJudges}' `log` instead of restated — a
+ * FOURTH human-speech rule is exactly what the three existing ones must not
+ * become (KNOWN-ISSUES B-1).
+ *
+ * The judges' three process-layer facts are never read here: only `log` is
+ * asked, and `held` reads them lazily, so they stay inert rather than
+ * fabricated.
+ *
+ * @param events - The cut itself (the slice a child would inherit), never the
+ *   session it was cut from.
+ * @returns True when the cut holds only initialization.
+ */
+export function holdsNoConversation(events: readonly unknown[]): boolean {
+  return CUT_JUDGES.log({ events, complete: true }) === undefined
+}
+
 /**
  * What one collected event proves about whether a person ever spoke here.
  * Mirrors `digest.ts:66-98`; the one deliberate widening covers a KNOWN type

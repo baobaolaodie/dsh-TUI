@@ -22,7 +22,7 @@
  * deferral's own `isUnstoredFreshSession` (`src/dsh-adapter/fresh-agent.ts`)
  * answers first for the live source, then the exit sweep's evidence rule
  * (`src/dsh-adapter/unspoken-sessions.ts`'s `conversationEvidence`, asked
- * through its exported judges) reads that slice. Judging the SOURCE left a hole
+ * through the exported `holdsNoConversation`) reads that slice. Judging the SOURCE left a hole
  * a rewind reaches: the first message's boundary is the seq before its
  * turn/start, and that turn opens behind the initialization `session/created`
  * wrote (seq 0-2), so a whole conversation can cut down to the initialization
@@ -79,7 +79,7 @@
  *   4. Real revert (verdict narrowed): put the widening back to T-FIX-10's
  *      criterion in src/dsh-adapter/channel/session-fork.ts — replace the two
  *      lines `seed = isUnstoredFreshSession(source) ? [] : sliceLiveSessionSeed(source)`
- *      + `if (CONVERSATION_EVIDENCE.log({ … }) === undefined) seed = []` with
+ *      + `if (holdsNoConversation(seed)) seed = []` with
  *      `seed = isUnstoredFreshSession(source) ? [] : sliceLiveSessionSeed(source)`
  *      — then the same command → expect FAIL "the fork notice for a
  *      conversation-less source is the new-session wording", FAIL "the /fork
@@ -90,9 +90,9 @@
  *   5. Real revert (T-FIX-12, the cut judged by its source): in
  *      src/dsh-adapter/channel/session-rewind.ts restart the verdict from the
  *      source session — replace
- *      `if (CONVERSATION_EVIDENCE.log({ events: seed, complete: true }) === undefined) seed = []`
+ *      `if (holdsNoConversation(seed)) seed = []`
  *      with
- *      `if (CONVERSATION_EVIDENCE.log({ events: snapshotLiveSessionEvents(source), complete: true }) === undefined) seed = []`
+ *      `if (holdsNoConversation(snapshotLiveSessionEvents(source))) seed = []`
  *      — then the same command → expect FAIL "a cut that holds no conversation
  *      takes the unseeded branch", FAIL "and leaves no log on disk", and the
  *      `channel-session-rewind` wiring FAIL. `--negative-controls` carries the
@@ -995,7 +995,7 @@ function verifyChannelWiring(): void {
  */
 
 /** The one line every site must carry: the verdict asks the CUT, never the source. */
-const CUT_EVIDENCE = 'CONVERSATION_EVIDENCE.log({ events: seed, complete: true })'
+const CUT_EVIDENCE = 'holdsNoConversation(seed)'
 
 const SEEDED_SITES: readonly {
   readonly name: string
@@ -1015,7 +1015,7 @@ const SEEDED_SITES: readonly {
     subject: 'source',
     markers: [
       'seed = isUnstoredFreshSession(source) ? [] : sliceLiveSessionSeed(source)',
-      `if (${CUT_EVIDENCE} === undefined) seed = []`,
+      `if (${CUT_EVIDENCE}) seed = []`,
       'const cutHoldsNoConversation = seed.length === 0',
       'const create = (): Promise<AgentHandle> => cutHoldsNoConversation',
       '? createFreshAgent(ctx, agents, {',
@@ -1030,7 +1030,7 @@ const SEEDED_SITES: readonly {
     notice: "? t('fork-done-unstored', { id: String(childId) })",
     markers: [
       'seed = isUnstoredFreshSession(source) ? [] : sliceLiveSessionSeed(source)',
-      `if (${CUT_EVIDENCE} === undefined) seed = []`,
+      `if (${CUT_EVIDENCE}) seed = []`,
       'const cutHoldsNoConversation = seed.length === 0',
       'deps.createDetachedHandle(() => cutHoldsNoConversation',
       '? createFreshAgent(ctx, agents, {',
@@ -1045,7 +1045,7 @@ const SEEDED_SITES: readonly {
     subject: 'source',
     markers: [
       'seed = isUnstoredFreshSession(source) ? [] : sliceLiveSessionSeed(source, boundary)',
-      `if (${CUT_EVIDENCE} === undefined) seed = []`,
+      `if (${CUT_EVIDENCE}) seed = []`,
       'const cutHoldsNoConversation = seed.length === 0',
       'const create = (): Promise<AgentHandle> => cutHoldsNoConversation',
       '? createFreshAgent(ctx, agents, {',
@@ -1063,7 +1063,7 @@ const SEEDED_SITES: readonly {
       // source (the deferral is this process's own bookkeeping): the evidence
       // rule below reads the CUT for a persisted foreign source too.
       'if ((forkFromLive && isUnstoredFreshSession(entrySession))',
-      `|| ${CUT_EVIDENCE} === undefined) seed = []`,
+      `|| ${CUT_EVIDENCE}) seed = []`,
       'const cutHoldsNoConversation = seed.length === 0',
       'const create = (): Promise<AgentHandle> => cutHoldsNoConversation',
       '? createFreshAgent(ctx, agents, {',
@@ -1081,8 +1081,8 @@ function seededWiringViolations(
   if (!/import \{ createFreshAgent, isUnstoredFreshSession \} from '\.\.\/fresh-agent\.js'/.test(source)) {
     violations.push('does not import createFreshAgent + isUnstoredFreshSession')
   }
-  if (!/import \{ unspokenJudges \} from '\.\.\/unspoken-sessions\.js'/.test(source)) {
-    violations.push('does not ask the sweep evidence rule through unspokenJudges')
+  if (!/import \{ holdsNoConversation \} from '\.\.\/unspoken-sessions\.js'/.test(source)) {
+    violations.push('does not ask the cut criterion through unspoken-sessions.ts')
   }
   let cursor = -1
   for (const marker of site.markers) {
@@ -1109,7 +1109,7 @@ function verifySeededWiring(): void {
       // in `verifyCutPrefixSeeding`'s pre-fix replay.
       const unconditional = seededWiringViolations(site, source.replaceAll('=> cutHoldsNoConversation', '=> false'))
       assert.ok(unconditional.length > 0, `negative control: ${site.name} wiring catches seeding unconditionally`)
-      const sourceJudged = seededWiringViolations(site, source.replace(CUT_EVIDENCE, `CONVERSATION_EVIDENCE.log({ events: ${site.sourceEvents}, complete: true })`))
+      const sourceJudged = seededWiringViolations(site, source.replace(CUT_EVIDENCE, `holdsNoConversation(${site.sourceEvents})`))
       assert.ok(sourceJudged.length > 0, `negative control: ${site.name} wiring catches the cut verdict narrowed back to the source session`)
       const shortcutless = seededWiringViolations(site, source.replaceAll(`isUnstoredFreshSession(${site.subject})`, 'false'))
       assert.ok(shortcutless.length > 0, `negative control: ${site.name} wiring catches a dropped never-used shortcut`)

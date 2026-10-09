@@ -10,7 +10,7 @@ import { createFreshAgent, isUnstoredFreshSession } from '../fresh-agent.js'
 import { dispatchTuiDecision } from '../extension-events.js'
 import { normalizeRewindDoneSummary } from './decisions.js'
 import { composePreset, runningPresetOf } from '../presets.js'
-import { unspokenJudges } from '../unspoken-sessions.js'
+import { holdsNoConversation } from '../unspoken-sessions.js'
 import { attachSessionToWorkspace } from '../workspace.js'
 import { reserveNewSession } from '../../sessionMounts.js'
 import type { DshChannelBinding } from './binding.js'
@@ -19,21 +19,6 @@ import type { ChannelState, ChatRow } from './types.js'
 
 type Binding = DshChannelBinding
 type RewindState = Pick<ChannelState, 'working' | 'cwd' | 'provider' | 'model'>
-
-/**
- * The exit sweep's own "did a person speak here" rule, asked through its
- * exported judges instead of restated here: `unspokenJudges().log` IS
- * `unspoken-sessions.ts`'s `conversationEvidence` (a `turn/start` or a human
- * message). A FOURTH human-speech rule is exactly what the three existing ones
- * must not become (KNOWN-ISSUES B-1). Its three process-layer facts are read
- * lazily by the `held` rule, which is never asked here, so they stay inert
- * rather than fabricated.
- */
-const CONVERSATION_EVIDENCE = unspokenJudges({
-  currentSessionId: () => undefined,
-  liveSessionIds: () => new Set<string>(),
-  isSubagentOrDescendant: () => false,
-})
 
 async function waitForTurnEnd(
   session: unknown,
@@ -111,7 +96,8 @@ export function createRewindToAction(
       // child-owned session/end-seed, so snapshot.length is not the inherited
       // cut. agents.create owns the new session id.
       seed = isUnstoredFreshSession(source) ? [] : sliceLiveSessionSeed(source, boundary)
-      if (CONVERSATION_EVIDENCE.log({ events: seed, complete: true }) === undefined) seed = []
+      // The cut criterion has one source: unspoken-sessions.ts.
+      if (holdsNoConversation(seed)) seed = []
     } catch (error) {
       deps.notify(t('rewind-fork-failed', { err: error instanceof Error ? error.message : String(error) }), { color: 'error' })
       return null

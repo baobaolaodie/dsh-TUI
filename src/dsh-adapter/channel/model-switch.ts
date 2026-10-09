@@ -11,7 +11,7 @@ import { createDshSession, dshHandleOf } from '../backend/session.js'
 import { liveSessionCreateOptions, sliceLiveSessionSeed } from '../compat/index.js'
 import { createFreshAgent, isUnstoredFreshSession } from '../fresh-agent.js'
 import { composePreset, runningPresetOf } from '../presets.js'
-import { unspokenJudges } from '../unspoken-sessions.js'
+import { holdsNoConversation } from '../unspoken-sessions.js'
 import { reserveNewSession } from '../../sessionMounts.js'
 import { attachSessionToWorkspace } from '../workspace.js'
 import type { DshChannelBinding } from './binding.js'
@@ -23,21 +23,6 @@ import type { ChannelState } from './types.js'
 type Binding = DshChannelBinding
 type SwitchState = Parameters<typeof resetSessionProjection>[0] & Pick<ChannelState,
   'cwd' | 'working' | 'status' | 'agentId' | 'sessionId' | 'agentPreset' | 'provider' | 'model' | 'contextWindow' | 'effortLevels' | 'reasoningEffort' | 'emit'>
-
-/**
- * The exit sweep's own "did a person speak here" rule, asked through its
- * exported judges instead of restated here: `unspokenJudges().log` IS
- * `unspoken-sessions.ts`'s `conversationEvidence` (a `turn/start` or a human
- * message). A FOURTH human-speech rule is exactly what the three existing ones
- * must not become (KNOWN-ISSUES B-1). Its three process-layer facts are read
- * lazily by the `held` rule, which is never asked here, so they stay inert
- * rather than fabricated.
- */
-const CONVERSATION_EVIDENCE = unspokenJudges({
-  currentSessionId: () => undefined,
-  liveSessionIds: () => new Set<string>(),
-  isSubagentOrDescendant: () => false,
-})
 
 /** Model-route adoption transaction. It settles compaction before its fork snapshot and owns the post-commit reset. */
 export function createModelSwitchAction(
@@ -91,7 +76,8 @@ export function createModelSwitchAction(
       // the SOURCE snapshot: sessions.fork() registers a real child, and its
       // snapshot length is not the inherited cut.
       seed = isUnstoredFreshSession(source) ? [] : sliceLiveSessionSeed(source)
-      if (CONVERSATION_EVIDENCE.log({ events: seed, complete: true }) === undefined) seed = []
+      // The cut criterion has one source: unspoken-sessions.ts.
+      if (holdsNoConversation(seed)) seed = []
     } catch (error) { deps.notify(t('model-switch-fork-failed', { err: error instanceof Error ? error.message : String(error) }), { color: 'error' }); return false }
     const cutHoldsNoConversation = seed.length === 0
     const childId = SessionId(randomUUID())
