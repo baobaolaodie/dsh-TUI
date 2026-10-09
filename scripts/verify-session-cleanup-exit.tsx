@@ -102,9 +102,10 @@
  *
  * ## Isolation (B-12)
  *
- * `DATA_DIR` is a module-level constant (`src/utils/paths.ts:14-22`), so the
- * throwaway HOME is installed BEFORE the first import of anything that reaches
- * it — hence the dynamic imports below. Without that, the synthetic fixtures
+ * `DATA_DIR` is a module-level constant (the `DATA_DIR` export in
+ * `src/utils/paths.ts`, evaluated at import time), so the throwaway HOME is
+ * installed BEFORE the first import of anything that reaches it — hence the
+ * dynamic imports below. Without that, the synthetic fixtures
  * read the operator's REAL `~/.dsh-tui/session-mounts.json` and their verdicts
  * depend on it. §12 asserts the isolation: the ledger the round consults is a
  * file under the throwaway home, and it is really consumed.
