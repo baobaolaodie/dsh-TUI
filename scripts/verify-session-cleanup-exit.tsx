@@ -64,12 +64,15 @@
  * `git checkout HEAD -- src/dsh-adapter/plugin.ts`:
  *
  *   (a) the branch feeds empty process facts — write `currentSessionId: () => undefined`
- *       and `liveSessionIds: () => new Set()` at `plugin.ts:1852-1853`
+ *       and `liveSessionIds: () => new Set()` inside the normal-exit fall-through
+ *       branch's `sweepUnspokenOnExit({…})` call in `plugin.ts`. No line number is
+ *       pinned on purpose: §7's `wiring:` assertions locate that call structurally
  *         $ node --import tsx/esm scripts/verify-session-cleanup-exit.tsx
  *         ⇒ 1 red: `wiring: the branch feeds the sweep the bound session, …`
  *   (b) the branch stops sweeping — drop the `const swept = sweepUnspokenOnExit({…})`
- *       call (`plugin.ts:1851-1855`), leaving `const swept = undefined as
- *       UnspokenSweepResult | undefined` so the notice falls back to `hint`
+ *       call in `plugin.ts`'s normal-exit fall-through branch, leaving
+ *       `const swept = undefined as UnspokenSweepResult | undefined` so the notice
+ *       falls back to `hint`
  *         $ node --import tsx/esm scripts/verify-session-cleanup-exit.tsx
  *         ⇒ 2 red: `wiring: the sweep is invoked once, …` (found 0) and
  *           `wiring: the branch feeds the sweep …`
