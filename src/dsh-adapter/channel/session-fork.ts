@@ -5,7 +5,7 @@ import { randomUUID } from 'node:crypto'
 import { t } from '../../i18n.js'
 import { WORKING_GATE_NOTICES } from '../../commands.js'
 import { resolveDshProfileName } from '../../update.js'
-import { appendSessionTitle, liveSessionCreateOptions, sliceLiveSessionSeed, snapshotLiveSessionEvents } from '../compat/index.js'
+import { appendSessionTitle, liveSessionCreateOptions, sliceLiveSessionSeed } from '../compat/index.js'
 import { createFreshAgent, isUnstoredFreshSession } from '../fresh-agent.js'
 import { composePreset, runningPresetOf } from '../presets.js'
 import { unspokenJudges } from '../unspoken-sessions.js'
@@ -58,31 +58,32 @@ export function createForkSessionAction(
     }
     await deps.settleCompaction()
     const source = deps.source()
-    // A source that holds no conversation is not one to continue, whether the
-    // shell came from the deferral this process installed (the never-used
-    // verdict) or was already on disk when the process started. A seed would
-    // copy that shell, and the host stores every seed at publication
-    // (agent-loop `appendUnstoredSuffix`), so the fork's log would exist before
-    // its first real event — the permission-only shell the fresh-session
-    // deferral keeps out of JSONL. The evidence is read from the live snapshot
-    // already in hand (in memory, never a second read of the log), so a shell
-    // left behind by an earlier process counts exactly like a local one; the
-    // fresh verdict answers first, so a deferred session is not even
-    // snapshotted. There is nothing to copy anyway: the fork starts unseeded,
-    // as an ordinary fresh session.
-    let sourceHoldsNoConversation: boolean
+    // The cut is what the child inherits, so the cut is what the verdict asks
+    // about — never the session it was cut from. A `/fork` cut is the whole
+    // source log, but the same verdict serves the actions whose cut can stop
+    // short of the conversation (`/rewind`, `/tree`): judging the source there
+    // would say "this one holds a conversation" while the prefix on offer holds
+    // the initialization alone. A seed would copy that prefix, and the host
+    // stores every seed at publication (agent-loop `appendUnstoredSuffix`), so
+    // the fork's log would exist before its first real event — the
+    // permission-only shell the fresh-session deferral keeps out of JSONL. The
+    // evidence is read from the slice already in hand (in memory, never a
+    // second read of the log), so a shell left behind by an earlier process
+    // counts exactly like a local one; the fresh verdict answers first, so a
+    // deferred session is not even sliced. There is nothing to copy anyway: the
+    // fork starts unseeded, as an ordinary fresh session.
     let seed: readonly SessionEvent[]
     try {
-      sourceHoldsNoConversation = isUnstoredFreshSession(source)
-        || CONVERSATION_EVIDENCE.log({ events: snapshotLiveSessionEvents(source), complete: true }) === undefined
       // No boundary: the whole (turn-closed) source log. Slice the SOURCE
       // snapshot — sessions.fork() would register a child and append
       // session/end-seed, so snapshot.length is not a lineage cut.
-      seed = sourceHoldsNoConversation ? [] : sliceLiveSessionSeed(source)
+      seed = isUnstoredFreshSession(source) ? [] : sliceLiveSessionSeed(source)
+      if (CONVERSATION_EVIDENCE.log({ events: seed, complete: true }) === undefined) seed = []
     } catch (error) {
       deps.notify(t('fork-failed', { err: error instanceof Error ? error.message : String(error) }), { color: 'error' })
       return false
     }
+    const cutHoldsNoConversation = seed.length === 0
     const childId = SessionId(randomUUID())
     const forkComposed = await composePreset(ctx, runningPresetOf(source))
     // Reserve BEFORE the factory, and hold it past `detached.release()`.
@@ -98,7 +99,7 @@ export function createForkSessionAction(
     const reservation: MountReservation = reserved.ok ? reserved.reservation : { settle: () => {}, abandon: () => {} }
     let detached: { handle: AgentHandle; release(): Promise<void> }
     try {
-      detached = await deps.createDetachedHandle(() => sourceHoldsNoConversation
+      detached = await deps.createDetachedHandle(() => cutHoldsNoConversation
         ? createFreshAgent(ctx, agents, {
           sessionId: childId,
           meta: { cwd: state.cwd, ...(forkComposed.agentPreset === undefined ? {} : { agentPreset: forkComposed.agentPreset }) },
@@ -156,7 +157,7 @@ export function createForkSessionAction(
     // branch keeps no artifact before its first real event, so the command
     // would name a session that does not exist — the notice says what is
     // missing instead ('fork-done-unstored').
-    deps.notify(sourceHoldsNoConversation
+    deps.notify(cutHoldsNoConversation
       ? t('fork-done-unstored', { id: String(childId) })
       : t('fork-done', { id: String(childId), command }), { timeoutMs: 8000 })
     return true

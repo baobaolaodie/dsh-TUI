@@ -118,20 +118,24 @@ export function createTreeRewindAction(
       deps.notify(t('rewind-settling'), { color: 'error' })
       return null
     }
-    // A LIVE source that holds no conversation is not one to continue, whether
-    // the shell came from the deferral this process installed (the never-used
-    // verdict) or was already on disk when the process started. A seed would
-    // copy that shell, and the host stores every seed at publication (agent-loop
-    // `appendUnstoredSuffix`), so the child's log would exist before its first
-    // real event — the permission-only shell the fresh-session deferral keeps
-    // out of JSONL. The evidence is the snapshot the seed is cut from below, in
-    // memory, never a second read of the log. A persisted foreign source is
-    // never in that state: its log is on disk, and reaching its entries at all
-    // proves it holds real content — so the verdict is asked about the LIVE
-    // source only.
-    const sourceHoldsNoConversation = forkFromLive && (isUnstoredFreshSession(entrySession)
-      || CONVERSATION_EVIDENCE.log({ events: sourceEvents, complete: true }) === undefined)
-    const seed = sourceHoldsNoConversation ? [] : sourceEvents.filter(event => event.seq <= target.boundary)
+    // The cut is what the child inherits, so the cut is what the verdict asks
+    // about — never the session it was cut from. A tree rewind can stop before
+    // every real event: the first message's boundary is the seq before its
+    // turn/start, and that turn opens behind the initialization
+    // `session/created` wrote (seq 0-2), so the prefix on offer holds the
+    // initialization alone while the source is a whole conversation. A seed
+    // would copy that prefix, and the host stores every seed at publication
+    // (agent-loop `appendUnstoredSuffix`), so the child's log would exist
+    // before its first real event — the permission-only shell the fresh-session
+    // deferral keeps out of JSONL. The evidence is the slice the seed IS, in
+    // memory, never a second read of the log. The never-used verdict answers
+    // first, and it only speaks for the LIVE source (the deferral is this
+    // process's own bookkeeping, and a persisted foreign source is not in it),
+    // so a foreign source is judged by its cut alone.
+    let seed = sourceEvents.filter(event => event.seq <= target.boundary)
+    if ((forkFromLive && isUnstoredFreshSession(entrySession))
+      || CONVERSATION_EVIDENCE.log({ events: seed, complete: true }) === undefined) seed = []
+    const cutHoldsNoConversation = seed.length === 0
     const inheritedCount = seed.length
     const closeAfterCreate = target.closeTurn !== undefined && entrySession.header?.version >= 3
     if (target.closeTurn !== undefined && !closeAfterCreate) {
@@ -142,10 +146,11 @@ export function createTreeRewindAction(
     const { reservation } = await reserveNewSession(String(childId))
     let candidate: AgentSession
     try {
-      const create = (): Promise<AgentHandle> => sourceHoldsNoConversation
-        // No seed and no parent: a conversation-less session has no history to
-        // cut and nothing for lineage to describe, so the child is an ordinary
-        // fresh session and stands as its own root (session-lineage.ts).
+      const create = (): Promise<AgentHandle> => cutHoldsNoConversation
+        // No seed and no parent: a cut that holds no conversation has no
+        // history to inherit and nothing for lineage to describe, so the child
+        // is an ordinary fresh session and stands as its own root
+        // (session-lineage.ts).
         ? createFreshAgent(ctx, agents, {
           sessionId: childId,
           meta: { cwd: sourceCwd, ...(composed.agentPreset === undefined ? {} : { agentPreset: composed.agentPreset }) },

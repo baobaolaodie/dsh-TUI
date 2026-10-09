@@ -17,18 +17,24 @@
  * copied a source nobody had used, and the host stores a seed at publication
  * (`dsh-agent-loop` `appendUnstoredSuffix` → `writer.append`) — so the copy,
  * not a flush, is what puts the child's log on disk before its first real
- * event. Each of them now asks whether the SOURCE HOLDS NO CONVERSATION: the
+ * event. Each of them now asks whether the CUT HOLDS NO CONVERSATION — the
+ * slice the child actually inherits, never the session it was cut from: the
  * deferral's own `isUnstoredFreshSession` (`src/dsh-adapter/fresh-agent.ts`)
- * first, then the exit sweep's evidence rule (`src/dsh-adapter/unspoken-sessions.ts`'s
- * `conversationEvidence`, asked through its exported judges, read from the live
- * snapshot the seed is cut from). The second half is what an already-stored
- * shell satisfies and the first cannot see: a shell left by an earlier process,
- * one web created, or one whose `agent-preset/selected` already started the
- * deferral. A conversation-less source starts an unseeded fresh session
- * instead. Both halves are pinned here: the creation shapes below drive the
- * real host, `/fork` is driven end to end from an on-disk shell, and
- * `verifySeededWiring` reads the four actions to prove the verdict is what
- * selects the unseeded branch.
+ * answers first for the live source, then the exit sweep's evidence rule
+ * (`src/dsh-adapter/unspoken-sessions.ts`'s `conversationEvidence`, asked
+ * through its exported judges) reads that slice. Judging the SOURCE left a hole
+ * a rewind reaches: the first message's boundary is the seq before its
+ * turn/start, and that turn opens behind the initialization `session/created`
+ * wrote (seq 0-2), so a whole conversation can cut down to the initialization
+ * alone while the source verdict says "seed it". The evidence rule is also what
+ * an already-stored shell satisfies and the never-used shortcut cannot see: a
+ * shell left by an earlier process, one web created, or one whose
+ * `agent-preset/selected` already started the deferral. A cut that holds no
+ * conversation starts an unseeded fresh session instead. Both halves are pinned
+ * here: the creation shapes below drive the real host, `/fork` is driven end to
+ * end from an on-disk shell, `/rewind` is driven end to end at both cut depths,
+ * and `verifySeededWiring` reads the four actions to prove the cut verdict is
+ * what selects the unseeded branch.
  *
  * Run: node --import tsx/esm scripts/verify-empty-session-persistence.ts
  *
@@ -38,12 +44,14 @@
  *      same creation shape and asserts the shell DOES appear — the pair is what
  *      makes "the create-time checkpoint does not publish the permission-only
  *      shell" a discriminating assertion instead of a vacuous one. It also
- *      replays the pre-fix SEED for the same never-used sources and for an
- *      on-disk shell (asserting that the child DOES appear and that the pre-fix
- *      notice DOES advertise a resume command), and reverses the four wiring
- *      checks three ways — `=> sourceHoldsNoConversation` → `=> false`, the
- *      widened evidence line removed, and the verdict dropped entirely — to
- *      prove those checks can fail (LESSONS L-044 / L-048).
+ *      replays the pre-fix SEED for the same never-used sources, for an
+ *      on-disk shell, and for a `/rewind` cut that reaches only the
+ *      initialization (asserting that the child DOES appear and that the
+ *      pre-fix notice DOES advertise a resume command), and reverses the four
+ *      wiring checks four ways — `=> cutHoldsNoConversation` → `=> false`, the
+ *      cut verdict put back on the SOURCE session, the never-used shortcut
+ *      dropped, and the verdict dropped entirely — to prove those checks can
+ *      fail (LESSONS L-044 / L-048).
  *   2. Real revert (flush): restore `start(); await drain()` at the head of
  *      `guardedFlush` in src/dsh-adapter/fresh-agent.ts, then
  *      `node --import tsx/esm scripts/verify-empty-session-persistence.ts`
@@ -51,20 +59,33 @@
  *      permission-only shell" (plus the two narrowed checkpoint cases).
  *   3. Real revert (seed): make one action seed unconditionally — e.g. in
  *      src/dsh-adapter/channel/model-switch.ts replace
- *      `=> sourceHoldsNoConversation` with `=> false` — then the same command →
- *      expect FAIL "channel-model-switch: the never-used verdict selects the
- *      unseeded branch". The creation-shape cases stay green there: they drive
- *      the creation, the wiring check reads the action.
+ *      `=> cutHoldsNoConversation` with `=> false` — then the same command →
+ *      expect FAIL "channel-model-switch: the cut verdict selects the unseeded
+ *      branch". The creation-shape cases stay green there: they drive the
+ *      creation, the wiring check reads the action.
  *   4. Real revert (verdict narrowed): put the widening back to T-FIX-10's
  *      criterion in src/dsh-adapter/channel/session-fork.ts — replace the two
- *      lines `sourceHoldsNoConversation = isUnstoredFreshSession(source)` +
- *      `|| CONVERSATION_EVIDENCE.log({ … }) === undefined` with
- *      `sourceHoldsNoConversation = isUnstoredFreshSession(source)` — then the
- *      same command → expect FAIL "the fork notice for a conversation-less
- *      source is the new-session wording", FAIL "the /fork action took its
- *      unseeded branch for an on-disk shell" and FAIL "a fork of an on-disk
- *      shell publishes no child", plus the `channel-session-fork` wiring FAIL.
- *      The creation-shape cases stay green there too.
+ *      lines `seed = isUnstoredFreshSession(source) ? [] : sliceLiveSessionSeed(source)`
+ *      + `if (CONVERSATION_EVIDENCE.log({ … }) === undefined) seed = []` with
+ *      `seed = isUnstoredFreshSession(source) ? [] : sliceLiveSessionSeed(source)`
+ *      — then the same command → expect FAIL "the fork notice for a
+ *      conversation-less source is the new-session wording", FAIL "the /fork
+ *      action took its unseeded branch for an on-disk shell" and FAIL "a fork
+ *      of an on-disk shell publishes no child", plus the
+ *      `channel-session-fork` wiring FAIL. The creation-shape cases stay green
+ *      there too.
+ *   5. Real revert (T-FIX-12, the cut judged by its source): in
+ *      src/dsh-adapter/channel/session-rewind.ts restart the verdict from the
+ *      source session — replace
+ *      `if (CONVERSATION_EVIDENCE.log({ events: seed, complete: true }) === undefined) seed = []`
+ *      with
+ *      `if (CONVERSATION_EVIDENCE.log({ events: snapshotLiveSessionEvents(source), complete: true }) === undefined) seed = []`
+ *      — then the same command → expect FAIL "a cut that holds no conversation
+ *      takes the unseeded branch", FAIL "and leaves no log on disk", and the
+ *      `channel-session-rewind` wiring FAIL. `--negative-controls` carries the
+ *      same reversal textually for all four sites and replays its DECISION
+ *      behaviourally (`PASS negative control: the source verdict seeds the
+ *      policy-only cut into a published shell`).
  */
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
@@ -76,7 +97,7 @@ import { fileURLToPath } from 'node:url'
 import { Context } from '@deepseek-ai/cordis'
 import AgentRegistry, { type AgentHandle } from '@deepseek-ai/dsh-agent'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
-import LlmRuntime, { LlmAdapter } from '@deepseek-ai/dsh-llm'
+import LlmRuntime, { LlmAdapter, createAssistantMessage, createUserMessage } from '@deepseek-ai/dsh-llm'
 import SessionStore, { SessionId, type Session, type SessionEvent } from '@deepseek-ai/dsh-session'
 import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
@@ -136,7 +157,9 @@ process.env.DSH_TUI_LANG = 'en'
 const { createFreshAgent, isUnstoredFreshSession } = await import('../src/dsh-adapter/fresh-agent.js')
 const { createChannel } = await import('../src/dsh-adapter/channel.js')
 const { createForkSessionAction } = await import('../src/dsh-adapter/channel/session-fork.js')
-const { extractEntries } = await import('../src/dsh-adapter/sessionTree.js')
+const { createRewindToAction } = await import('../src/dsh-adapter/channel/session-rewind.js')
+const { dshHandleOf } = await import('../src/dsh-adapter/backend/session.js')
+const { extractEntries, rewindTarget } = await import('../src/dsh-adapter/sessionTree.js')
 const { isExitResumable } = await import('../src/dsh-adapter/plugin.js')
 const { concreteService } = await import('../src/dsh-adapter/host-access.js')
 const { liveSessionCreateOptions } = await import('../src/dsh-adapter/compat/index.js')
@@ -393,7 +416,8 @@ async function verify(compression: 'zstd' | 'none'): Promise<SessionId> {
       // is human `user` rows only, and a tree entry comes from `extractEntries`
       // — both need real content, so a never-used source offers neither. If a
       // future projection starts offering one, this fails first and the two
-      // branches need reachable coverage of their own.
+      // branches need reachable coverage of their own — `/rewind` already has
+      // it (`verifyCutPrefixSeeding` drives the real action end to end).
       const unusedChannel = createChannel(ctx, unusedSource.agent, { handle: unusedSource, cwd: root, provider: 'scripted', model: 'scripted', activity: false })
       try {
         assert.equal(unusedChannel.rows.filter(row => row.kind === 'user' && row.label === undefined).length, 0, 'a never-used source offers no /rewind candidate (Chat.tsx rewindRows)')
@@ -597,6 +621,141 @@ async function verify(compression: 'zstd' | 'none'): Promise<SessionId> {
     }
     await verifyOnDiskShellSource()
 
+    /**
+     * The CUT the verdict now judges, driven through the real `/rewind` action.
+     * T-FIX-11 asked whether the SOURCE SESSION holds a conversation, and a
+     * rewind boundary can stop before every real event: the first message's
+     * boundary is the seq before its turn/start, and that turn opens behind the
+     * initialization `session/created` wrote (seq 0-2). A source that holds a
+     * whole conversation can therefore cut down to a prefix with no evidence in
+     * it, and the source verdict seeded that prefix — the host stores a seed at
+     * publication, so the child's log existed before its first real event: the
+     * permission-only shell, by the one road the source verdict could not see.
+     *
+     * The source conversation is written in the durable `user/message` form
+     * `conversationEvidence` also counts (`digest.ts:66-98`), not through this
+     * host's inbox. A live prompt is preceded by its own `agent/inbox/spliced`,
+     * and that splice carries the human message — as evidence it fills the
+     * first-message cut, which is why the fixture writes the durable form a
+     * foreign or older writer leaves. The verdict must judge that cut, not the
+     * session it was cut from.
+     *
+     *  (a) rewind to the first message: the cut is the initialization alone, so
+     *      the child must be unseeded, must leave no log, and no notice may
+     *      offer a resume command for a session that has none;
+     *  (b) rewind to the second message: the cut holds the first turn, so the
+     *      branch is unchanged and the copied prefix is byte for byte the cut.
+     *
+     * `--negative-controls` replays the pre-fix DECISION on the same cut (seed
+     * it, as the source verdict did), so "no log" in (a) is a discriminating
+     * assertion rather than a vacuous one (L-044 / L-048).
+     */
+    const verifyCutPrefixSeeding = async (): Promise<void> => {
+      const source = await ctx.agents.create(options('rewind-cut-source'))
+      handles.push(source)
+      for (const [turn, text] of [[1, 'first prompt'], [2, 'second prompt']] as const) {
+        source.agent.session.append('turn/start', { turn })
+        source.agent.session.append('step/start', { turn, step: 1 })
+        source.agent.session.append('user/message', createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text }] }), { surfaceOp: 'append' })
+        source.agent.session.append('assistant/message', {
+          turn, step: 1, stream: [],
+          message: createAssistantMessage({ source: { provider: 'scripted', model: 'scripted' }, content: [{ type: 'text', text: 'saved reply' }] }),
+        }, { surfaceOp: 'append' })
+        source.agent.session.append('step/end', { turn, step: 1 })
+        source.agent.session.append('turn/end', { turn, reason: { kind: 'completed' } })
+      }
+      await ctx.sessions.flush(source.agent.session)
+      const notices: string[] = []
+      const created: AgentSession[] = []
+      const switched: string[] = []
+      const channel = createChannel(ctx, source.agent, { handle: source, cwd: root, provider: 'scripted', model: 'scripted', activity: false })
+      const rewindRows = () => channel.rows.filter(row => row.kind === 'user' && row.label === undefined)
+      const rewind = createRewindToAction(
+        ctx,
+        { working: false, cwd: root, provider: 'scripted', model: 'scripted' },
+        {
+          owner: { current: () => true },
+          binding: {
+            agent: source.agent,
+            capture: () => ({ session: source.agent.session, agent: source.agent, generation: 1 }),
+            isCurrent: () => true,
+            prepare: async (_capture, create) => await create(),
+            abandon: async session => { await session.dispose() },
+          },
+          settleCompaction: async () => {},
+          notify: text => { notices.push(text) },
+          adoptForkedAgent: candidate => { created.push(candidate); return String(source.agent.session.id) },
+          notifySessionSwitched: (_kind, sessionId) => { switched.push(sessionId) },
+        },
+      )
+      const drive = async (row: ReturnType<typeof rewindRows>[number]): Promise<AgentSession> => {
+        notices.length = 0
+        created.length = 0
+        switched.length = 0
+        assert.equal(await rewind(row), row.text, 'the /rewind action completes and hands the prompt back for editing')
+        assert.equal(created.length, 1, 'the rewind creates exactly one session')
+        assert.equal(switched.length, 1, 'the rewind commits the switch')
+        return created[0]!
+      }
+      /** The child's live session, through the handle its adoption kept. */
+      const liveOf = (candidate: AgentSession) => dshHandleOf(candidate).agent.session
+      try {
+        const events = source.agent.session.snapshotEvents()
+        assert.ok(await settled(() => rewindRows().length === 2), 'the conversation offers both prompts as rewind rows')
+        const rows = rewindRows()
+        assert.equal(events[rows[0]!.seq!]!.type, 'user/message', 'a rewind row carries its own message seq')
+        assert.equal(isUnstoredFreshSession(source.agent.session), false, 'the rewind source is a used session — the source verdict alone would seed it')
+        assert.ok(events.some(event => event.type === 'turn/start' && event.seq > 0), 'the conversation opens behind the initialization (otherwise its first message could not be rewound at all)')
+
+        // (a) The first message: the cut stops before its turn/start, so it is
+        // the initialization alone while the source is a whole conversation.
+        const firstBoundary = rewindTarget(events, rows[0]!.seq!).boundary
+        assert.ok(firstBoundary >= 0, 'rewinding to the first message is reachable — it is not the turn-0 refusal')
+        assert.deepEqual(events.slice(0, firstBoundary + 1).map(event => event.type), policyTypes, 'the cut on offer is the initialization alone')
+        const cutChild = await drive(rows[0]!)
+        handles.push(dshHandleOf(cutChild))
+        await sleep(250) // 固定窗:探针 — beyond JSONL's 200ms live drain timer.
+        assert.equal(isUnstoredFreshSession(liveOf(cutChild)), true, 'a cut that holds no conversation takes the unseeded branch')
+        assert.equal(existsSync(artifact(liveOf(cutChild))), false, 'and leaves no log on disk')
+        assert.deepEqual(liveOf(cutChild).snapshotEvents().map(event => event.type), policyTypes, 'the child starts from its own initialization')
+        assert.equal(notices.some(text => text.includes('--resume') || text.includes('DSH_TUI_RESUME_SESSION')), false, 'no notice offers to resume a session that has no log')
+
+        // (b) The second message: the cut still holds the whole first turn, so
+        // the branch is the unchanged one, prefix included.
+        const secondBoundary = rewindTarget(events, rows[1]!.seq!).boundary
+        const expectedCut = events.slice(0, secondBoundary + 1)
+        assert.ok(expectedCut.some(event => event.type === 'turn/start'), 'the second cut holds the conversation')
+        const seededChild = await drive(rows[1]!)
+        handles.push(dshHandleOf(seededChild))
+        await sleep(250)
+        assert.equal(isUnstoredFreshSession(liveOf(seededChild)), false, 'a cut that holds a conversation takes the seeded branch')
+        assert.equal(existsSync(artifact(liveOf(seededChild))), true, 'and publishes the copied prefix')
+        assert.deepEqual((await stored(liveOf(seededChild))).slice(0, expectedCut.length), expectedCut, 'the copied prefix is byte for byte the cut')
+        console.log('PASS /rewind cut prefix: a policy-only cut stays unseeded while a content cut still seeds')
+
+        if (negativeControls) {
+          // The pre-fix DECISION for the same cut: the source holds a
+          // conversation, so the source verdict seeded the initialization-only
+          // prefix — and the host stores a seed at publication, so the shell
+          // appeared. (a) asserts exactly what this produces.
+          const cut = events.slice(0, firstBoundary + 1)
+          const preFix = await ctx.agents.create(liveSessionCreateOptions({
+            sessionId: SessionId(`${compression}-rewind-cut-pre-fix-seed`),
+            seed: cut,
+            runtimeSession: source.agent.session,
+            inheritedCount: cut.length,
+            cwd: root,
+            agentOptions: { provider: 'scripted', model: 'scripted' },
+          }))
+          handles.push(preFix)
+          assert.equal(isUnstoredFreshSession(preFix.agent.session), false, 'negative control: a seeded child of a policy-only cut is not an unstored fresh session')
+          assert.equal(existsSync(artifact(preFix.agent.session)), true, 'negative control: the source verdict seeds the policy-only cut into a published shell')
+          console.log('PASS negative control: the source verdict seeds the policy-only cut into a published shell')
+        }
+      } finally { channel.releaseContributions() }
+    }
+    await verifyCutPrefixSeeding()
+
     // Hold the first suffix in the public writer while more events arrive,
     // then fail the next suffix. A checkpoint must retry that exact prefix.
     const entered = Promise.withResolvers<void>()
@@ -753,24 +912,30 @@ function verifyChannelWiring(): void {
 
 /**
  * The four seeded channel actions. `verifySeededFamily` drives the creation
- * SHAPES through the real host and `verifyOnDiskShellSource` drives `/fork`
- * itself; the SHAPES alone would stay green if an action went back to seeding
- * unconditionally, because they drive the creation rather than the action. So
- * pin the wiring: each action must ask the conversation verdict — the deferral's
- * `isUnstoredFreshSession` AND the sweep's evidence rule — and let THAT verdict
- * select the unseeded branch, in that order. Every marker is guarded (a missing
- * or reordered marker fails instead of passing on an empty window — LESSONS
- * L-048), and `--negative-controls` reverses the decision to prove the checks
- * can fail (L-044): seeded unconditionally, the widening narrowed back to
- * `isUnstoredFreshSession`, the verdict dropped, and `/fork`'s notice reverting
- * to an advertised resume command.
+ * SHAPES through the real host, `verifyOnDiskShellSource` drives `/fork` itself
+ * and `verifyCutPrefixSeeding` drives `/rewind` itself; the SHAPES alone would
+ * stay green if an action went back to seeding unconditionally, because they
+ * drive the creation rather than the action. So pin the wiring: each action
+ * must cut the seed first, ask the CUT verdict — the deferral's
+ * `isUnstoredFreshSession` where it can answer, then the sweep's evidence rule
+ * over that slice — and let THAT verdict select the unseeded branch. Every
+ * marker is guarded (a missing or reordered marker fails instead of passing on
+ * an empty window — LESSONS L-048), and `--negative-controls` reverses the
+ * decision to prove the checks can fail (L-044): seeded unconditionally, the
+ * verdict put back on the SOURCE session, the never-used shortcut dropped, the
+ * verdict dropped, and `/fork`'s notice reverting to an advertised resume
+ * command.
  */
+
+/** The one line every site must carry: the verdict asks the CUT, never the source. */
+const CUT_EVIDENCE = 'CONVERSATION_EVIDENCE.log({ events: seed, complete: true })'
+
 const SEEDED_SITES: readonly {
   readonly name: string
   readonly file: string
-  /** The widening's own line: the evidence rule the verdict now also asks. */
-  readonly evidence: string
-  /** The session expression the verdict is read from, for the "verdict dropped" reversal. */
+  /** The live snapshot each site judged before T-FIX-12, for the "back to the source" reversal. */
+  readonly sourceEvents: string
+  /** The session expression the never-used shortcut reads, for the "shortcut dropped" reversal. */
   readonly subject: string
   /** A notice line, when the site has one, for the "resume command is back" reversal. */
   readonly notice?: string
@@ -779,13 +944,13 @@ const SEEDED_SITES: readonly {
   {
     name: 'channel-model-switch',
     file: 'model-switch.ts',
-    evidence: '|| CONVERSATION_EVIDENCE.log({ events: snapshotLiveSessionEvents(source), complete: true }) === undefined',
+    sourceEvents: 'snapshotLiveSessionEvents(source)',
     subject: 'source',
     markers: [
-      'sourceHoldsNoConversation = isUnstoredFreshSession(source)',
-      '|| CONVERSATION_EVIDENCE.log({ events: snapshotLiveSessionEvents(source), complete: true }) === undefined',
-      'seed = sourceHoldsNoConversation ? [] : sliceLiveSessionSeed(source)',
-      'const create = (): Promise<AgentHandle> => sourceHoldsNoConversation',
+      'seed = isUnstoredFreshSession(source) ? [] : sliceLiveSessionSeed(source)',
+      `if (${CUT_EVIDENCE} === undefined) seed = []`,
+      'const cutHoldsNoConversation = seed.length === 0',
+      'const create = (): Promise<AgentHandle> => cutHoldsNoConversation',
       '? createFreshAgent(ctx, agents, {',
       ': agents.create(liveSessionCreateOptions({',
     ],
@@ -793,14 +958,14 @@ const SEEDED_SITES: readonly {
   {
     name: 'channel-session-fork',
     file: 'session-fork.ts',
-    evidence: '|| CONVERSATION_EVIDENCE.log({ events: snapshotLiveSessionEvents(source), complete: true }) === undefined',
+    sourceEvents: 'snapshotLiveSessionEvents(source)',
     subject: 'source',
     notice: "? t('fork-done-unstored', { id: String(childId) })",
     markers: [
-      'sourceHoldsNoConversation = isUnstoredFreshSession(source)',
-      '|| CONVERSATION_EVIDENCE.log({ events: snapshotLiveSessionEvents(source), complete: true }) === undefined',
-      'seed = sourceHoldsNoConversation ? [] : sliceLiveSessionSeed(source)',
-      'deps.createDetachedHandle(() => sourceHoldsNoConversation',
+      'seed = isUnstoredFreshSession(source) ? [] : sliceLiveSessionSeed(source)',
+      `if (${CUT_EVIDENCE} === undefined) seed = []`,
+      'const cutHoldsNoConversation = seed.length === 0',
+      'deps.createDetachedHandle(() => cutHoldsNoConversation',
       '? createFreshAgent(ctx, agents, {',
       ': agents.create(liveSessionCreateOptions({',
       "? t('fork-done-unstored', { id: String(childId) })",
@@ -809,13 +974,13 @@ const SEEDED_SITES: readonly {
   {
     name: 'channel-session-rewind',
     file: 'session-rewind.ts',
-    evidence: '|| CONVERSATION_EVIDENCE.log({ events: snapshotLiveSessionEvents(source), complete: true }) === undefined',
+    sourceEvents: 'snapshotLiveSessionEvents(source)',
     subject: 'source',
     markers: [
-      'sourceHoldsNoConversation = isUnstoredFreshSession(source)',
-      '|| CONVERSATION_EVIDENCE.log({ events: snapshotLiveSessionEvents(source), complete: true }) === undefined',
-      'seed = sourceHoldsNoConversation ? [] : sliceLiveSessionSeed(source, boundary)',
-      'const create = (): Promise<AgentHandle> => sourceHoldsNoConversation',
+      'seed = isUnstoredFreshSession(source) ? [] : sliceLiveSessionSeed(source, boundary)',
+      `if (${CUT_EVIDENCE} === undefined) seed = []`,
+      'const cutHoldsNoConversation = seed.length === 0',
+      'const create = (): Promise<AgentHandle> => cutHoldsNoConversation',
       '? createFreshAgent(ctx, agents, {',
       ': agents.create(liveSessionCreateOptions({',
     ],
@@ -823,15 +988,17 @@ const SEEDED_SITES: readonly {
   {
     name: 'channel-session-tree-actions',
     file: 'session-tree-actions.ts',
-    evidence: '|| CONVERSATION_EVIDENCE.log({ events: sourceEvents, complete: true }) === undefined',
+    sourceEvents: 'sourceEvents',
     subject: 'entrySession',
     markers: [
-      // A persisted foreign source is on disk and never in this state, so the
-      // verdict is asked about the LIVE source only.
-      'const sourceHoldsNoConversation = forkFromLive && (isUnstoredFreshSession(entrySession)',
-      '|| CONVERSATION_EVIDENCE.log({ events: sourceEvents, complete: true }) === undefined',
-      'const seed = sourceHoldsNoConversation ? [] : sourceEvents.filter(event => event.seq <= target.boundary)',
-      'const create = (): Promise<AgentHandle> => sourceHoldsNoConversation',
+      'let seed = sourceEvents.filter(event => event.seq <= target.boundary)',
+      // The never-used shortcut still answers first, but only for the LIVE
+      // source (the deferral is this process's own bookkeeping): the evidence
+      // rule below reads the CUT for a persisted foreign source too.
+      'if ((forkFromLive && isUnstoredFreshSession(entrySession))',
+      `|| ${CUT_EVIDENCE} === undefined) seed = []`,
+      'const cutHoldsNoConversation = seed.length === 0',
+      'const create = (): Promise<AgentHandle> => cutHoldsNoConversation',
       '? createFreshAgent(ctx, agents, {',
       ': agents.create(liveSessionCreateOptions({',
     ],
@@ -864,17 +1031,22 @@ function verifySeededWiring(): void {
   for (const site of SEEDED_SITES) {
     const path = new URL(`../src/dsh-adapter/channel/${site.file}`, import.meta.url)
     const source = readFileSync(path, 'utf8')
-    assert.deepEqual(seededWiringViolations(site, source), [], `${site.name}: the never-used verdict selects the unseeded branch`)
+    assert.deepEqual(seededWiringViolations(site, source), [], `${site.name}: the cut verdict selects the unseeded branch`)
     if (negativeControls) {
-      // The reversals this task forbids — seed unconditionally, narrow the
-      // widened verdict back to T-FIX-10's criterion, drop the verdict, and put
-      // the resume command back in `/fork`'s notice. Every one must be caught
-      // (L-044 / L-048).
-      const unconditional = seededWiringViolations(site, source.replaceAll('=> sourceHoldsNoConversation', '=> false'))
+      // The reversals this task forbids — seed unconditionally, put the verdict
+      // back on the SOURCE session, drop the never-used shortcut, drop the
+      // verdict, and put the resume command back in `/fork`'s notice. Every one
+      // must be caught (L-044 / L-048). For `/model` and `/fork` the source
+      // form denotes the same events as the cut (their cut IS the whole log),
+      // so that reversal is a text-level one there; the behavioural proof lives
+      // in `verifyCutPrefixSeeding`'s pre-fix replay.
+      const unconditional = seededWiringViolations(site, source.replaceAll('=> cutHoldsNoConversation', '=> false'))
       assert.ok(unconditional.length > 0, `negative control: ${site.name} wiring catches seeding unconditionally`)
-      const narrowed = seededWiringViolations(site, source.replace(site.evidence, ''))
-      assert.ok(narrowed.length > 0, `negative control: ${site.name} wiring catches the widened verdict narrowed back to isUnstoredFreshSession`)
-      const verdictless = seededWiringViolations(site, source.replaceAll(`isUnstoredFreshSession(${site.subject})`, 'false'))
+      const sourceJudged = seededWiringViolations(site, source.replace(CUT_EVIDENCE, `CONVERSATION_EVIDENCE.log({ events: ${site.sourceEvents}, complete: true })`))
+      assert.ok(sourceJudged.length > 0, `negative control: ${site.name} wiring catches the cut verdict narrowed back to the source session`)
+      const shortcutless = seededWiringViolations(site, source.replaceAll(`isUnstoredFreshSession(${site.subject})`, 'false'))
+      assert.ok(shortcutless.length > 0, `negative control: ${site.name} wiring catches a dropped never-used shortcut`)
+      const verdictless = seededWiringViolations(site, source.replace(CUT_EVIDENCE, 'true'))
       assert.ok(verdictless.length > 0, `negative control: ${site.name} wiring catches a dropped verdict`)
       const notice = site.notice === undefined
         ? []
@@ -882,7 +1054,7 @@ function verifySeededWiring(): void {
       if (site.notice !== undefined) {
         assert.ok(notice.length > 0, `negative control: ${site.name} wiring catches a notice that advertises a resume command again`)
       }
-      console.log(`PASS negative control: ${site.name} wiring catches "seed unconditionally", the widening narrowed away, a dropped verdict${site.notice === undefined ? '' : ' and the resume notice coming back'}`)
+      console.log(`PASS negative control: ${site.name} wiring catches "seed unconditionally", the verdict back on the source session, a dropped never-used shortcut, a dropped verdict${site.notice === undefined ? '' : ' and the resume notice coming back'}`)
     }
     console.log(`PASS ${site.name} seeded wiring`)
   }

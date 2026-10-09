@@ -88,32 +88,35 @@ export function createRewindToAction(
       if (event.type === 'turn/end') break
     }
     const source = deps.binding.agent.session
-    // A source that holds no conversation is not one to continue, whether the
-    // shell came from the deferral this process installed (the never-used
-    // verdict) or was already on disk when the process started. A seed would
-    // copy that shell, and the host stores every seed at publication (agent-loop
-    // `appendUnstoredSuffix`), so the child's log would exist before its first
-    // real event — the permission-only shell the fresh-session deferral keeps
-    // out of JSONL. There is no history to cut, so such a source yields an
-    // unseeded child instead; the evidence is read from the live snapshot in
-    // hand (in memory, never a second read of the log). Reaching this branch at
-    // all still needs a rewind row, and only real content offers one
-    // (`Chat.tsx`), so it is the depth behind `/model` and `/fork`.
-    let sourceHoldsNoConversation: boolean
+    // The cut is what the child inherits, so the cut is what the verdict asks
+    // about — never the session it was cut from. A rewind boundary can land
+    // before every real event: the first message's boundary is the seq before
+    // its turn/start, and that turn opens behind the initialization
+    // `session/created` wrote (seq 0-2), so the prefix on offer holds the
+    // initialization alone while the source is a whole conversation. A seed
+    // would copy that prefix, and the host stores every seed at publication
+    // (agent-loop `appendUnstoredSuffix`), so the child's log would exist
+    // before its first real event — the permission-only shell the fresh-session
+    // deferral keeps out of JSONL. Asking the source would say "this one holds
+    // a conversation" and seed the shell anyway. There is no history to cut, so
+    // such a cut yields an unseeded child instead; the evidence is read from
+    // the slice already in hand (in memory, never a second read of the log),
+    // and the never-used verdict answers first, so a deferred session is not
+    // even sliced.
     let seed: readonly SessionEvent[]
     try {
       if (boundary < 0) throw new Error('cannot rewind to the very first message')
-      sourceHoldsNoConversation = isUnstoredFreshSession(source)
-        || CONVERSATION_EVIDENCE.log({ events: snapshotLiveSessionEvents(source), complete: true }) === undefined
       // Slice the SOURCE snapshot through an inclusive seq. Never
       // sessions.fork(): that registers a real child whose snapshot includes
       // child-owned session/end-seed, so snapshot.length is not the inherited
       // cut. agents.create owns the new session id.
-      seed = sourceHoldsNoConversation ? [] : sliceLiveSessionSeed(source, boundary)
+      seed = isUnstoredFreshSession(source) ? [] : sliceLiveSessionSeed(source, boundary)
+      if (CONVERSATION_EVIDENCE.log({ events: seed, complete: true }) === undefined) seed = []
     } catch (error) {
       deps.notify(t('rewind-fork-failed', { err: error instanceof Error ? error.message : String(error) }), { color: 'error' })
       return null
     }
+    const cutHoldsNoConversation = seed.length === 0
     const composed = await composePreset(ctx, runningPresetOf(source))
     // Announce the id before the factory: the rewind creates the child's log
     // here, and the publisher only learns the id from the registry on its next
@@ -121,10 +124,11 @@ export function createRewindToAction(
     const { reservation } = await reserveNewSession(String(childId))
     let candidate: AgentSession
     try {
-      const create = (): Promise<AgentHandle> => sourceHoldsNoConversation
-        // No seed and no parent: a conversation-less session has no history to
-        // cut and nothing for lineage to describe, so the child is an ordinary
-        // fresh session and stands as its own root (session-lineage.ts).
+      const create = (): Promise<AgentHandle> => cutHoldsNoConversation
+        // No seed and no parent: a cut that holds no conversation has no
+        // history to inherit and nothing for lineage to describe, so the child
+        // is an ordinary fresh session and stands as its own root
+        // (session-lineage.ts).
         ? createFreshAgent(ctx, agents, {
           sessionId: childId,
           meta: { cwd: state.cwd, ...(composed.agentPreset === undefined ? {} : { agentPreset: composed.agentPreset }) },

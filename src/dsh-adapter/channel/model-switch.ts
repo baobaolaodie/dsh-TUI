@@ -8,7 +8,7 @@ import { WORKING_GATE_NOTICES } from '../../commands.js'
 import { writeModelPref } from '../../modelPrefs.js'
 import { touchSession } from '../../sessionHistory.js'
 import { createDshSession, dshHandleOf } from '../backend/session.js'
-import { liveSessionCreateOptions, sliceLiveSessionSeed, snapshotLiveSessionEvents } from '../compat/index.js'
+import { liveSessionCreateOptions, sliceLiveSessionSeed } from '../compat/index.js'
 import { createFreshAgent, isUnstoredFreshSession } from '../fresh-agent.js'
 import { composePreset, runningPresetOf } from '../presets.js'
 import { unspokenJudges } from '../unspoken-sessions.js'
@@ -68,31 +68,32 @@ export function createModelSwitchAction(
     const agents = ctx.get('agents') as { create(options: CreateAgentOptions): Promise<AgentHandle> } | undefined
     if (agents === undefined) { deps.notify(t('model-switch-unavailable'), { color: 'error' }); return false }
     const source = deps.binding.agent.session
-    // A source that holds no conversation is not one to continue, whether the
-    // shell came from the deferral this process installed (the never-used
-    // verdict) or was already on disk when the process started. A seed would
-    // copy that shell, and the host stores every seed at publication (agent-loop
-    // `appendUnstoredSuffix`), so the replacement's log would exist before its
-    // first real event — the permission-only shell the fresh-session deferral
-    // keeps out of JSONL. The evidence is read from the live snapshot in hand
-    // (in memory, never a second read of the log), so a shell left behind by an
-    // earlier process counts exactly like a local one; the fresh verdict answers
-    // first, so a deferred session is not even snapshotted. The replacement
-    // therefore starts unseeded, as an ordinary fresh session, under that same
-    // deferral.
-    let sourceHoldsNoConversation: boolean
+    // The cut is what the child inherits, so the cut is what the verdict asks
+    // about — never the session it was cut from. A `/model` cut is the whole
+    // source log, but the same verdict serves the actions whose cut can stop
+    // short of the conversation (`/rewind`, `/tree`): judging the source there
+    // would say "this one holds a conversation" while the prefix on offer holds
+    // the initialization alone. A seed would copy that prefix, and the host
+    // stores every seed at publication (agent-loop `appendUnstoredSuffix`), so
+    // the replacement's log would exist before its first real event — the
+    // permission-only shell the fresh-session deferral keeps out of JSONL. The
+    // evidence is read from the slice already in hand (in memory, never a
+    // second read of the log), so a shell left behind by an earlier process
+    // counts exactly like a local one; the fresh verdict answers first, so a
+    // deferred session is not even sliced. The replacement therefore starts
+    // unseeded, as an ordinary fresh session, under that same deferral.
     let seed: readonly SessionEvent[]
     try {
       // A compaction checkpoint may not settle after the model fork snapshot —
-      // and the verdict must be read from the settled log, never from before it.
+      // and the cut must be read from the settled log, never from before it.
       await deps.settleCompaction()
-      sourceHoldsNoConversation = isUnstoredFreshSession(source)
-        || CONVERSATION_EVIDENCE.log({ events: snapshotLiveSessionEvents(source), complete: true }) === undefined
       // No boundary = the whole source log (continue the conversation). Slice
       // the SOURCE snapshot: sessions.fork() registers a real child, and its
       // snapshot length is not the inherited cut.
-      seed = sourceHoldsNoConversation ? [] : sliceLiveSessionSeed(source)
+      seed = isUnstoredFreshSession(source) ? [] : sliceLiveSessionSeed(source)
+      if (CONVERSATION_EVIDENCE.log({ events: seed, complete: true }) === undefined) seed = []
     } catch (error) { deps.notify(t('model-switch-fork-failed', { err: error instanceof Error ? error.message : String(error) }), { color: 'error' }); return false }
+    const cutHoldsNoConversation = seed.length === 0
     const childId = SessionId(randomUUID())
     // Announce the id before the factory: from the moment `agents.create`
     // returns this process holds the only write handle on a log the publisher
@@ -101,9 +102,9 @@ export function createModelSwitchAction(
     const composed = await composePreset(ctx, runningPresetOf(source))
     let candidate: AgentSession
     try {
-      const create = (): Promise<AgentHandle> => sourceHoldsNoConversation
-        // No seed and no parent either: a conversation-less session has nothing
-        // for lineage to describe, and the child stands as its own root
+      const create = (): Promise<AgentHandle> => cutHoldsNoConversation
+        // No seed and no parent either: a cut that holds no conversation has
+        // nothing for lineage to describe, and the child stands as its own root
         // (session-lineage.ts).
         ? createFreshAgent(ctx, agents, {
           sessionId: childId,
