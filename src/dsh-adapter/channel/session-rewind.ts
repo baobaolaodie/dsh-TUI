@@ -10,7 +10,7 @@ import { createFreshAgent, isUnstoredFreshSession } from '../fresh-agent.js'
 import { dispatchTuiDecision } from '../extension-events.js'
 import { normalizeRewindDoneSummary } from './decisions.js'
 import { composePreset, runningPresetOf } from '../presets.js'
-import { holdsNoConversation } from '../unspoken-sessions.js'
+import { holdsNoConversation, latestPolicyFacts, replayPolicyFacts } from '../unspoken-sessions.js'
 import { attachSessionToWorkspace } from '../workspace.js'
 import { reserveNewSession } from '../../sessionMounts.js'
 import type { DshChannelBinding } from './binding.js'
@@ -89,20 +89,31 @@ export function createRewindToAction(
     // and the never-used verdict answers first, so a deferred session is not
     // even sliced.
     let seed: readonly SessionEvent[]
+    // The cut: what the child would inherit — the boundary prefix here. It is
+    // read even when the verdict below empties the seed, because the cut is
+    // also where the session's POLICY FACTS live.
+    let cut: readonly SessionEvent[]
+    const neverUsed = isUnstoredFreshSession(source)
     try {
       if (boundary < 0) throw new Error('cannot rewind to the very first message')
-      // Slice the SOURCE snapshot through an inclusive seq. Never
-      // sessions.fork(): that registers a real child whose snapshot includes
-      // child-owned session/end-seed, so snapshot.length is not the inherited
-      // cut. agents.create owns the new session id.
-      seed = isUnstoredFreshSession(source) ? [] : sliceLiveSessionSeed(source, boundary)
-      // The cut criterion has one source: unspoken-sessions.ts.
-      if (holdsNoConversation(seed)) seed = []
+      // A never-used source holds its initialization alone, so its own snapshot
+      // IS the cut; a used one is sliced from the SOURCE snapshot through an
+      // inclusive seq. Never sessions.fork(): that registers a real child whose
+      // snapshot includes child-owned session/end-seed, so snapshot.length is
+      // not the inherited cut. agents.create owns the new session id.
+      cut = neverUsed ? snapshotLiveSessionEvents(source) : sliceLiveSessionSeed(source, boundary)
+      // The never-used shortcut answers first; the cut criterion behind it has
+      // one source: unspoken-sessions.ts.
+      seed = neverUsed || holdsNoConversation(cut) ? [] : cut
     } catch (error) {
       deps.notify(t('rewind-fork-failed', { err: error instanceof Error ? error.message : String(error) }), { color: 'error' })
       return null
     }
     const cutHoldsNoConversation = seed.length === 0
+    // An unseeded child copies nothing, so the cut's policy facts are all it
+    // still inherits: without them it falls back to the deployment defaults,
+    // which may be WIDER than the session it came from (CR-1).
+    const policyFacts = cutHoldsNoConversation ? latestPolicyFacts(cut) : []
     const composed = await composePreset(ctx, runningPresetOf(source))
     // Announce the id before the factory: the rewind creates the child's log
     // here, and the publisher only learns the id from the registry on its next
@@ -139,7 +150,15 @@ export function createRewindToAction(
             return composed.setup?.(agentCtx, agent)
           },
         }))
-      candidate = await deps.binding.prepare(adoption, async () => createDshSession(ctx, await create()))
+      candidate = await deps.binding.prepare(adoption, async () => {
+        const handle = await create()
+        // AFTER the factory returns, never inside its `setup`: an append there
+        // would leave `seq !== 0` and the deferral would return in silence
+        // (KNOWN-ISSUES B-14 ①). Before the first real event, so the replay can
+        // never overtake work the person actually did in the child.
+        if (cutHoldsNoConversation) replayPolicyFacts(handle.agent.session, policyFacts)
+        return createDshSession(ctx, handle)
+      })
     } catch {
       reservation.abandon()
       deps.notify(t('rewind-create-failed'), { color: 'error' })

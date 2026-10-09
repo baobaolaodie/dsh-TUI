@@ -68,10 +68,18 @@
  * be blocked by its own cleanup. Synchronous on purpose: an exit funnel can
  * call it inline without leaving pending I/O or an unawaited promise behind.
  *
+ * The four seeded channel actions (`/model`, `/fork`, `/rewind`, `/tree`) share
+ * this module's reading of the cut they offer a child, so neither rule is
+ * restated per action: {@link holdsNoConversation} decides whether that cut
+ * holds a conversation at all, and {@link latestPolicyFacts} extracts the
+ * policy facts a conversation-less cut still carries — the facts
+ * {@link replayPolicyFacts} puts back into the unseeded child.
+ *
  * @module @deepseek-harness-tui/dsh-tui/dsh-adapter/unspoken-sessions
  */
 import { clearResumeTarget, forgetAgentViewSession, forgetSession, readResumeTarget } from '../sessionHistory.js'
 import { deleteSessionLog, findSessionLogFile, readSessionEventsFromLog } from './compat/sessionLog.js'
+import { INITIAL_POLICY_EVENTS } from './fresh-agent.js'
 import { readHeader, type RawSessionHeader } from './sessions/header.js'
 import { decodeFrame, readWindow, walkFrames } from './sessions/frames.js'
 import { readIndex as readSessionIndex } from './sessions/store.js'
@@ -404,6 +412,85 @@ const CUT_JUDGES = unspokenJudges({
  */
 export function holdsNoConversation(events: readonly unknown[]): boolean {
   return CUT_JUDGES.log({ events, complete: true }) === undefined
+}
+
+/** One policy fact a cut carries: the recorded type and payload, verbatim. */
+export interface PolicyFact {
+  readonly type: string
+  readonly data: unknown
+}
+
+/**
+ * The policy facts a cut carries: the LAST value of each session-policy event
+ * type, in the order the cut recorded them.
+ *
+ * A cut that holds no conversation is not an empty inheritance. The session's
+ * plan mode, sandbox mode, approval policy and durable permission preset live
+ * in the same prefix, and a child created without a seed falls back to the
+ * deployment defaults — which may be WIDER than the session it was cut from.
+ * That is why the four seeded channel actions replay these facts into the
+ * unseeded branch before the child's first real event.
+ *
+ * The four types are the deferral's own {@link INITIAL_POLICY_EVENTS},
+ * imported rather than restated: appending a type the deferral does NOT ignore
+ * starts it and publishes the permission-only shell the unseeded branch exists
+ * to avoid. One value per type is enough because every consumer of these
+ * events folds them last-wins (`mode-actions.ts`'s folds, `dsh-plan-mode`'s
+ * log projection, `dsh-sandbox-policy`'s `sandboxMode` unit,
+ * `dsh-user-approval`'s `overrideOf`), so the replay reproduces the cut's
+ * effective policy exactly — and in the cut's own relative order, so the pair
+ * means the same thing in the child's log.
+ *
+ * @param events - The cut itself (the slice a child would inherit).
+ * @returns One fact per policy type the cut recorded, in recording order.
+ */
+export function latestPolicyFacts(events: readonly unknown[]): readonly PolicyFact[] {
+  const lastAt = new Map<string, number>()
+  for (const [index, event] of events.entries()) {
+    const type = policyEventType(event)
+    if (type !== undefined) lastAt.set(type, index)
+  }
+  return [...lastAt]
+    .sort(([, left], [, right]) => left - right)
+    .map(([type, index]) => ({ type, data: (events[index] as { readonly data: unknown }).data }))
+}
+
+/**
+ * Replay a cut's policy facts into a child created WITHOUT a seed.
+ *
+ * Call this AFTER the factory returns and BEFORE the child's first real event.
+ * Never from inside `setup`: `fresh-agent.ts:72` arms the deferral only while
+ * the session is still at `seq === 0`, so an event appended there leaves the
+ * gate uninstalled in silence and the child is stored immediately
+ * (KNOWN-ISSUES B-14 ①). After the factory the gate is armed, and the four
+ * policy types are exactly the ones it ignores, so the child stays unpublished
+ * until it has something a person can see.
+ *
+ * The append is the same durable write path the mode and permission actions
+ * already use (`mode-actions.ts`: one `session.append(type, data)` per fact);
+ * these events are copied from the cut, never manufactured.
+ *
+ * @param session - The child's live session.
+ * @param events - The cut the child was made from.
+ * @returns The facts appended, in order.
+ */
+export function replayPolicyFacts(session: unknown, events: readonly unknown[]): readonly PolicyFact[] {
+  const facts = latestPolicyFacts(events)
+  if (facts.length === 0) return facts
+  const target = session as { append(type: string, data: unknown): unknown }
+  for (const fact of facts) target.append(fact.type, fact.data)
+  return facts
+}
+
+/**
+ * One event's type when it is a policy fact the deferral holds back, else
+ * undefined. The vocabulary is `fresh-agent.ts`'s, so this cannot drift from
+ * the set whose membership makes the replay safe.
+ */
+function policyEventType(event: unknown): string | undefined {
+  if (event === null || typeof event !== 'object' || Array.isArray(event)) return undefined
+  const type = (event as { readonly type?: unknown }).type
+  return typeof type === 'string' && INITIAL_POLICY_EVENTS.has(type) ? type : undefined
 }
 
 /**

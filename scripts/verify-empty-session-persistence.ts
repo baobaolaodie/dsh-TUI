@@ -36,6 +36,21 @@
  * and `verifySeededWiring` reads the four actions to prove the cut verdict is
  * what selects the unseeded branch.
  *
+ * A cut that holds no conversation is not an EMPTY inheritance. The session's
+ * policy — plan mode, sandbox mode, approval policy and the durable permission
+ * preset — lives in the same prefix, and the unseeded branch copies none of it,
+ * so the child fell back to the deployment defaults and could end up with WIDER
+ * permissions than the session it came from (CR-1). Each action therefore takes
+ * the cut's last value per policy type (`latestPolicyFacts`) and replays those
+ * facts into the unseeded child (`replayPolicyFacts`) AFTER the factory returns:
+ * the deferral is armed by then, and those four types are exactly the ones it
+ * holds back — any other type would start it and publish the shell. Inside
+ * `setup` the same append would leave `seq !== 0` and the gate would refuse to
+ * arm in silence (KNOWN-ISSUES B-14 ①), which is why the placement is pinned by
+ * behaviour and not only by the wiring text. `verifyCutPolicyReplay` drives
+ * that over real actions and reads the child's effective policy through the
+ * services that enforce it.
+ *
  * The gate itself has one precondition, and it is pinned here rather than
  * assumed: `fresh-agent.ts:72` returns SILENTLY unless the session is still at
  * `seq === 0` when `createFreshAgent`'s own setup resolves. A create whose
@@ -107,6 +122,15 @@
  *      appending)". `--negative-controls` replays that shape behaviourally
  *      (`PASS negative control: an append before the setup resolves skips the
  *      deferral in silence`).
+ *   7. Real revert (policy replay): drop it from one action — e.g. in
+ *      src/dsh-adapter/channel/model-switch.ts replace
+ *      `if (cutHoldsNoConversation) replayPolicyFacts(handle.agent.session, policyFacts)`
+ *      with `void policyFacts` — then the same command → expect FAIL "(A) the
+ *      unseeded /model child keeps the source policy" while the "has no log"
+ *      assertions stay GREEN: losing the policy and publishing the shell are
+ *      separately visible failure modes. Replaying the WHOLE cut instead of the
+ *      four policy types is the other mode — the child is published, and the
+ *      "no log" assertion fails while the policy one passes.
  */
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
@@ -116,14 +140,17 @@ import { join } from 'node:path'
 import { setImmediate } from 'node:timers/promises'
 import { fileURLToPath } from 'node:url'
 import { Context } from '@deepseek-ai/cordis'
-import AgentRegistry, { type AgentHandle } from '@deepseek-ai/dsh-agent'
+import AgentRegistry, { type Agent, type AgentHandle } from '@deepseek-ai/dsh-agent'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
 import LlmRuntime, { LlmAdapter, createAssistantMessage, createUserMessage } from '@deepseek-ai/dsh-llm'
+import PlanMode from '@deepseek-ai/dsh-plan-mode'
+import SandboxPolicy, { setSandboxMode } from '@deepseek-ai/dsh-sandbox-policy'
 import SessionStore, { SessionId, type Session, type SessionEvent } from '@deepseek-ai/dsh-session'
 import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
+import Approval, { setApprovalPolicy } from '@deepseek-ai/dsh-user-approval'
 import { settled, sleep } from './lib/term-test.mjs'
 
 const handoffRole = process.env.DSH_TUI_EMPTY_HANDOFF_ROLE
@@ -184,6 +211,8 @@ const { extractEntries, rewindTarget } = await import('../src/dsh-adapter/sessio
 const { isExitResumable } = await import('../src/dsh-adapter/plugin.js')
 const { concreteService } = await import('../src/dsh-adapter/host-access.js')
 const { liveSessionCreateOptions } = await import('../src/dsh-adapter/compat/index.js')
+const { holdsNoConversation } = await import('../src/dsh-adapter/unspoken-sessions.js')
+const { foldPermissionPreset } = await import('../src/dsh-adapter/channel/mode-permission.js')
 const { t } = await import('../src/i18n.js')
 
 const negativeControls = process.argv.includes('--negative-controls')
@@ -201,6 +230,36 @@ class ScriptedAdapter extends LlmAdapter {
 const policyTypes = ['permission/preset', 'sandbox/mode', 'approval/policy']
 const title = (session: Session, text: string): void => {
   session.append('session/title', { title: text, messageSeqs: [], source: { kind: 'user' } })
+}
+
+/**
+ * The four enforcement-relevant policy atoms of one live session — plan mode,
+ * sandbox mode, approval policy and the durable permission preset — read
+ * through the services that ENFORCE them (`ctx.planMode`, `ctx.sandboxPolicy`,
+ * `ctx.approval`, and the channel's own preset fold) rather than restated here.
+ * CR-1 / T-FIX-17 is about exactly these four: a child created without a seed
+ * falls back to the deployment defaults, which may be WIDER than the session
+ * it came from.
+ */
+type PolicyReading = Record<'plan' | 'sandbox' | 'approval' | 'preset', unknown>
+function policyOf(ctx: Context, agent: Agent): PolicyReading {
+  return {
+    plan: ctx.planMode.get(agent).active,
+    sandbox: ctx.sandboxPolicy.overrideOf(agent.session),
+    approval: ctx.approval.overrideOf(agent.session),
+    preset: foldPermissionPreset(agent.session.snapshotEvents()),
+  }
+}
+
+/** The non-default policy every CR-1 fixture switches its source into. */
+const RESTRICTED_POLICY: PolicyReading = { plan: true, sandbox: 'read-only', approval: 'never', preset: 'read-only' }
+
+/** Switch one session into that policy, through each service's own write path. */
+function restrictPolicy(ctx: Context, agent: Agent): void {
+  ctx.planMode.set(agent, true)
+  setSandboxMode(agent.session, 'read-only')
+  setApprovalPolicy(agent.session, 'never')
+  agent.session.append('permission/preset', { preset: 'read-only' })
 }
 
 async function verify(compression: 'zstd' | 'none'): Promise<SessionId> {
@@ -784,7 +843,7 @@ async function verify(compression: 'zstd' | 'none'): Promise<SessionId> {
         await sleep(250) // 固定窗:探针 — beyond JSONL's 200ms live drain timer.
         assert.equal(isUnstoredFreshSession(liveOf(cutChild)), true, 'a cut that holds no conversation takes the unseeded branch')
         assert.equal(existsSync(artifact(liveOf(cutChild))), false, 'and leaves no log on disk')
-        assert.deepEqual(liveOf(cutChild).snapshotEvents().map(event => event.type), policyTypes, 'the child starts from its own initialization')
+        assert.deepEqual(liveOf(cutChild).snapshotEvents().map(event => event.type), [...policyTypes, ...policyTypes], 'the child starts from its own initialization plus the cut policy facts — the conversation is still not inherited')
         assert.equal(notices.some(text => text.includes('--resume') || text.includes('DSH_TUI_RESUME_SESSION')), false, 'no notice offers to resume a session that has no log')
 
         // (b) The second message: the cut still holds the whole first turn, so
@@ -822,6 +881,7 @@ async function verify(compression: 'zstd' | 'none'): Promise<SessionId> {
       } finally { channel.releaseContributions() }
     }
     await verifyCutPrefixSeeding()
+
 
     // Hold the first suffix in the public writer while more events arrive,
     // then fail the next suffix. A checkpoint must retry that exact prefix.
@@ -979,23 +1039,29 @@ function verifyChannelWiring(): void {
 
 /**
  * The four seeded channel actions. `verifySeededFamily` drives the creation
- * SHAPES through the real host, `verifyOnDiskShellSource` drives `/fork` itself
- * and `verifyCutPrefixSeeding` drives `/rewind` itself; the SHAPES alone would
- * stay green if an action went back to seeding unconditionally, because they
- * drive the creation rather than the action. So pin the wiring: each action
- * must cut the seed first, ask the CUT verdict — the deferral's
- * `isUnstoredFreshSession` where it can answer, then the sweep's evidence rule
- * over that slice — and let THAT verdict select the unseeded branch. Every
+ * SHAPES through the real host, `verifyOnDiskShellSource` drives `/fork` itself,
+ * `verifyCutPrefixSeeding` drives `/rewind` itself and `verifyCutPolicyReplay`
+ * drives the real `/model` and `/fork` over a source in a non-default policy;
+ * the SHAPES alone would stay green if an action went back to seeding
+ * unconditionally, because they drive the creation rather than the action. So
+ * pin the wiring: each action must cut the seed first, ask the CUT verdict —
+ * the deferral's `isUnstoredFreshSession` where it can answer, then the sweep's
+ * evidence rule over that slice — let THAT verdict select the unseeded branch,
+ * and replay the cut's policy facts into that branch AFTER the factory returns
+ * (never inside `setup`, where the deferral would silently not arm). Every
  * marker is guarded (a missing or reordered marker fails instead of passing on
  * an empty window — LESSONS L-048), and `--negative-controls` reverses the
  * decision to prove the checks can fail (L-044): seeded unconditionally, the
  * verdict put back on the SOURCE session, the never-used shortcut dropped, the
- * verdict dropped, and `/fork`'s notice reverting to an advertised resume
- * command.
+ * verdict dropped, the policy replay dropped, the facts never read from the
+ * cut, and `/fork`'s notice reverting to an advertised resume command.
  */
 
 /** The one line every site must carry: the verdict asks the CUT, never the source. */
-const CUT_EVIDENCE = 'holdsNoConversation(seed)'
+const CUT_EVIDENCE = 'holdsNoConversation(cut)'
+
+/** The one line that turns a conversation-less cut's policy facts into the child's. */
+const POLICY_FACTS = 'const policyFacts = cutHoldsNoConversation ? latestPolicyFacts(cut) : []'
 
 const SEEDED_SITES: readonly {
   readonly name: string
@@ -1004,6 +1070,8 @@ const SEEDED_SITES: readonly {
   readonly sourceEvents: string
   /** The session expression the never-used shortcut reads, for the "shortcut dropped" reversal. */
   readonly subject: string
+  /** The site's own replay call, for the "replay dropped" reversal. */
+  readonly replay: string
   /** A notice line, when the site has one, for the "resume command is back" reversal. */
   readonly notice?: string
   readonly markers: readonly string[]
@@ -1013,13 +1081,19 @@ const SEEDED_SITES: readonly {
     file: 'model-switch.ts',
     sourceEvents: 'snapshotLiveSessionEvents(source)',
     subject: 'source',
+    replay: 'if (cutHoldsNoConversation) replayPolicyFacts(handle.agent.session, policyFacts)',
     markers: [
-      'seed = isUnstoredFreshSession(source) ? [] : sliceLiveSessionSeed(source)',
-      `if (${CUT_EVIDENCE}) seed = []`,
+      'const neverUsed = isUnstoredFreshSession(source)',
+      'cut = neverUsed ? snapshotLiveSessionEvents(source) : sliceLiveSessionSeed(source)',
+      `seed = neverUsed || ${CUT_EVIDENCE} ? [] : cut`,
       'const cutHoldsNoConversation = seed.length === 0',
+      POLICY_FACTS,
       'const create = (): Promise<AgentHandle> => cutHoldsNoConversation',
       '? createFreshAgent(ctx, agents, {',
       ': agents.create(liveSessionCreateOptions({',
+      'const handle = await create()',
+      'if (cutHoldsNoConversation) replayPolicyFacts(handle.agent.session, policyFacts)',
+      'return createDshSession(ctx, handle)',
     ],
   },
   {
@@ -1027,14 +1101,18 @@ const SEEDED_SITES: readonly {
     file: 'session-fork.ts',
     sourceEvents: 'snapshotLiveSessionEvents(source)',
     subject: 'source',
+    replay: 'if (cutHoldsNoConversation) replayPolicyFacts(detached.handle.agent.session, policyFacts)',
     notice: "? t('fork-done-unstored', { id: String(childId) })",
     markers: [
-      'seed = isUnstoredFreshSession(source) ? [] : sliceLiveSessionSeed(source)',
-      `if (${CUT_EVIDENCE}) seed = []`,
+      'const neverUsed = isUnstoredFreshSession(source)',
+      'cut = neverUsed ? snapshotLiveSessionEvents(source) : sliceLiveSessionSeed(source)',
+      `seed = neverUsed || ${CUT_EVIDENCE} ? [] : cut`,
       'const cutHoldsNoConversation = seed.length === 0',
+      POLICY_FACTS,
       'deps.createDetachedHandle(() => cutHoldsNoConversation',
       '? createFreshAgent(ctx, agents, {',
       ': agents.create(liveSessionCreateOptions({',
+      'if (cutHoldsNoConversation) replayPolicyFacts(detached.handle.agent.session, policyFacts)',
       "? t('fork-done-unstored', { id: String(childId) })",
     ],
   },
@@ -1043,13 +1121,19 @@ const SEEDED_SITES: readonly {
     file: 'session-rewind.ts',
     sourceEvents: 'snapshotLiveSessionEvents(source)',
     subject: 'source',
+    replay: 'if (cutHoldsNoConversation) replayPolicyFacts(handle.agent.session, policyFacts)',
     markers: [
-      'seed = isUnstoredFreshSession(source) ? [] : sliceLiveSessionSeed(source, boundary)',
-      `if (${CUT_EVIDENCE}) seed = []`,
+      'const neverUsed = isUnstoredFreshSession(source)',
+      'cut = neverUsed ? snapshotLiveSessionEvents(source) : sliceLiveSessionSeed(source, boundary)',
+      `seed = neverUsed || ${CUT_EVIDENCE} ? [] : cut`,
       'const cutHoldsNoConversation = seed.length === 0',
+      POLICY_FACTS,
       'const create = (): Promise<AgentHandle> => cutHoldsNoConversation',
       '? createFreshAgent(ctx, agents, {',
       ': agents.create(liveSessionCreateOptions({',
+      'const handle = await create()',
+      'if (cutHoldsNoConversation) replayPolicyFacts(handle.agent.session, policyFacts)',
+      'return createDshSession(ctx, handle)',
     ],
   },
   {
@@ -1057,17 +1141,22 @@ const SEEDED_SITES: readonly {
     file: 'session-tree-actions.ts',
     sourceEvents: 'sourceEvents',
     subject: 'entrySession',
+    replay: 'if (cutHoldsNoConversation) replayPolicyFacts(handle.agent.session, policyFacts)',
     markers: [
-      'let seed = sourceEvents.filter(event => event.seq <= target.boundary)',
+      'const cut = sourceEvents.filter(event => event.seq <= target.boundary)',
       // The never-used shortcut still answers first, but only for the LIVE
       // source (the deferral is this process's own bookkeeping): the evidence
       // rule below reads the CUT for a persisted foreign source too.
-      'if ((forkFromLive && isUnstoredFreshSession(entrySession))',
-      `|| ${CUT_EVIDENCE}) seed = []`,
+      'const neverUsed = forkFromLive && isUnstoredFreshSession(entrySession)',
+      `const seed = neverUsed || ${CUT_EVIDENCE} ? [] : cut`,
       'const cutHoldsNoConversation = seed.length === 0',
+      POLICY_FACTS,
       'const create = (): Promise<AgentHandle> => cutHoldsNoConversation',
       '? createFreshAgent(ctx, agents, {',
       ': agents.create(liveSessionCreateOptions({',
+      'const handle = await create()',
+      'if (cutHoldsNoConversation) replayPolicyFacts(handle.agent.session, policyFacts)',
+      'return createDshSession(ctx, handle)',
     ],
   },
 ]
@@ -1081,8 +1170,10 @@ function seededWiringViolations(
   if (!/import \{ createFreshAgent, isUnstoredFreshSession \} from '\.\.\/fresh-agent\.js'/.test(source)) {
     violations.push('does not import createFreshAgent + isUnstoredFreshSession')
   }
-  if (!/import \{ holdsNoConversation \} from '\.\.\/unspoken-sessions\.js'/.test(source)) {
-    violations.push('does not ask the cut criterion through unspoken-sessions.ts')
+  // Co-imports are allowed (and now present): all three cut helpers must come
+  // from the one module that owns them.
+  if (!/import \{[^}]*\bholdsNoConversation\b[^}]*\blatestPolicyFacts\b[^}]*\breplayPolicyFacts\b[^}]*\} from '\.\.\/unspoken-sessions\.js'/.test(source)) {
+    violations.push('does not ask the cut criterion and replay the cut policy through unspoken-sessions.ts')
   }
   let cursor = -1
   for (const marker of site.markers) {
@@ -1098,15 +1189,16 @@ function verifySeededWiring(): void {
   for (const site of SEEDED_SITES) {
     const path = new URL(`../src/dsh-adapter/channel/${site.file}`, import.meta.url)
     const source = readFileSync(path, 'utf8')
-    assert.deepEqual(seededWiringViolations(site, source), [], `${site.name}: the cut verdict selects the unseeded branch`)
+    assert.deepEqual(seededWiringViolations(site, source), [], `${site.name}: the cut verdict selects the unseeded branch and its policy facts reach the child`)
     if (negativeControls) {
       // The reversals this task forbids — seed unconditionally, put the verdict
       // back on the SOURCE session, drop the never-used shortcut, drop the
-      // verdict, and put the resume command back in `/fork`'s notice. Every one
-      // must be caught (L-044 / L-048). For `/model` and `/fork` the source
-      // form denotes the same events as the cut (their cut IS the whole log),
-      // so that reversal is a text-level one there; the behavioural proof lives
-      // in `verifyCutPrefixSeeding`'s pre-fix replay.
+      // verdict, drop the policy replay (and read no facts from the cut), and
+      // put the resume command back in `/fork`'s notice. Every one must be
+      // caught (L-044 / L-048). For `/model` and `/fork` the source form
+      // denotes the same events as the cut (their cut IS the whole log), so
+      // that reversal is a text-level one there; the behavioural proof lives in
+      // `verifyCutPrefixSeeding`'s pre-fix replay.
       const unconditional = seededWiringViolations(site, source.replaceAll('=> cutHoldsNoConversation', '=> false'))
       assert.ok(unconditional.length > 0, `negative control: ${site.name} wiring catches seeding unconditionally`)
       const sourceJudged = seededWiringViolations(site, source.replace(CUT_EVIDENCE, `holdsNoConversation(${site.sourceEvents})`))
@@ -1115,13 +1207,17 @@ function verifySeededWiring(): void {
       assert.ok(shortcutless.length > 0, `negative control: ${site.name} wiring catches a dropped never-used shortcut`)
       const verdictless = seededWiringViolations(site, source.replace(CUT_EVIDENCE, 'true'))
       assert.ok(verdictless.length > 0, `negative control: ${site.name} wiring catches a dropped verdict`)
+      const replayless = seededWiringViolations(site, source.replace(site.replay, 'void policyFacts'))
+      assert.ok(replayless.length > 0, `negative control: ${site.name} wiring catches a dropped policy replay`)
+      const factless = seededWiringViolations(site, source.replace(POLICY_FACTS, 'const policyFacts: readonly unknown[] = []'))
+      assert.ok(factless.length > 0, `negative control: ${site.name} wiring catches policy facts that are never read from the cut`)
       const notice = site.notice === undefined
         ? []
         : seededWiringViolations(site, source.replace(site.notice, "t('fork-done', { id: String(childId), command })"))
       if (site.notice !== undefined) {
         assert.ok(notice.length > 0, `negative control: ${site.name} wiring catches a notice that advertises a resume command again`)
       }
-      console.log(`PASS negative control: ${site.name} wiring catches "seed unconditionally", the verdict back on the source session, a dropped never-used shortcut, a dropped verdict${site.notice === undefined ? '' : ' and the resume notice coming back'}`)
+      console.log(`PASS negative control: ${site.name} wiring catches "seed unconditionally", the verdict back on the source session, a dropped never-used shortcut, a dropped verdict, a dropped policy replay and cut facts that are never read${site.notice === undefined ? '' : ', and the resume notice coming back'}`)
     }
     console.log(`PASS ${site.name} seeded wiring`)
   }
@@ -1154,11 +1250,242 @@ function verifyHandoffs(savedId: SessionId): void {
   }
 }
 
+/**
+ * CR-1 / T-FIX-17: the POLICY FACTS a conversation-less cut carries.
+ *
+ * "This cut holds no conversation" is not "this cut holds nothing". The
+ * source's plan mode, sandbox mode, approval policy and durable permission
+ * preset live in the same prefix, and the unseeded branch copies none of it —
+ * a child that falls back to the deployment defaults can end up with WIDER
+ * permissions than the session it came from. That is the regression
+ * CodeRabbit reported against the T-FIX-10/12 decision, and the reason the
+ * four actions replay the cut's policy facts before the child's first prompt.
+ *
+ * Every case drives a REAL action (the channel's `/model`, the `/fork` action)
+ * over a source in a NON-DEFAULT policy and reads the child's effective policy
+ * through the services that ENFORCE it (`ctx.planMode`, `ctx.sandboxPolicy`,
+ * `ctx.approval`, the channel's preset fold) — never by restating their folds.
+ * The source reading is pinned to `RESTRICTED_POLICY` first, so "the child
+ * equals the source" cannot pass vacuously, and each case also asserts the
+ * child stays unpublished: a replay that appended anything the deferral does
+ * NOT ignore would start it and publish the very shell the unseeded branch
+ * exists to avoid (`fresh-agent.ts`'s `INITIAL_POLICY_EVENTS` is the whole
+ * reason appending those four types is safe — which is also why the replay
+ * must run AFTER the factory returns; inside `setup` a `seq !== 0` session
+ * makes the gate return in silence, KNOWN-ISSUES B-14 ①).
+ *
+ * The context is this case's own: the policy services contribute runtime
+ * context to every request (the agent loop logs that snapshot as model
+ * history), which would add a `user/message` to the cases above.
+ */
+async function verifyCutPolicyReplay(): Promise<void> {
+  const policyRoot = mkdtempSync(join(tmpdir(), 'dsh-tui-policy-replay-'))
+  const ctx = new Context()
+  const handles: AgentHandle[] = []
+  try {
+    for (const plugin of [LlmRuntime, SessionStore, SessionProjectionRegistry, SystemPrompt, ToolRuntime, AgentRegistry]) {
+      await ctx.plugin(plugin)
+    }
+    await ctx.plugin(JsonlSessionPersistence, { root: policyRoot, compression: 'none' })
+    await ctx.plugin(AgentLoop, { agents: [] })
+    await ctx.plugin(SandboxPolicy, { mode: 'workspace-write' })
+    await ctx.plugin(Approval)
+    await ctx.plugin(PlanMode, { section: 'plan mode is active' })
+    ctx.llm.registerAdapter(['scripted'], new ScriptedAdapter())
+    // The official permission service's `session/created` pinning, plus the
+    // host projection cache's create-time checkpoint: every session starts
+    // from the same three deployment defaults and is checkpointed at once.
+    // The checkpoint is not a publication — the child must survive it.
+    ctx.on('session/created', session => {
+      if (session.seq !== 0) return
+      session.append('permission/preset', { preset: 'workspace-write' })
+      session.append('sandbox/mode', { mode: 'workspace-write' })
+      session.append('approval/policy', { policy: 'ask' })
+      void ctx.sessions.flush(session)
+    })
+    const persistence = concreteService(ctx.sessionPersistence)
+    const artifact = (session: Session): string => persistence.locate(session.header).path
+    const fresh = async (id: string): Promise<AgentHandle> => {
+      const handle = await createFreshAgent(ctx, ctx.agents, {
+        sessionId: SessionId(`policy-${id}`), meta: { cwd: policyRoot },
+        agentOptions: { provider: 'scripted', model: 'scripted' },
+      })
+      handles.push(handle)
+      return handle
+    }
+    const stored = async (session: Session): Promise<readonly SessionEvent[]> => {
+      const reader = await persistence.open(session.id, 'read')
+      try { return (await reader.read()).events } finally { await reader.close() }
+    }
+
+    // (A) `/model` over a never-used source: its cut is the policy alone.
+    const unused = await fresh('cut-model-source')
+    restrictPolicy(ctx, unused.agent)
+    assert.deepEqual(policyOf(ctx, unused.agent), RESTRICTED_POLICY, '(A) the source is in a non-default policy')
+    assert.equal(isUnstoredFreshSession(unused.agent.session), true, '(A) and nobody has used it — the never-used verdict still answers')
+    assert.equal(holdsNoConversation(unused.agent.session.snapshotEvents()), true, '(A) its cut holds no conversation: the CR-1 shape')
+    const modelChannel = createChannel(ctx, unused.agent, { handle: unused, cwd: policyRoot, provider: 'scripted', model: 'scripted', activity: false })
+    try {
+      assert.equal(await modelChannel.switchModel('scripted', 'scripted'), true, '(A) the /model action completes')
+      const child = ctx.agents.get(SessionId(modelChannel.agentId))
+      assert.ok(child !== undefined && child.session.id !== unused.agent.session.id, '(A) the switch adopted a replacement session')
+      assert.deepEqual(policyOf(ctx, child), RESTRICTED_POLICY, '(A) the unseeded /model child keeps the source policy')
+      assert.equal(isUnstoredFreshSession(child.session), true, '(A) and it is still unpublished')
+      await sleep(250) // 固定窗:探针 — beyond JSONL's 200ms live drain timer.
+      assert.equal(existsSync(artifact(child.session)), false, '(A) the child has no log before its first real event')
+      modelChannel.submit('first real prompt')
+      assert.ok(await settled(() => modelChannel.rows.some(row => row.text === 'saved reply') && !modelChannel.working), '(A) the child runs its first turn')
+      await ctx.sessions.flush(child.session)
+      const published = await stored(child.session)
+      assert.deepEqual(published.map(event => event.seq), published.map((_, index) => index), '(A) the published log is contiguous from seq 0')
+      assert.deepEqual(policyOf(ctx, child), RESTRICTED_POLICY, '(A) and the published child still carries the source policy')
+      console.log('PASS CR-1 /model: an unseeded child keeps the source policy, and the deferral survives the replay')
+    } finally { modelChannel.releaseContributions() }
+
+    // (B) `/fork` over a TITLED SHELL: not never-used, yet its cut still holds
+    // no conversation — the face only the cut criterion can answer (T-FIX-12's
+    // widening). The same action over a source that DOES hold a conversation
+    // must keep the seeded branch, policy included.
+    const shell = await fresh('cut-fork-shell')
+    restrictPolicy(ctx, shell.agent)
+    title(shell.agent.session, 'a titled shell')
+    await ctx.sessions.flush(shell.agent.session)
+    assert.equal(isUnstoredFreshSession(shell.agent.session), false, '(B) a titled shell is no longer never-used')
+    assert.equal(holdsNoConversation(shell.agent.session.snapshotEvents()), true, '(B) yet its cut still holds no conversation')
+
+    const talker = await fresh('cut-fork-used')
+    restrictPolicy(ctx, talker.agent)
+    const talkerChannel = createChannel(ctx, talker.agent, { handle: talker, cwd: policyRoot, provider: 'scripted', model: 'scripted', activity: false })
+    try {
+      talkerChannel.submit('a real prompt')
+      assert.ok(await settled(() => talkerChannel.rows.some(row => row.text === 'saved reply') && !talkerChannel.working), '(C) the source answers its prompt')
+    } finally { talkerChannel.releaseContributions() }
+    await ctx.sessions.flush(talker.agent.session)
+    assert.equal(holdsNoConversation(talker.agent.session.snapshotEvents()), false, '(C) the used source holds a conversation')
+
+    let forkSource: Session = shell.agent.session
+    const forks: AgentHandle[] = []
+    let releases = 0
+    const fork = createForkSessionAction(
+      ctx,
+      { working: false, cwd: policyRoot, provider: 'scripted', model: 'scripted', sessionTitle: 'source' },
+      {
+        owner: { current: () => true },
+        settleCompaction: async () => {},
+        notify: () => {},
+        source: () => forkSource,
+        createDetachedHandle: async create => {
+          const handle = await create()
+          forks.push(handle)
+          // The child stays LIVE here on purpose: the action replays the cut's
+          // policy facts only after this factory returns, so a reading taken
+          // inside it would see the child before the replay. The real
+          // implementation disposes the handle right after the action, and
+          // `verifyOnDiskShellSource` covers that shape end to end.
+          handles.push(handle)
+          return { handle, release: async () => { releases++ } }
+        },
+      },
+    )
+    const driveFork = async (source: Session): Promise<AgentHandle> => {
+      forkSource = source
+      forks.length = 0
+      releases = 0
+      assert.equal(await fork(), true, 'the /fork action completes')
+      assert.equal(forks.length, 1, 'the fork creates exactly one child')
+      assert.equal(releases, 1, 'and releases it')
+      return forks[0]!
+    }
+
+    const shellChild = await driveFork(shell.agent.session)
+    assert.deepEqual(policyOf(ctx, shellChild.agent), RESTRICTED_POLICY, '(B) the unseeded /fork child keeps the shell policy')
+    assert.equal(isUnstoredFreshSession(shellChild.agent.session), true, '(B) and it is still unpublished')
+    await sleep(250) // 固定窗:探针 — beyond JSONL's 200ms live drain timer.
+    assert.equal(existsSync(artifact(shellChild.agent.session)), false, '(B) and it leaves no log on disk')
+    console.log('PASS CR-1 /fork: an unseeded child keeps the shell policy and stays unpublished')
+
+    const seededChild = await driveFork(talker.agent.session)
+    assert.deepEqual(policyOf(ctx, seededChild.agent), RESTRICTED_POLICY, '(C) a source with real content keeps its policy on the seeded branch')
+    assert.equal(isUnstoredFreshSession(seededChild.agent.session), false, '(C) and still takes the seeded branch — the widening did not swallow it')
+    assert.ok(await settled(() => existsSync(artifact(seededChild.agent.session))), '(C) which publishes the copied prefix')
+    assert.deepEqual(
+      (await stored(seededChild.agent.session)).slice(0, talker.agent.session.snapshotEvents().length),
+      talker.agent.session.snapshotEvents(),
+      '(C) the copied prefix is byte for byte the source log',
+    )
+    console.log('PASS CR-1 /fork reverse: a source with real content is unchanged, policy included')
+
+    // (D) `/rewind` to the first message of a hand-written conversation: the
+    // boundary stops before its `turn/start`, so the cut is the policy atoms
+    // alone. Written in the durable `user/message` form a foreign writer leaves
+    // — a live prompt carries its own `agent/inbox/spliced` before the turn,
+    // and that splice IS human evidence filling the first-message cut.
+    const rewound = await fresh('cut-rewind-source')
+    restrictPolicy(ctx, rewound.agent)
+    for (const [turn, text] of [[1, 'first prompt'], [2, 'second prompt']] as const) {
+      rewound.agent.session.append('turn/start', { turn })
+      rewound.agent.session.append('step/start', { turn, step: 1 })
+      rewound.agent.session.append('user/message', createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text }] }), { surfaceOp: 'append' })
+      rewound.agent.session.append('assistant/message', {
+        turn, step: 1, stream: [],
+        message: createAssistantMessage({ source: { provider: 'scripted', model: 'scripted' }, content: [{ type: 'text', text: 'saved reply' }] }),
+      }, { surfaceOp: 'append' })
+      rewound.agent.session.append('step/end', { turn, step: 1 })
+      rewound.agent.session.append('turn/end', { turn, reason: { kind: 'completed' } })
+    }
+    await ctx.sessions.flush(rewound.agent.session)
+    const rewindChannel = createChannel(ctx, rewound.agent, { handle: rewound, cwd: policyRoot, provider: 'scripted', model: 'scripted', activity: false })
+    try {
+      const rows = rewindChannel.rows.filter(row => row.kind === 'user' && row.label === undefined)
+      assert.equal(rows.length, 2, '(D) the conversation offers both prompts as rewind rows')
+      const events = rewound.agent.session.snapshotEvents()
+      const boundary = rewindTarget(events, rows[0]!.seq!).boundary
+      assert.equal(holdsNoConversation(events.slice(0, boundary + 1)), true, '(D) the cut on offer is the policy atoms alone')
+      assert.equal(await rewindChannel.rewindTo(rows[0]!), 'first prompt', '(D) the /rewind action hands the prompt back for editing')
+      const child = ctx.agents.get(SessionId(rewindChannel.agentId))
+      assert.ok(child !== undefined && child.session.id !== rewound.agent.session.id, '(D) the rewind adopted a replacement session')
+      assert.deepEqual(policyOf(ctx, child), RESTRICTED_POLICY, '(D) the unseeded /rewind child keeps the cut policy')
+      assert.equal(isUnstoredFreshSession(child.session), true, '(D) and it is still unpublished')
+      await sleep(250) // 固定窗:探针 — beyond JSONL's 200ms live drain timer.
+      assert.equal(existsSync(artifact(child.session)), false, '(D) and it leaves no log on disk')
+      console.log('PASS CR-1 /rewind: an unseeded child keeps the cut policy and stays unpublished')
+    } finally { rewindChannel.releaseContributions() }
+
+    if (negativeControls) {
+      // The pre-fix DECISION for the same policy-only cut: an unseeded child
+      // and no replay at all. Its policy falls back to the deployment defaults
+      // — and it still publishes nothing, which is why the policy assertion
+      // above is not vacuous, and why the two failure modes ("the policy was
+      // lost" / "the shell was published") are separately visible.
+      const preFix = await fresh('cut-pre-fix')
+      assert.notDeepEqual(policyOf(ctx, preFix.agent), RESTRICTED_POLICY, 'negative control: without the replay an unseeded child loses the source policy')
+      assert.deepEqual(policyOf(ctx, preFix.agent), { plan: false, sandbox: 'workspace-write', approval: 'ask', preset: 'workspace-write' }, 'negative control: it falls back to the deployment defaults')
+      await sleep(250) // 固定窗:探针 — an absent artifact is already true, so the window is what makes the silence observable.
+      assert.equal(existsSync(artifact(preFix.agent.session)), false, 'negative control: and it publishes nothing, so only the policy assertion can see the loss')
+      console.log('PASS negative control: an unseeded child without the replay loses the source policy while publishing nothing')
+
+      // The other failure mode: a replay that appends a cut event the deferral
+      // does NOT ignore starts it, and the child is published immediately —
+      // the shell the unseeded branch exists to avoid.
+      const started = await fresh('cut-pre-fix-started')
+      title(started.agent.session, 'a replayed non-policy event')
+      assert.equal(isUnstoredFreshSession(started.agent.session), false, 'negative control: a non-policy append starts the deferral')
+      assert.ok(await settled(() => existsSync(artifact(started.agent.session))), 'negative control: and that replay publishes the shell')
+      console.log('PASS negative control: replaying a non-policy cut event starts the deferral and publishes the shell')
+    }
+  } finally {
+    for (const handle of handles) await handle.dispose()
+    await ctx.fiber.dispose()
+    rmSync(policyRoot, { recursive: true, force: true })
+  }
+}
+
 try {
   verifyChannelWiring()
   verifySeededWiring()
   const savedId = await verify('none')
   await verify('zstd')
+  await verifyCutPolicyReplay()
   verifyHandoffs(savedId)
 } finally {
   rmSync(root, { recursive: true, force: true })

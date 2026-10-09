@@ -59,7 +59,15 @@ function captureWriter(source: JsonlPersistence, id: string, receive: (writer: S
   }
 }
 
-const INITIAL_POLICY_EVENTS = new Set(['permission/preset', 'sandbox/mode', 'approval/policy', 'plan/mode'])
+/**
+ * The session-policy vocabulary the deferral holds back: the facts a fresh
+ * session may already carry without being published. Exported as the ONE
+ * definition of that set — the four seeded channel actions replay exactly
+ * these into an unseeded child, and appending any other type would start the
+ * deferral and publish the very shell the unseeded branch exists to avoid
+ * (`latestPolicyFacts`, `unspoken-sessions.ts`).
+ */
+export const INITIAL_POLICY_EVENTS: ReadonlySet<string> = new Set(['permission/preset', 'sandbox/mode', 'approval/policy', 'plan/mode'])
 const unstoredSessions = new WeakSet<Session>()
 
 /** Initialization-only fresh session with no persistence requested yet. */

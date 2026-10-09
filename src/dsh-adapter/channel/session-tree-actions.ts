@@ -10,7 +10,7 @@ import { readPersistedSession, type SessionReader } from '../compat/persistence.
 import { closeLiveForkTurn } from '../compat/liveSession.js'
 import { createFreshAgent, isUnstoredFreshSession } from '../fresh-agent.js'
 import { composePreset, resolvePersistedPreset, runningPresetOf } from '../presets.js'
-import { holdsNoConversation } from '../unspoken-sessions.js'
+import { holdsNoConversation, latestPolicyFacts, replayPolicyFacts } from '../unspoken-sessions.js'
 import { attachSessionToWorkspace } from '../workspace.js'
 import { reserveNewSession } from '../../sessionMounts.js'
 import { forkTarget, rewindTarget, turnUserText } from '../sessionTree.js'
@@ -117,11 +117,21 @@ export function createTreeRewindAction(
     // first, and it only speaks for the LIVE source (the deferral is this
     // process's own bookkeeping, and a persisted foreign source is not in it),
     // so a foreign source is judged by its cut alone.
-    let seed = sourceEvents.filter(event => event.seq <= target.boundary)
-    // The cut criterion has one source: unspoken-sessions.ts.
-    if ((forkFromLive && isUnstoredFreshSession(entrySession))
-      || holdsNoConversation(seed)) seed = []
+    // The cut: the prefix the child would inherit — the whole source log for a
+    // live entry session, a boundary prefix for a tree node. It is read for
+    // both halves of the verdict below: which conversation it holds, and which
+    // POLICY FACTS it carries (the unseeded branch copies neither, and a child
+    // that loses the second falls back to the deployment defaults, which may be
+    // WIDER than the session it came from, CR-1).
+    const cut = sourceEvents.filter(event => event.seq <= target.boundary)
+    // The never-used shortcut answers first, and only for the LIVE source (the
+    // deferral is this process's own bookkeeping, and a persisted foreign
+    // source is not in it); the cut criterion behind it has one source:
+    // unspoken-sessions.ts.
+    const neverUsed = forkFromLive && isUnstoredFreshSession(entrySession)
+    const seed = neverUsed || holdsNoConversation(cut) ? [] : cut
     const cutHoldsNoConversation = seed.length === 0
+    const policyFacts = cutHoldsNoConversation ? latestPolicyFacts(cut) : []
     const inheritedCount = seed.length
     const closeAfterCreate = target.closeTurn !== undefined && entrySession.header?.version >= 3
     if (target.closeTurn !== undefined && !closeAfterCreate) {
@@ -164,7 +174,15 @@ export function createTreeRewindAction(
             return composed.setup?.(agentCtx, agent)
           } : composed.setup,
         }))
-      candidate = await deps.binding.prepare(adoption, async () => createDshSession(ctx, await create()))
+      candidate = await deps.binding.prepare(adoption, async () => {
+        const handle = await create()
+        // AFTER the factory returns, never inside its `setup`: an append there
+        // would leave `seq !== 0` and the deferral would return in silence
+        // (KNOWN-ISSUES B-14 ①). Before the first real event, so the replay can
+        // never overtake work the person actually did in the child.
+        if (cutHoldsNoConversation) replayPolicyFacts(handle.agent.session, policyFacts)
+        return createDshSession(ctx, handle)
+      })
     } catch {
       reservation.abandon()
       deps.notify(t('rewind-create-failed'), { color: 'error' })

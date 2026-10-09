@@ -77,10 +77,23 @@ const ev = (seq: number, type: string, data: Record<string, unknown> = {}): AnyE
 // ==== 2. 真链路：switchModel 建子会话时写的 meta.parentSession ===============
 const stubAgentCtx = { on: () => () => {} }
 function makeAgent(id: string, sessionId: string, sessionEvents: readonly unknown[]) {
+  // The live Session contract includes the durable `append` the cut-policy
+  // replay uses (`/model` no longer only reads the cut — it writes the facts a
+  // conversation-less cut carries into the unseeded child, T-FIX-17). The
+  // double records them in its own log, and `seq` stays the exclusive offset.
+  const events = [...sessionEvents]
   return {
     id,
     status: 'idle',
-    session: { id: sessionId, seq: sessionEvents.length, events: sessionEvents, header: {} },
+    session: {
+      id: sessionId,
+      get seq() { return events.length },
+      events,
+      header: {},
+      append(type: string, data: Record<string, unknown>): void {
+        events.push({ seq: events.length, time: 1_700_000_000_000 + events.length, type, data })
+      },
+    },
     ctx: stubAgentCtx,
     followup() {},
     steer() {},

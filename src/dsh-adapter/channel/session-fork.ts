@@ -5,10 +5,10 @@ import { randomUUID } from 'node:crypto'
 import { t } from '../../i18n.js'
 import { WORKING_GATE_NOTICES } from '../../commands.js'
 import { resolveDshProfileName } from '../../update.js'
-import { appendSessionTitle, liveSessionCreateOptions, sliceLiveSessionSeed } from '../compat/index.js'
+import { appendSessionTitle, liveSessionCreateOptions, sliceLiveSessionSeed, snapshotLiveSessionEvents } from '../compat/index.js'
 import { createFreshAgent, isUnstoredFreshSession } from '../fresh-agent.js'
 import { composePreset, runningPresetOf } from '../presets.js'
-import { holdsNoConversation } from '../unspoken-sessions.js'
+import { holdsNoConversation, latestPolicyFacts, replayPolicyFacts } from '../unspoken-sessions.js'
 import { attachSessionToWorkspace } from '../workspace.js'
 import { reserveMount, type MountReservation } from '../../sessionMounts.js'
 import { mountFailureText } from '../../sessions/resumeFailure.js'
@@ -58,18 +58,30 @@ export function createForkSessionAction(
     // deferred session is not even sliced. There is nothing to copy anyway: the
     // fork starts unseeded, as an ordinary fresh session.
     let seed: readonly SessionEvent[]
+    // The cut: what the child would inherit — here the whole source log. It is
+    // read even when the verdict below empties the seed, because the cut is
+    // also where the session's POLICY FACTS live.
+    let cut: readonly SessionEvent[]
+    const neverUsed = isUnstoredFreshSession(source)
     try {
-      // No boundary: the whole (turn-closed) source log. Slice the SOURCE
-      // snapshot — sessions.fork() would register a child and append
-      // session/end-seed, so snapshot.length is not a lineage cut.
-      seed = isUnstoredFreshSession(source) ? [] : sliceLiveSessionSeed(source)
-      // The cut criterion has one source: unspoken-sessions.ts.
-      if (holdsNoConversation(seed)) seed = []
+      // No boundary: the whole (turn-closed) source log. A never-used source
+      // holds its initialization alone, so its own snapshot IS the cut; a used
+      // one is sliced from the SOURCE snapshot — sessions.fork() would register
+      // a child and append session/end-seed, so snapshot.length is not a
+      // lineage cut.
+      cut = neverUsed ? snapshotLiveSessionEvents(source) : sliceLiveSessionSeed(source)
+      // The never-used shortcut answers first; the cut criterion behind it has
+      // one source: unspoken-sessions.ts.
+      seed = neverUsed || holdsNoConversation(cut) ? [] : cut
     } catch (error) {
       deps.notify(t('fork-failed', { err: error instanceof Error ? error.message : String(error) }), { color: 'error' })
       return false
     }
     const cutHoldsNoConversation = seed.length === 0
+    // An unseeded child copies nothing, so the cut's policy facts are all it
+    // still inherits: without them it falls back to the deployment defaults,
+    // which may be WIDER than the session it came from (CR-1).
+    const policyFacts = cutHoldsNoConversation ? latestPolicyFacts(cut) : []
     const childId = SessionId(randomUUID())
     const forkComposed = await composePreset(ctx, runningPresetOf(source))
     // Reserve BEFORE the factory, and hold it past `detached.release()`.
@@ -110,6 +122,11 @@ export function createForkSessionAction(
       deps.notify(t('fork-create-failed'), { color: 'error' })
       return false
     }
+    // AFTER the factory returns, never inside its `setup`: an append there
+    // would leave `seq !== 0` and the deferral would return in silence
+    // (KNOWN-ISSUES B-14 ①). Before any first real event, so the replay can
+    // never overtake work the person actually did in the child.
+    if (cutHoldsNoConversation) replayPolicyFacts(detached.handle.agent.session, policyFacts)
     if (!deps.owner.current()) { await detached.release(); reservation.abandon(); return false }
     try {
       await attachSessionToWorkspace(ctx, state.cwd, childId)
