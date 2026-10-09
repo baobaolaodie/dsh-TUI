@@ -382,9 +382,11 @@ export function unspokenJudges(deps: UnspokenSweepDeps): UnspokenJudges {
 
 /**
  * What one collected event proves about whether a person ever spoke here.
- * Mirrors `digest.ts:66-98`; the one deliberate widening is that a payload
- * this code cannot read counts as human evidence, because "the log does not
- * say" must never become "the log says no" on an irreversible action.
+ * Mirrors `digest.ts:66-98`; the one deliberate widening covers a KNOWN type
+ * whose payload this code cannot read — that counts as human evidence, because
+ * "the log does not say" must never become "the log says no" on an
+ * irreversible action. An event whose `type` is unknown stays outside that
+ * widening and proves nothing, exactly as any other unrelated event does.
  */
 function conversationEvidence(event: unknown): 'turn-start' | 'human-message' | undefined {
   if (event === null || typeof event !== 'object' || Array.isArray(event)) return undefined

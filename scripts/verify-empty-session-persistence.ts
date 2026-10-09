@@ -36,6 +36,19 @@
  * and `verifySeededWiring` reads the four actions to prove the cut verdict is
  * what selects the unseeded branch.
  *
+ * The gate itself has one precondition, and it is pinned here rather than
+ * assumed: `fresh-agent.ts:72` returns SILENTLY unless the session is still at
+ * `seq === 0` when `createFreshAgent`'s own setup resolves. A create whose
+ * setup appends an event before resolving therefore skips the deferral and
+ * stores the session immediately, with nothing above reddening. The production
+ * shape appends nothing of its own — `composePreset` composes a setup that
+ * awaits its mount and returns undefined (`presets.ts:70-72`) —
+ * so `verifyGateInstalledShape` drives that shape and asserts the gate armed,
+ * and `--negative-controls` replays the pre-append shape that skips it.
+ * Throwing on that branch is deliberately NOT done: a setup that owns
+ * pre-publication facts is a legitimate shape and the deferral has nothing to
+ * say about it.
+ *
  * Run: node --import tsx/esm scripts/verify-empty-session-persistence.ts
  *
  * Negative controls:
@@ -86,6 +99,14 @@
  *      same reversal textually for all four sites and replays its DECISION
  *      behaviourally (`PASS negative control: the source verdict seeds the
  *      policy-only cut into a published shell`).
+ *   6. Real revert (gate shape): give `verifyGateInstalledShape`'s `setup` an
+ *      append before it resolves — e.g. `agent.session.append('session/title',
+ *      { title: 'appended before the commit', messageSeqs: [], source: { kind:
+ *      'user' } })` — then the same command → expect FAIL "the production
+ *      create shape arms the deferral gate (its setup resolves without
+ *      appending)". `--negative-controls` replays that shape behaviourally
+ *      (`PASS negative control: an append before the setup resolves skips the
+ *      deferral in silence`).
  */
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
@@ -387,6 +408,52 @@ async function verify(compression: 'zstd' | 'none'): Promise<SessionId> {
     }
     await verifyCheckpointPublication()
     persistence.create = originalCreate
+
+    /**
+     * The deferral is armed from `createFreshAgent`'s own setup, and
+     * `fresh-agent.ts:72` returns SILENTLY unless the session is still at
+     * `seq === 0` when that setup resolves. The production shape meets that
+     * precondition — `composePreset` composes a setup that awaits its mount and
+     * returns undefined, and the composed factory appends nothing of its own —
+     * so a session created in that shape must come out already unstored. None
+     * of the cases above would redden if the gate silently stopped arming: a
+     * setup that appends first stores the session immediately and leaves every
+     * assertion there untouched.
+     */
+    const verifyGateInstalledShape = async (): Promise<void> => {
+      const shaped = await createFreshAgent(ctx, ctx.agents, {
+        ...options('production-shape'),
+        setup: async () => {
+          // `composePreset`'s composed setup: awaits the mount, returns no commit.
+        },
+      })
+      handles.push(shaped)
+      assert.equal(isUnstoredFreshSession(shaped.agent.session), true, 'the production create shape arms the deferral gate (its setup resolves without appending)')
+      await sleep(250)
+      assert.equal(existsSync(artifact(shaped.agent.session)), false, 'and an armed gate still keeps that session out of the store')
+      title(shaped.agent.session, 'production shape')
+      await ctx.sessions.flush(shaped.agent.session)
+      assert.equal(isUnstoredFreshSession(shaped.agent.session), false, 'a real event still releases the armed gate')
+      await assertComplete(shaped.agent.session)
+
+      // Negative control (--negative-controls): the KNOWN BOUNDARY replayed.
+      // The same create with a setup that appends BEFORE it resolves leaves
+      // `seq !== 0` behind `fresh-agent.ts:72`; the gate is skipped in silence
+      // and the session is stored without ever being marked unstored.
+      if (negativeControls) {
+        const preAppend = await createFreshAgent(ctx, ctx.agents, {
+          ...options('production-shape-pre-append'),
+          setup: async (_agentCtx, agent) => {
+            agent.session.append('session/title', { title: 'appended before the commit', messageSeqs: [], source: { kind: 'user' } })
+          },
+        })
+        handles.push(preAppend)
+        assert.equal(isUnstoredFreshSession(preAppend.agent.session), false, 'negative control: an append before the setup resolves leaves the gate uninstalled')
+        assert.ok(await settled(() => existsSync(artifact(preAppend.agent.session))), 'negative control: and that shape stores the session immediately')
+        console.log('PASS negative control: an append before the setup resolves skips the deferral in silence')
+      }
+    }
+    await verifyGateInstalledShape()
 
     /**
      * The SEEDED family (`/model`, `/fork`, `/rewind`, `/tree`). Each of the
