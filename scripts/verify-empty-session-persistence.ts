@@ -379,7 +379,7 @@ async function verify(compression: 'zstd' | 'none'): Promise<SessionId> {
       // shape stays unpublished while idle, and the same shape without the gate
       // still publishes (this pair is what makes the case discriminative).
       const backgrounded = await fresh('channel-background-action')
-      await sleep(250)
+      await sleep(250) // 固定窗:探针 — an absent artifact is already true, so polling it proves nothing; the window (250ms > the JSONL 200ms batch timer) is what makes the checkpoint's silence observable.
       assert.equal(existsSync(artifact(backgrounded.agent.session)), false, 'the /bg creation shape stays unpublished while idle')
       const ungated = await ctx.agents.create(options('channel-background-action-ungated'))
       handles.push(ungated)
@@ -401,7 +401,7 @@ async function verify(compression: 'zstd' | 'none'): Promise<SessionId> {
         preFixId = String(options('negative-control').sessionId)
         createFlushes.add(preFixId)
         const preFix = await fresh('negative-control')
-        await sleep(250)
+        await sleep(250) // 固定窗:墙钟 — the replayed pre-fix append+flush runs detached, so the shell lands on the JSONL writer's 200ms batch deadline rather than when create() resolves.
         assert.equal(existsSync(artifact(preFix.agent.session)), true, 'negative control: an unconditional drain+flush on the create checkpoint publishes the shell')
         console.log('PASS negative control: the pre-fix drain-on-flush semantics publish the shell')
       }
@@ -429,7 +429,7 @@ async function verify(compression: 'zstd' | 'none'): Promise<SessionId> {
       })
       handles.push(shaped)
       assert.equal(isUnstoredFreshSession(shaped.agent.session), true, 'the production create shape arms the deferral gate (its setup resolves without appending)')
-      await sleep(250)
+      await sleep(250) // 固定窗:探针 — an armed gate must keep the session out of the store; absence needs an observation window past the 200ms drain timer to mean anything.
       assert.equal(existsSync(artifact(shaped.agent.session)), false, 'and an armed gate still keeps that session out of the store')
       title(shaped.agent.session, 'production shape')
       await ctx.sessions.flush(shaped.agent.session)
@@ -544,7 +544,7 @@ async function verify(compression: 'zstd' | 'none'): Promise<SessionId> {
           agentOptions: { provider: 'scripted', model: 'scripted' },
         }))
         handles.push(seeded)
-        await sleep(250)
+        await sleep(250) // 固定窗:墙钟 — the host-appended prefix reaches disk only when the JSONL 200ms batch drain fires; the read-back below compares that file.
         const persisted = await stored(seeded.agent.session)
         assert.deepEqual(persisted.slice(0, usedSeed.length), usedSeed, `${site.name}: a used source still copies its whole prefix`)
         assert.deepEqual(persisted, seeded.agent.session.snapshotEvents(), `${site.name}: the seeded child stores exactly its own log`)
@@ -794,7 +794,7 @@ async function verify(compression: 'zstd' | 'none'): Promise<SessionId> {
         assert.ok(expectedCut.some(event => event.type === 'turn/start'), 'the second cut holds the conversation')
         const seededChild = await drive(rows[1]!)
         handles.push(dshHandleOf(seededChild))
-        await sleep(250)
+        await sleep(250) // 固定窗:墙钟 — the /rewind child's seed is host-appended before session/created and materializes on the first 200ms batch, before it can be read back.
         assert.equal(isUnstoredFreshSession(liveOf(seededChild)), false, 'a cut that holds a conversation takes the seeded branch')
         assert.equal(existsSync(artifact(liveOf(seededChild))), true, 'and publishes the copied prefix')
         assert.deepEqual((await stored(liveOf(seededChild))).slice(0, expectedCut.length), expectedCut, 'the copied prefix is byte for byte the cut')
