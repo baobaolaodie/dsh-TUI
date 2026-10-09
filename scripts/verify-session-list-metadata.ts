@@ -51,6 +51,15 @@
  *    validator without `.parse`) and must go red, so "green" here means the
  *    assertions have discriminating power (LESSONS L-044). The control harness
  *    is itself checked, so no control can be vacuous.
+ * 8. **The boot-session wiring ORDER.** The second half of the fix is a
+ *    position inside `apply()`, not a feature: the host writes one checkpoint
+ *    row per registered key when a session is created, so a mirror attached
+ *    after `resolveAgent` misses the boot session's own creation record and the
+ *    sidebar shows it as an untitled shell until its next checkpoint
+ *    (KNOWN-ISSUES A-8). `plugin.ts` is read as text and the mirror's single
+ *    call site is required to precede both halves of the boot-agent statement;
+ *    the pre-fix order is rebuilt **in memory** as the discriminating control —
+ *    nothing is written to disk.
  *
  * Run: node --import tsx/esm scripts/verify-session-list-metadata.ts [--list]
  * Env: `DSH_TUI_HOST_ANCHOR` overrides the drift-probe anchor package — used to
@@ -81,6 +90,7 @@ const SECTIONS = [
   '5. degradation (missing seam / conflicting version)',
   '6. drift probe against the installed host package',
   '7. negative controls (assertions must be able to go red)',
+  '8. boot-session wiring order (registration precedes the agent)',
 ] as const
 
 if (process.argv.includes('--list')) {
@@ -1022,6 +1032,151 @@ await checkAsync('the real schemastery Schema has no .parse (the fact this contr
     'callable-only: passing it as stateSchema is the silent failure AC-7 ④ names',
   )
 })
+
+// ── 8. the boot-session wiring order (A-8 / T-FIX-05) ──────────────────────
+
+section(SECTIONS[7])
+
+/**
+ * `plugin.ts` as text: the second half of the fix is a POSITION inside
+ * `apply()`, so the source itself is the subject. Every anchor below is a
+ * structural fragment of a statement (never a comment), asserted to occur
+ * exactly once — an anchor that names no single site would make the order
+ * assertion vacuous (F-07 / L-048).
+ */
+const pluginText = readFileSync(new URL('../src/dsh-adapter/plugin.ts', import.meta.url), 'utf8')
+
+/**
+ * Absolute offsets of every CALL of `name(` in a plugin text. The module's own
+ * `function …` definition and any mention inside a comment are excluded, so a
+ * reworded docstring cannot redden this (F-10's measured false-red class).
+ * @param source - A `plugin.ts` text.
+ * @param name - The called name.
+ * @returns Offsets into `source`, in source order.
+ */
+function callSitesIn(source: string, name: string): number[] {
+  const sites: number[] = []
+  for (const match of source.matchAll(new RegExp(`\\b${name}\\s*\\(`, 'gu'))) {
+    const site = match.index ?? -1
+    if (site < 0) continue
+    const prefix = source.slice(source.lastIndexOf('\n', site) + 1, site).trimStart()
+    if (prefix.startsWith('//') || prefix.startsWith('*') || prefix.startsWith('/*')) continue
+    sites.push(site)
+  }
+  return sites
+}
+
+/**
+ * The offset of the ONE occurrence of a structural anchor.
+ * @param source - A `plugin.ts` text.
+ * @param anchor - A statement fragment that must occur exactly once.
+ * @returns The offset of that occurrence.
+ */
+function uniqueAnchor(source: string, anchor: string): number {
+  const first = source.indexOf(anchor)
+  assert.notEqual(
+    first,
+    -1,
+    `plugin.ts no longer contains ${JSON.stringify(anchor)} — re-read apply() before trusting the boot-order assertion`,
+  )
+  assert.equal(
+    source.indexOf(anchor, first + anchor.length),
+    -1,
+    `${JSON.stringify(anchor)} occurs more than once in plugin.ts, so it names no single statement (F-07)`,
+  )
+  return first
+}
+
+/**
+ * The order the boot fix rests on: the mirror must be registered BEFORE the
+ * boot agent is resolved.
+ *
+ * `resolveAgent` is what creates or resumes the boot session, and the host
+ * writes one checkpoint row per registered key at that session's `create`. A
+ * mirror attached after it therefore misses the boot session's own creation
+ * record: `dsh web` reads `metadata?.blank ?? false` and lists the session as
+ * an untitled shell until its next checkpoint. That is the UAT-observed shape —
+ * visible on the landing page, healed by the first event — and it is why
+ * "registered before the channel opens" was not enough (KNOWN-ISSUES A-8).
+ * @param source - A `plugin.ts` text: the real one, or the pre-fix order.
+ */
+function assertRegistrationPrecedesBootAgent(source: string): void {
+  const registrations = callSitesIn(source, 'attachSessionListMetadata')
+  assert.equal(
+    registrations.length,
+    1,
+    `the mirror must be attached exactly once in apply() (found ${registrations.length} call sites): zero is the original bug, two would be a second definition`,
+  )
+  const registrationAt = registrations[0] as number
+  // Both halves of `const { agent, handle, … } = … await resolveAgent(…)` — the
+  // statement that creates or resumes the boot session, and the call itself.
+  const bootAgentAt = Math.min(
+    uniqueAnchor(source, 'const { agent, handle'),
+    uniqueAnchor(source, 'await resolveAgent('),
+  )
+  assert.ok(
+    registrationAt < bootAgentAt,
+    `the mirror is registered at byte ${registrationAt}, after the boot agent is resolved at byte ${bootAgentAt}: ` +
+      'the boot session\'s creation checkpoint would carry no sessionListMetadata row, so `dsh web` shows an untitled shell until the next checkpoint (A-8)',
+  )
+}
+
+check('order: the session-list mirror is registered before the boot agent is resolved', () => {
+  assertRegistrationPrecedesBootAgent(pluginText)
+})
+
+/**
+ * The pre-fix layout, rebuilt in memory: the two positions swapped, i.e. the
+ * registration put back where it sat before T-FIX-05 — after the boot session
+ * exists. Nothing is written to disk; the result drives the SAME assertion body
+ * as the check above, so the order assertion has to have discriminating power
+ * (L-044) rather than merely being green on the shipped file.
+ *
+ * A failed mutation throws here rather than inside the control below: a
+ * `preFixOrder()` that threw *there* would make `expectRed` report a vacuous
+ * pass (LESSONS L-048 ①).
+ * @returns A `plugin.ts` text carrying the pre-fix order.
+ */
+function preFixOrder(): string {
+  const registrationCall = 'attachSessionListMetadata(ctx)\n'
+  assert.equal(
+    callSitesIn(pluginText, 'attachSessionListMetadata').length,
+    1,
+    'the swap needs exactly one call site to move, or it would be rearranging something else',
+  )
+  const withoutRegistration = pluginText.replace(registrationCall, '')
+  assert.equal(
+    withoutRegistration.length,
+    pluginText.length - registrationCall.length,
+    'the call site was NOT removed (a string-pattern replace that matched nothing would test the fixed text and pass)',
+  )
+  assert.equal(
+    callSitesIn(withoutRegistration, 'attachSessionListMetadata').length,
+    0,
+    'the removal must leave no call site behind',
+  )
+  const afterBootSession = uniqueAnchor(withoutRegistration, 'let startupSession: AgentSession')
+  return `${withoutRegistration.slice(0, afterBootSession)}${registrationCall}${withoutRegistration.slice(afterBootSession)}`
+}
+
+/** The swapped text, filled by the check below so a broken swap reddens the run. */
+let preFixText = ''
+
+check('order: the in-memory swap keeps one call site, so the control can only go red on the order', () => {
+  preFixText = preFixOrder()
+  assert.notEqual(preFixText, pluginText, 'the swap must actually change the text, or the control below proves nothing')
+  assert.equal(
+    callSitesIn(preFixText, 'attachSessionListMetadata').length,
+    1,
+    'the pre-fix text must still carry exactly one call site — otherwise the control below would be red for the wrong reason',
+  )
+})
+
+expectRed(
+  'order: the pre-fix layout (registered after the boot agent) must go red',
+  () => assertRegistrationPrecedesBootAgent(preFixText),
+  'T-FIX-05 exists because the two positions are not interchangeable: resolving the agent first creates the boot session — and therefore its first checkpoint — without our row (A-8)',
+)
 
 // ── summary ────────────────────────────────────────────────────────────────
 

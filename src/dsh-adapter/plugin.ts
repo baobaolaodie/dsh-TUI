@@ -250,6 +250,21 @@ export async function apply(ctx: Context, runtimeConfig: RuntimeConfig<Config>, 
   // Validate settings before creating an agent or taking over the terminal.
   const tuiSettingsNs = resolveSettingsNamespace(configOwner, Config) as SettingsNamespace
 
+  // Write side of the mirrored session-list projection (ADR-0011): registers
+  // `sessionListMetadata` on the host's registry so `dsh web` can tell a
+  // session nobody ever spoke in from one with a conversation.
+  //
+  // It is attached HERE — before `resolveAgent` below creates or resumes the
+  // boot session — and that position is the whole point: the host writes its
+  // checkpoint rows at the session's `create`, so a definition attached later
+  // leaves the boot session's own creation record without a row. `dsh web`
+  // then falls back to `metadata?.blank ?? false` and lists it as an untitled
+  // shell until its next checkpoint (issue #1342, back through another door).
+  // Deferred through `inject` (the registry belongs to a sibling plugin) and a
+  // no-op on a host line without the seam — a hidden row must stay exactly what
+  // it is today.
+  attachSessionListMetadata(ctx)
+
   // Modern hosts own a declarative registry; old hosts discover directories.
   // A modern bundle failure must not silently fall back to obsolete files.
   if (!await registerBundledPresets(ctx)) try {
@@ -654,14 +669,6 @@ export async function apply(ctx: Context, runtimeConfig: RuntimeConfig<Config>, 
   // empty and the channel falls back to the last-request sample — as does a
   // non-DSH session, whose id the DSH meter never projects.
   const contextOccupancyStore = createContextOccupancyStore(ctx)
-  // Write side of the mirrored session-list projection (ADR-0011): registers
-  // `sessionListMetadata` on the host's registry so `dsh web` can tell a
-  // session nobody ever spoke in from one with a conversation. Deferred
-  // through `inject` (the registry belongs to a sibling plugin) and a no-op
-  // on a host line without the seam — a hidden row must stay exactly what it
-  // is today. Registered here, before the channel opens, so the boot session's
-  // own checkpoints already carry the key.
-  attachSessionListMetadata(ctx)
   // The channel holds a backend session; this DSH one owns the resolved
   // handle (disposed by the binding when a later adoption replaces it).
   let startupSession: AgentSession
