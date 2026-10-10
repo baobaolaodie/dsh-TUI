@@ -94,7 +94,7 @@
 import { clearResumeTarget, forgetAgentViewSession, forgetSession, readResumeTarget } from '../sessionHistory.js'
 import { deleteSessionLog, findSessionLogFile, readSessionEventsFromLog } from './compat/sessionLog.js'
 import type { WriteLeaseState } from './compat/writeLease.js'
-import { INITIAL_POLICY_EVENTS } from './fresh-agent.js'
+import { INITIAL_POLICY_EVENTS, isHumanSource } from './fresh-agent.js'
 import { readHeader, type RawSessionHeader } from './sessions/header.js'
 import { decodeFrame, readWindow, walkFrames } from './sessions/frames.js'
 import { readIndex as readSessionIndex } from './sessions/store.js'
@@ -553,18 +553,6 @@ function conversationEvidence(event: unknown): 'turn-start' | 'human-message' | 
     if (entry['role'] === 'user' && isHumanSource(entry['source'])) return 'human-message'
   }
   return undefined
-}
-
-/**
- * Whether a message's `source` marks it as typed by the person at the
- * keyboard — `digest.ts:66-70`, verbatim: plugin injections, instruction
- * snapshots, skill catalogues and sub-agent reports all arrive as user-role
- * messages too, and counting them would spare every shell there is.
- */
-function isHumanSource(source: unknown): boolean {
-  if (source === undefined || source === null) return true
-  if (typeof source !== 'object') return false
-  return (source as Record<string, unknown>)['kind'] === 'user'
 }
 
 /**

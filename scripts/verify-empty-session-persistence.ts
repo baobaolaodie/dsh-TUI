@@ -202,7 +202,7 @@ process.env.HOME = root
 process.env.USERPROFILE = root
 process.env.DSH_HOME = join(root, 'home')
 process.env.DSH_TUI_LANG = 'en'
-const { createFreshAgent, isUnstoredFreshSession } = await import('../src/dsh-adapter/fresh-agent.js')
+const { createFreshAgent, isUnstoredFreshSession, INITIAL_POLICY_EVENTS } = await import('../src/dsh-adapter/fresh-agent.js')
 const { createChannel } = await import('../src/dsh-adapter/channel.js')
 const { createForkSessionAction } = await import('../src/dsh-adapter/channel/session-fork.js')
 const { createRewindToAction } = await import('../src/dsh-adapter/channel/session-rewind.js')
@@ -467,6 +467,81 @@ async function verify(compression: 'zstd' | 'none'): Promise<SessionId> {
     }
     await verifyCheckpointPublication()
     persistence.create = originalCreate
+
+    /**
+     * A permission switch is session policy, not conversation.
+     *
+     * Measured on a real tree (2026-10-10): an idle fresh session that only
+     * switched its permission preset published an 11-event shell — `command/run`
+     * + `command/done` (the registry command `mode-permission.ts` drives the
+     * switch through) and the `agent/inbox/spliced` approval notice it leaves —
+     * because those types are not initialization atoms, so the deferral started
+     * on the first of them. The stored shell is exactly the 「未命名」 row this
+     * change exists to remove, so the policy plane (atoms AND the command
+     * envelope / inbox notice a policy switch leaves behind) must stay deferred.
+     *
+     *  (a) the switch alone publishes nothing;
+     *  (b) a HUMAN message in the same session still publishes — the gate is
+     *      live, the classification is what changed;
+     *  (c) `INITIAL_POLICY_EVENTS` alone cannot express (a): every envelope type
+     *      below is outside it, which is why the old rule leaked;
+     *  (d) `--negative-controls` creates the same envelope WITHOUT the gate: the
+     *      events are storable, so (a) is the gate's doing and not a fixture that
+     *      cannot be written at all.
+     */
+    const policySwitchEnvelope = (session: Session): void => {
+      session.append('command/run', { commandId: 'cmd-fixture-permission-1', name: 'permission', args: ' workspace-write', source: { kind: 'user' } })
+      session.append('agent/inbox/spliced', {
+        target: 'next-step',
+        start: 0,
+        inserted: [{
+          content: [{ type: 'text', text: 'The approval policy changed from "never" to "ask" (changed by the user).' }],
+          source: { kind: 'user-approval' },
+          role: 'user',
+          id: 'fixture-approval-notice',
+        }],
+      })
+      session.append('command/done', { commandId: 'cmd-fixture-permission-1', kind: 'success', text: 'preset workspace-write' })
+      session.append('agent/inbox/spliced', { target: 'next-step', start: 0, removedCount: 1, inserted: [], outcome: 'canceled' })
+    }
+    const verifyPolicyPlaneStaysDeferred = async (): Promise<void> => {
+      for (const type of ['command/run', 'command/done', 'agent/inbox/spliced']) {
+        assert.equal(INITIAL_POLICY_EVENTS.has(type), false, `${type} is outside the initialization vocabulary — the old rule started on it`)
+      }
+      const switched = await fresh('policy-switch')
+      assert.deepEqual(switched.agent.session.snapshotEvents().map(event => event.type), policyTypes, 'a fresh session starts on its initialization')
+      policySwitchEnvelope(switched.agent.session)
+      await sleep(250) // 固定窗:探针 — beyond JSONL's 200ms live drain timer, so an absent artifact is observable silence.
+      assert.equal(existsSync(artifact(switched.agent.session)), false, 'a permission switch alone publishes nothing')
+      assert.equal(isUnstoredFreshSession(switched.agent.session), true, 'a permission switch alone does not hand the session off')
+
+      switched.agent.session.append('agent/inbox/spliced', {
+        target: 'next-step',
+        start: 0,
+        inserted: [{
+          content: [{ type: 'text', text: 'a real prompt' }],
+          source: { kind: 'user' },
+          role: 'user',
+          id: 'fixture-human-message',
+        }],
+      })
+      assert.equal(isUnstoredFreshSession(switched.agent.session), false, 'a human message in the same session still hands it off')
+      await ctx.sessions.flush(switched.agent.session)
+      await assertComplete(switched.agent.session)
+      const published = await stored(switched.agent.session)
+      assert.equal(published.length, policyTypes.length + 5, 'the published log keeps the switch AND the prompt, from seq 0')
+      console.log('PASS a permission switch stays deferred and the first human message still publishes it')
+
+      if (negativeControls) {
+        const ungatedSwitch = await ctx.agents.create(options('policy-switch-ungated'))
+        handles.push(ungatedSwitch)
+        policySwitchEnvelope(ungatedSwitch.agent.session)
+        assert.ok(await settled(() => existsSync(artifact(ungatedSwitch.agent.session))), 'negative control: the same envelope publishes without the gate')
+        await ungatedSwitch.dispose()
+        console.log('PASS negative control: the permission-switch envelope is storable — the deferral, not the fixture, keeps it off disk')
+      }
+    }
+    await verifyPolicyPlaneStaysDeferred()
 
     /**
      * The deferral is armed from `createFreshAgent`'s own setup, and
