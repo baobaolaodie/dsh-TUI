@@ -171,6 +171,9 @@ Record<keyof Options, …>`，SDK 增删选项时 `tsc` 会报错）。要点：
 - 目录（`catalog.ts`）：`listSessions` 带 `includeProgrammatic: true`。SDK 创建的会话
   在 CLI 自己的 `/resume` 选择器里是隐藏的，所以 dsh-tui 建的会话要用
   `claude --resume <id>` 打开。
+  后端通过 `SessionCatalog.snapshotKey()` 声明存储作用域，共享 channel 在完整读取
+  后记录首屏快照，每次打开仍刷新官方目录。`list()` 的可选回调可提前展示分页，
+  部分或失败的读取不写完整快照；DSH 使用同一快照实现，保留 JSONL provider 的作用域键。
 - 恢复：先读历史（`getSessionMessages` 加子代理转录）并在订阅前同步画出，再接 live；
   续接后的翻译器沿用回放的编号。上下文窗口无法从转录恢复，等首个 `result` 补上。
 - 加载更早消息（`older-history.ts`、`transcript-file.ts`）：从原生 JSONL 沿压缩边界
@@ -244,32 +247,58 @@ SDK `settings` 选项把路由钉回 `https://api.anthropic.com`。CLI 拒绝令
 
 ## 接入新后端
 
-1. 新建 `src/backends/<id>/`，厂商包只在这里 import；同时写 `manifest.ts`——后端的
-   静态声明（id / label / shortLabel / product / `backendExport` / 可选的
-   `vendorPackages`、`nativeKey`、`unloadExport`、`install`）。构建期索引
-   （`scripts/gen-backend-index.mjs`，挂在 `compile` 上）会把它纳入注册表，门禁的
-   厂商包与 `native.<id>` 规则也由它派生：**不要手改** `kernelPrefs.ts` 与
-   `backends.ts`（目录与身份回归都按 ID 取项，新增目录不必同步它们）；声明了非空
-   `vendorPackages` 或 `nativeKey` 时，`verify-adapter-boundary.ts` 的 `EXPECTED_*`
-   快照要与 `ADAPTER.md` 一并更新（派生结果逐字比对，门禁报错会写明——不声明这
-   两项的后端无需改动）；`install` 是**声明式配方**（`{ executor, specifier, version }`，
+`Backend` 是 `tui.dsh/v1alpha1` 的第三个贡献族（继设置区块、全屏场景之后），当前状态是
+**`alpha`、不承诺**：类型面、definition、contract profile 与 conformance 已可用，第三方
+bundle 的真实准入接线（清单 → registry → picker）留到 C 段（W-1）。接入一个后端 = 按公开
+面写一份声明 + 实现 `AgentBackend` 与 `AgentSession`；仓内的 `manifest.ts` 是这份声明的
+**超集**，私有项不投影出去。完整口径见
+[tui-profile 说明 0009](../tui-profile/notes/0009-backend-contribution.md)。
+
+1. 写 `src/backends/<id>/manifest.ts`——它投影出的**公开声明**（`tui.dsh/v1alpha1#Backend`）
+   字段是 `id`、`label`（**只收字面量**，宿主 i18n 键进不来）、`shortLabel`、`product?`、`capabilities`、`grants`、`install?`、
+   `unloadExport?`、`confirmation?`。形状由 `validateBackendSpec()`
+   （`tui-profile/protocols/tui-contributions.js`，经 `src/adapter/spec/tui-contributions.ts`
+   再导出）判定，"这个宿主能不能兑现"由 `backendAdmission()` 判定：未知的能力名或权限名
+   **降级不拒绝**（记为待决项），已知权限名而没有授权则注册但不进 picker，声明宿主保留的
+   `id`（`dsh`/`claude`/`codex`）在准入处被拒。仓内 manifest 是公开声明的超集：
+   `inTree`、`alwaysAvailable`、`nativeKey`、`vendorPackages`、`backendExport` 与
+   `label.kind === 'key'` 是私有项，`backendContributionOf()` 是唯一投影方向，门禁断言
+   投影不泄漏私有键且结果过 validator。
+2. 厂商包只在这里 import。构建期索引（`scripts/gen-backend-index.mjs`，挂在 `compile` 上）
+   会把它纳入注册表，门禁的厂商包与 `native.<id>` 规则也由它派生：**不要手改**
+   `kernelPrefs.ts` 与 `backends.ts`（目录与身份回归都按 ID 取项，新增目录不必同步它们）；
+   声明了非空 `vendorPackages` 或 `nativeKey` 时，`verify-adapter-boundary.ts` 的
+   `EXPECTED_*` 快照要与 `ADAPTER.md` 一并更新（派生结果逐字比对，门禁报错会写明——不声明
+   这两项的后端无需改动）；`install` 是**声明式配方**（`{ executor, specifier, version }`，
    宿主侧执行器表在 `src/dsh-adapter/install/`，首版只有 `pnpm-profile-add`）：注册表查表
    派生"这个条目可不可装"，选择器那行"未安装·按 Enter 安装"由此而来，装的是**你声明的**
    specifier；没有包可装的后端（驱动系统 CLI 的那类）就不声明，那是一条一等公民的
    降级路径（落检测自己的 hint，不长假按钮）；把 `pnpm compile` 重新生成的
    `src/dsh-adapter/backends.generated.ts` 一起提交（它是入库的生成产物，过期会被
-   `verify-backend-registry` 判红）。字段语义与四条边界（id 语法、
-   `nativeKey` 缺省的含义、`unloadExport` 只管进程级资源池、`install` 的执行器查表）见
+   `verify-backend-registry` 判红）。字段语义与六条边界（id 语法、`nativeKey` 缺省的含义、
+   公开子集与私有项、`unloadExport` 只管进程级资源池、`install` 的执行器查表、恢复语义）见
    [ADAPTER.md](../ADAPTER.md) 的「后端 manifest」一节。
-2. 实现 `AgentBackend`（检测、`open`、可选的离线会话目录）与 `AgentSession`。
-3. 写翻译器：把后端消息翻成 `AgentEvent`，live 与回放用同一套映射；不认识的消息
+3. 实现 `AgentBackend`（检测、`open`、可选的离线会话目录）与 `AgentSession`。注册时交出的
+   handler 对象由 `assertBackendHandler()` 断言形状（`src/adapter/spec/tui-contributions.ts`
+   再导出）。
+4. 写翻译器：把后端消息翻成 `AgentEvent`，live 与回放用同一套映射；不认识的消息
    忽略，不崩。
-4. 按后端真实支持的东西声明 `SessionCapabilities`；没有的就不声明，界面会显示不可用。
-5. 工具卡经 `presentation` 描述，不在界面里按工具名分支。
-6. 子代理转录页按 [dsh-child-transcript.md](dsh-child-transcript.md) 的清单实现
+5. 按后端真实支持的东西声明 `SessionCapabilities`；没有的就不声明，界面会显示不可用。
+   同一份清单也是声明里的 `capabilities` 字段：它必须覆盖运行期
+   `AgentSession.capabilities` 实际返回的键集，而宿主不认识的名字降级不拒绝（见第 1 条）。
+6. 工具卡经 `presentation` 描述，不在界面里按工具名分支。
+7. 子代理转录页按 [dsh-child-transcript.md](dsh-child-transcript.md) 的清单实现
    `history`。
-7. 回归用假 SDK/假进程驱动（参考 `scripts/lib/claude-fake-sdk.ts`），翻译器用脱敏
-   fixture 测；登记进 `scripts/run-ci-group.mjs`。
+8. 宿主服务按 **feature-detect** 取，不是 grants：后端真正需要的东西（起子进程、读自己的
+   prefs、联网）不在宿主权限词表里，`BackendHost` 上的 `tokenStore`、`oauthCredential`、
+   `stderr` 都是可选成员，将来的 `dataDir` 同理——缺席即自己降级，不要假设它一定在。
+   收口分两层：会话级资源归 `session.dispose()`，`unloadExport` 只用于模块级/进程级资源池，
+   且宿主只对真的加载过的条目记账并调用。
+9. 恢复只走自己的 `lastSession()`：启动恢复只针对所选后端，恢复目标绑定后端身份，裸
+   `--resume` 只查该后端自己的 `lastSession`；后端不可用、没有上次会话、指定会话不存在
+   一律明确报错并**非零退出**，不回落、不恢复别的后端的上次会话、不自动新建。
+10. 回归用假 SDK/假进程驱动（参考 `scripts/lib/claude-fake-sdk.ts`），翻译器用脱敏
+    fixture 测；登记进 `scripts/run-ci-group.mjs`。
 
 ## 验证
 

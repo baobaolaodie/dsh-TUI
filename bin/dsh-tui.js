@@ -202,6 +202,13 @@ const MSG = {
     en: code => `[dsh-tui] dsh profile exited with code ${code}. Run it directly for diagnostics:\n  dsh --profile ${PROFILE}`,
     zh: code => `[dsh-tui] dsh profile 已退出（退出码 ${code}）。可直接运行以下命令查看诊断：\n  dsh --profile ${PROFILE}`,
   },
+  // 裸 --resume / -c / --continue 派生不出目标（roadmap §6 第 11 条，B-2a）：以前
+  // 这里不设 env，再把 --continue 交给下游＝静默冷启动。恢复语义要求明确报错并非零
+  // 退出，用户去掉 --resume 之后才按普通启动流程处理。
+  resumeNoLastSession: {
+    en: backend => `[dsh-tui] No session to resume: the "${backend}" backend has not recorded one yet. Start without --resume for a fresh session, or name one with --resume <session id>.`,
+    zh: backend => `[dsh-tui] 没有可恢复的上次会话：后端「${backend}」还没有记录过会话。去掉 --resume 即可冷启动，或用 --resume <会话 id> 指定一个。`,
+  },
   safeAsk: {
     en: code => `dsh-tui exited unexpectedly (code ${code}). Enter safe mode? [Y/n] `,
     zh: code => `dsh-tui 异常退出（码 ${code}）。进入安全模式？[Y/n] `,
@@ -858,13 +865,22 @@ const backendChoiceFromEnv = () => {
   return isBackendIdSyntax(id) && id !== 'dsh' ? id : undefined
 }
 
+// 安全模式重试标记（与 src/kernelPrefs.ts 的 RESUME_RETRY_ENV 同一个字面量）：重试
+// 的目标派生自 last-run.json，而记录里的内核可能已经不在注册表里、boot 会回落 dsh
+// 并撤销这个目标。重试是用户最后的退路，所以带这个标记的那次启动撤销后降级为告警 +
+// 冷启动，而不是报错退出。一次性：boot 读到即从 process.env 删除，不传给子进程。
+const RESUME_RETRY_ENV = 'DSH_TUI_RESUME_RETRY'
+
 // 安全模式「重试正常启动」的环境（菜单选项 1，首启 fallback 与 `safe` 共用）：
 //   1. 本次启动之后写下的最后运行记录：崩溃时实际在跑的内核与会话，压过
 //      env 里的 --resume（内核切换是用户更新的选择）。
 //   2. 没有这样的记录（崩得太早，或旧版本不写）：env 里已有
 //      DSH_TUI_RESUME_SESSION 就照用；否则按 env 的后端读它的上次会话
 //      （resume.txt 或对应后端偏好文件），读不到就冷启动。
-const resumeEnvForRetry = () => {
+// 三条分支派生出来的目标都带上 RESUME_RETRY_ENV：它们是"回到崩溃前"的重试，撤销
+// 只能降级为冷启动，不能把用户最后的退路一起关掉。
+const resumeEnvForRetry = () => ({ ...resumeEnvForRetryTarget(), [RESUME_RETRY_ENV]: '1' })
+const resumeEnvForRetryTarget = () => {
   const chain = launchChain
   const record = readLastRunRecord()
   if (record !== undefined && chain !== null && record.updatedAt >= chain.startedAt) {
@@ -1554,22 +1570,38 @@ if (!runningInsideProfile && ownVersion !== undefined && process.env.DSH_TUI_NO_
   // 其他内核读各自的上次会话。派生出来的目标同时记下**来源内核**
   // （DSH_TUI_RESUME_BACKEND），boot 若回落到别的内核就撤销它；显式给出的 id 不
   // 带来源，原样透传。
+  // 裸请求**派生不出目标就是失败**（roadmap §6 第 11 条，B-2a）：以前这里不设任何
+  // env、随后把 --continue 交给下游，等于静默冷启动。只有最后那次请求算数（与
+  // 上面"每个 flag 都设一次、最后者胜"一致），被后面的显式 id 顶掉的裸 flag 不报错。
+  let bareWithoutTarget = ''
   for (const flag of resumeFlags) {
     const backendChoice = backendChoiceFromEnv()
     if (flag !== null) {
       setResumeEnv(flag, undefined)
+      bareWithoutTarget = ''
       continue
     }
     // 没有 --backend 时裸 --resume 读的是 DSH 的 resume.txt，来源即 dsh：内存里
     // 记着的内核（kernel.json）可能把它顶掉，那时这个 id 同样不该跟过去。
     const sourceBackend = backendChoice ?? 'dsh'
     const sessionId = backendChoice !== undefined ? readBackendLastSession(backendChoice) : readLastResumeTarget()
-    if (sessionId) setResumeEnv(sessionId, sourceBackend)
+    if (sessionId) {
+      setResumeEnv(sessionId, sourceBackend)
+      bareWithoutTarget = ''
+    } else {
+      bareWithoutTarget = sourceBackend
+    }
   }
   // Keep the final bare request until boot knows the effective backend. A
   // missing/foreign marker must not erase it. --continue takes no id, so the
   // next prompt token cannot accidentally become a resume target.
-  if (resumeFlags.at(-1) === null) args.unshift('--continue')
+  if (resumeFlags.at(-1) === null) {
+    if (bareWithoutTarget !== '') {
+      console.error(msg('resumeNoLastSession')(bareWithoutTarget))
+      process.exit(1)
+    }
+    args.unshift('--continue')
+  }
 
   // 启动：被委托场景下本副本自己的版本即对齐诊断所见的启动器代际。
   if (process.env.DSH_TUI_LAUNCHER_VERSION === undefined && ownVersion !== undefined) {

@@ -84,6 +84,14 @@ const LOCAL_CONSTANT_PATTERNS: ReadonlyArray<[RegExp, string]> = [
   [/\bconst\s+DECISION_EVENT_PERMISSIONS\b/u, 'DECISION_EVENT_PERMISSIONS'],
   [/\bconst\s+INTERCEPT_EVENT_SCOPE_BY_PERMISSION\b/u, 'INTERCEPT_EVENT_SCOPE_BY_PERMISSION'],
   [/\bconst\s+HOST_SUPPORTED_CONTRACTS\b/u, 'HOST_SUPPORTED_CONTRACTS'],
+  // B-2: the Backend contribution family's two vocabularies are authored once, in
+  // `src/adapter/spec/` (`backend-capabilities.ts` and the reserved-id list taken
+  // from tui-profile). Their *content* is cross-checked elsewhere —
+  // `verify-backend-contribution` compares them with `SessionCapabilities` and the
+  // registry's built-in ids — and this rule is what keeps a second copy from
+  // appearing anywhere else in the product.
+  [/\bconst\s+BACKEND_CAPABILITY_NAMES\b/u, 'BACKEND_CAPABILITY_NAMES'],
+  [/\bconst\s+BACKEND_RESERVED_IDS\b/u, 'BACKEND_RESERVED_IDS'],
 ]
 for (const file of allFiles) {
   if (isUnder(file, SPEC)) continue

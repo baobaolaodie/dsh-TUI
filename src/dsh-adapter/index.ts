@@ -468,3 +468,23 @@ export async function apply(ctx: Context, config: RuntimeConfig<Config>): Promis
     if (!disposed) handleStartupError(ctx, error)
   })
 }
+
+// ── The Backend contribution family (B-2) ─────────────────────────────────────
+// `alpha`, and deliberately narrow: the *declaration* shape, its validator, the
+// admission verdict and the projection this package uses for its own manifests.
+// A third-party author writes a declaration by hand against exactly this surface
+// (scripts/verify-public-config-types.mjs compiles a real consumer file against
+// the published declarations), and from here on it may only grow — removing any
+// of it is a breaking change. What is NOT here: the registry, the loader and the
+// picker. Those stay the host's, and the C stage is where a bundle's declaration
+// reaches them (W-1 boundary; see docs/plugins.md).
+export {
+  BACKEND,
+  BACKEND_CAPABILITY_NAMES,
+  BACKEND_RESERVED_IDS,
+  validateBackendSpec,
+  type BackendInstallRecipe,
+  type BackendSpec,
+} from '../adapter/spec/tui-contributions.js'
+export { backendAdmission, type BackendAdmission, type BackendAdmissionHost } from './backend-admission.js'
+export { backendContributionOf } from './backend-contribution.js'

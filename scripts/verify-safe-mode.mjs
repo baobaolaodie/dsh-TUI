@@ -515,6 +515,32 @@ const cleanManifest = {
       check('回落: 无记录 + 空 env → 读 resume.txt（旧逻辑不变）', env.DSH_TUI_RESUME_SESSION === 'dsh-marker-3')
     }
   }
+  // C6b 重试标记（B-2a）：三条回落分支派生出来的目标都带上 RESUME_RETRY_ENV——
+  //    重试的目标来自 last-run.json，记录里的内核可能已经不在注册表里，boot 届时
+  //    会撤销它；那是用户最后的退路，只能降级为冷启动，不能报错退出。字面量与
+  //    src/kernelPrefs.ts 的一致性由 scripts/verify-resume-target.ts 单独比对。
+  {
+    const withRecord = makeLauncher({ env: {}, home: chainHome })
+    withRecord.noteLaunchChain()
+    writeRecord(chainHome, { backendId: 'claude', sessionId: 'claude-45', cwd: 'D:/w', attemptId: 'b8', updatedAt: Date.now() + 5000 })
+    const legacyHome = join(tmp, 's02-retry-marker')
+    mkdirSync(join(legacyHome, '.dsh-tui'), { recursive: true })
+    const explicit = makeLauncher({ env: { DSH_TUI_RESUME_SESSION: 'explicit-keep' }, home: legacyHome })
+    explicit.noteLaunchChain()
+    const derived = makeLauncher({ env: { DSH_TUI_BACKEND: 'claude' }, home: legacyHome })
+    derived.noteLaunchChain()
+    check(
+      '重试: 记录/显式 marker/派生目标三条分支都带 RESUME_RETRY_ENV=1',
+      withRecord.resumeEnvForRetry().DSH_TUI_RESUME_RETRY === '1'
+        && explicit.resumeEnvForRetry().DSH_TUI_RESUME_RETRY === '1'
+        && derived.resumeEnvForRetry().DSH_TUI_RESUME_RETRY === '1',
+      JSON.stringify({
+        record: withRecord.resumeEnvForRetry().DSH_TUI_RESUME_RETRY,
+        explicit: explicit.resumeEnvForRetry().DSH_TUI_RESUME_RETRY,
+        derived: derived.resumeEnvForRetry().DSH_TUI_RESUME_RETRY,
+      }),
+    )
+  }
   // C7 接线 tripwire：launch 路径必须在首次 spawn 之前登记链身份。
   {
     const noteAt = binSource.indexOf('noteLaunchChain(')

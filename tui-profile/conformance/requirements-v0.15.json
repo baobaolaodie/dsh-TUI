@@ -58,6 +58,19 @@
       "evidence": "automated"
     },
     {
+      "id": "TUI-BACKEND-001",
+      "source": "protocols/tui-contributions.js",
+      "fixtures": [
+        "valid-backend-contribution.json",
+        "invalid-backend-unknown-field.json",
+        "invalid-backend-bad-id.json",
+        "invalid-backend-key-label.json",
+        "invalid-backend-capability-shape.json"
+      ],
+      "test": "Backend contribution shape, capability/grants declaration and resume binding semantics",
+      "evidence": "automated"
+    },
+    {
       "id": "TUI-TRUST-001",
       "source": "docs/plugin-admission-and-development.md",
       "fixtures": [],

@@ -52,6 +52,12 @@ Also an experimental public surface:
 - The `@deepseek-harness-tui/dsh-tui/test-utils` subpath and
   `ctx.tuiPluginHost.grants.corrupt` were removed in the adapter layering
   refactor (#705).
+- **The backend contribution family (`tui.dsh/v1alpha1` `Backend`, seam XIV) is
+  `alpha` and not promised**: the type surface (`BackendSpec`,
+  `validateBackendSpec`, `backendAdmission`) and conformance
+  (`TUI-BACKEND-001`) are usable, but the real admission wiring (bundle →
+  registry → picker) is stage C work, so a third-party backend cannot pass
+  admission today (W-1).
 - `grants` is now the narrower `HostGrantFacade`; see that PR for migration
   details.
 - On `TuiSceneProps.channel` (`ChannelUi`), `minimal` / `setMinimal()` were

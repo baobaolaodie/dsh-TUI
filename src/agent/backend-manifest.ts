@@ -70,6 +70,33 @@ export interface BackendManifest {
    *  the boundary gate). */
   readonly nativeKey?: string
   /**
+   * The session capabilities this backend's handler actually serves, in the
+   * `SessionCapabilities` vocabulary (`src/agent/capabilities.ts` —
+   * `BackendHost`-visible subset; `src/adapter/spec/backend-capabilities.ts` is
+   * the spec-plane copy the admission compares against). Declaring it is how a
+   * backend says "these are the optional surfaces I answer to" *before* it runs;
+   * a name this host does not know degrades the admission (`compatible_degraded`)
+   * rather than refusing it (§0 D-3).
+   *
+   * The declaration must **cover** what the session actually serves (the set the
+   * runtime hands back is a subset of this list), and the conformance fixture
+   * checks the other direction at the seam: its `open()` must not answer with a
+   * capability key outside what it declared
+   * (`scripts/verify-backend-contribution.ts`). Absent = "nothing declared", which
+   * the projection turns into the empty list.
+   */
+  readonly capabilities?: readonly string[]
+  /**
+   * The host permissions this backend asks for, by the host's own vocabulary
+   * (`registry/permissions-0.1.json`). Today every in-tree backend declares
+   * `[]`: none of the eight existing permission names describes what a backend
+   * actually needs (spawning a child process, reading its own prefs, network) —
+   * those are optional host capabilities on `BackendHost`, feature-detected, not
+   * grants (D-3). A name with no grant lands the entry in `waiting_authorization`,
+   * an unknown name degrades it; neither is a silent "usable".
+   */
+  readonly grants?: readonly string[]
+  /**
    * What the host's install wizard would install, and with which of the host's
    * executors (§6 item 12). Declaring it is how a backend says "there is
    * something to install for me": no backend id is privileged any longer, and

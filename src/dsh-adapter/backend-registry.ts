@@ -25,9 +25,14 @@
  */
 import type { AgentBackend } from '../agent/backend.js'
 import { isBackendIdSyntax, type BackendEntry, type BackendManifest } from '../agent/backend-manifest.js'
+import { BACKEND_CAPABILITY_NAMES } from '../adapter/spec/backend-capabilities.js'
+import { EXPECTED_PERMISSIONS } from '../adapter/spec/protocol-constants.js'
+import { validateBackendSpec } from '../adapter/spec/tui-contributions.js'
 import { cleanRenderText } from '../channel/sanitize.js'
 import { BUILTIN_BACKEND_IDS, type KernelBackendId } from '../kernelPrefs.js'
 import { logForDebugging } from '../utils/debug.js'
+import { backendAdmission, type BackendAdmission } from './backend-admission.js'
+import { backendContributionOf } from './backend-contribution.js'
 import { GENERATED_BACKENDS } from './backends.generated.js'
 import { installExecutor } from './install/executors.js'
 
@@ -46,6 +51,10 @@ const DSH_MANIFEST: BackendManifest = {
   product: 'dsh-core',
   inTree: true,
   alwaysAvailable: true,
+  // Not an `AgentBackend`, so it has no optional session surface to declare —
+  // stated explicitly rather than left to the projection's default (B-2).
+  capabilities: [],
+  grants: [],
 }
 
 /**
@@ -88,6 +97,13 @@ export interface RegisteredBackend {
   readonly id: KernelBackendId
   readonly manifest: BackendManifest
   readonly installable: boolean
+  /**
+   * What the admission decided about this entry (B-2). `compatible_degraded`
+   * carries the names the host does not implement, `waiting_authorization` the
+   * permissions nobody granted; `rejected` and `unknown` never become an entry
+   * (registration throws on them). Every in-tree backend is `compatible` today.
+   */
+  readonly admission: BackendAdmission
   readonly load?: () => Promise<Record<string, unknown>>
 }
 
@@ -104,6 +120,32 @@ const LABEL_MAX_CELLS = 48
 
 /** Close hooks of the entries whose module was actually imported (D4). */
 const loadedUnloads = new Map<string, () => Promise<void>>()
+
+/**
+ * What this host knows when admitting a backend declaration (B-2). The
+ * vocabularies come from the spec plane (`src/adapter/spec/**`), the granted set
+ * is empty until a backend grant flow exists (C stage) — which is why every
+ * in-tree manifest declares `grants: []` rather than a permission nobody could
+ * grant (D-3).
+ */
+const HOST_ADMISSION_FACTS = {
+  reservedIds: new Set<string>(BUILTIN_BACKEND_IDS),
+  capabilityNames: new Set<string>(BACKEND_CAPABILITY_NAMES),
+  permissionNames: new Set<string>(EXPECTED_PERMISSIONS.map(permission => permission.name)),
+  granted: new Set<string>(),
+} as const
+
+/**
+ * The same facts for **this host's own seed**: a built-in manifest legitimately
+ * wears a built-in id, so the reserved set is the one rule that flips. Everything
+ * else (the capability and permission vocabularies) applies to a seed exactly as
+ * it does to a contribution — and the admission verdict is still recorded, which
+ * is what makes the dogfood check in `verify-backend-contribution.ts` meaningful.
+ */
+const SEED_ADMISSION_FACTS = { ...HOST_ADMISSION_FACTS, reservedIds: new Set<string>() } as const
+
+const admissionFactsFor = (manifest: BackendManifest): typeof HOST_ADMISSION_FACTS | typeof SEED_ADMISSION_FACTS =>
+  manifest.inTree ? SEED_ADMISSION_FACTS : HOST_ADMISSION_FACTS
 
 /**
  * Add one entry. The built-in seeds register themselves below; the plugin
@@ -143,6 +185,20 @@ export function registerBackend(entry: BackendEntry): void {
   if (install !== undefined && ![install.executor, install.specifier, install.version].every(field => typeof field === 'string' && field !== '')) {
     throw new Error(`${where} declares an install recipe without a non-empty executor, specifier and version`)
   }
+  // The contribution family gate (B-2). Order matters: project the in-tree
+  // superset down to the public declaration, validate that declaration against the
+  // family's own definition (the same validator every other host of this protocol
+  // runs), then decide the half only this host can answer — capability and
+  // permission vocabularies. A refusal here is a build-time error and must be
+  // loud; a `waiting_authorization` entry registers, because the id does exist and
+  // the boot, the warnings and the session refs must know it, but it is not
+  // offered (see {@link listOfferedBackends}).
+  const contribution = validateBackendSpec(backendContributionOf(manifest))
+  const verdict = backendAdmission(contribution, admissionFactsFor(manifest))
+  if (verdict.decision === 'rejected' || verdict.decision === 'unknown') {
+    throw new Error(`${where} was refused at admission: ${verdict.reasonCode}`)
+  }
+  const admission: BackendAdmission = verdict
   // Plugin-declared names are external input: flatten control/escape sequences
   // and cap the width here, once, so the picker, the launchpad plate and the
   // handoff notices all render the same sanitized text (in-tree names are this
@@ -157,6 +213,7 @@ export function registerBackend(entry: BackendEntry): void {
       shortLabel: cleanRenderText(manifest.shortLabel, LABEL_MAX_CELLS),
     },
     installable: installableOf(manifest),
+    admission,
     ...(entry.load === undefined ? {} : { load: entry.load }),
   }
   entries.set(manifest.id, registered)
@@ -170,6 +227,18 @@ for (const entry of GENERATED_BACKENDS) registerBackend(entry)
 /** Every registered backend, in declaration order (= picker order). */
 export function listBackends(): readonly RegisteredBackend[] {
   return [...entries.values()]
+}
+
+/**
+ * The entries a picker may offer (B-2). A `waiting_authorization` entry is
+ * registered — its id exists, the boot's two-stage parse must find it, and its
+ * session refs must resolve — but it is not offered: nothing has granted what it
+ * declares, so selecting it would open a backend the host cannot describe. Today
+ * no entry is in that state (every in-tree manifest declares `grants: []`); the
+ * shape exists so the C stage's grant flow has somewhere to land.
+ */
+export function listOfferedBackends(): readonly RegisteredBackend[] {
+  return listBackends().filter(entry => entry.admission.decision !== 'waiting_authorization')
 }
 
 /** One backend, or undefined when no such backend is registered. */

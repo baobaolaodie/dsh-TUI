@@ -46,6 +46,10 @@
   `@deepseek-harness-tui/dsh-tui/panels` 与 `./api`。
 - `@deepseek-harness-tui/dsh-tui/test-utils` 子路径与
   `ctx.tuiPluginHost.grants.corrupt` 已随 adapter 分层重构（#705）移除。
+- **后端贡献族（`tui.dsh/v1alpha1` `Backend`，接缝十四）为 `alpha`，不承诺**：类型面
+  （`BackendSpec`、`validateBackendSpec`、`backendAdmission`）与 conformance
+  （`TUI-BACKEND-001`）已可用，但真实准入接线（bundle → registry → picker）是 C 段的
+  工作，第三方后端今天还过不了准入（W-1）。
 - `grants` 收窄为 `HostGrantFacade`，迁移细节见该 PR。
 - `TuiSceneProps.channel`（`ChannelUi`）上的 `minimal` / `setMinimal()` 已更名为
   `minimalUi` / `setMinimalUi()`；旧名保留为 **deprecated 别名**，读写同一个

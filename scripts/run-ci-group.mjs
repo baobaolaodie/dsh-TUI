@@ -456,6 +456,23 @@ const GROUPS = {
   ],
   'session-workspace': [
     ["verify-backend-startup", ['node', '--import', 'tsx/esm', 'scripts/verify-backend-startup.ts']],
+// 启动恢复 fail-closed（roadmap §6 第 11 条，B-2a）：纯函数半边（ResumeTarget 三态与 retry
+// 容错、显式 id 原样透传、裸 flag 走调用方 fallback、`--` 之后不再解析）、启动器半边（裸
+// 请求派生不出目标即报错退出，而不是把 --continue 交给下游；三个重试分支都带
+// RESUME_RETRY_ENV；双语文案；救援 profile 仍丢掉三个会话控制变量），以及 /restart 的替换
+// 进程不再继承一次性标记。四条启动器断言各配一条坏基线（control 先绿 / 逐条注入 / 还原再绿，
+// 照 verify-backend-registry 的手法）。boot 侧的两条拒绝分支由 verify-startup-argv 从编译
+// 产物里切出来真跑，本脚本不重复。
+    ["verify-resume-target", ['node', '--import', 'tsx/esm', 'scripts/verify-resume-target.ts']],
+// 后端贡献族（B-2，W-1）：三个内置 manifest 的投影必须过族内验证器、不漏 in-tree 私有键、
+// 投影是纯的；能力词表与 `SessionCapabilities` 成员双向一致（TS AST 提取）、保留字 id 表与
+// 注册表 built-in 双向一致；准入四种判定各一条（含 waiting_authorization 的拒绝形状）；
+// scripts/fixtures/probe-backend 钉资源不变量（未加载即不 import / 不关池、只关加载过的、
+// 幂等）、两种安装面形态、声明覆盖运行期能力；坏声明逐条必拒；关键判据各配一条坏基线
+// （注入 mutated 输入后必须红）；末尾是 W-1 的范围守卫——`Backend` 不在宿主 supported
+// contracts 里、`registryEntries()` 仍不读 registry 的 extensions 段、src 里没有生产代码
+// 注册这些贡献定义。**这几条是故意钉住"尚未接线"的状态**：C 段真去接 W-2 时就该来改它们。
+    ["verify-backend-contribution", ['node', '--import', 'tsx/esm', 'scripts/verify-backend-contribution.ts']],
 // 后端注册表回归（P0 Stage A + B-1）：注册闸门（重复 id / 保留 id / 非 inTree 用宿主
 // 词表 / native 越权 / 安装配方缺字段）、**安装面按声明不按 id**（非 inTree 条目声明
 // 宿主执行器即可装、装的是它自己的 specifier；codex 式"没有安装面"是缺省配方；
@@ -989,6 +1006,7 @@ const GROUPS = {
     ["verify-codex-plans", ['node', '--import', 'tsx/esm', 'scripts/verify-codex-plans.ts']],
     ["verify-codex-advanced", ['node', '--import', 'tsx/esm', 'scripts/verify-codex-advanced.ts']],
     ["verify-codex-catalog-history", ['node', '--import', 'tsx/esm', 'scripts/verify-codex-catalog-history.ts']],
+    ["verify-backend-list-snapshot", ['node', '--import', 'tsx/esm', 'scripts/verify-backend-list-snapshot.ts']],
     ["verify-codex-lifecycle", ['node', '--import', 'tsx/esm', 'scripts/verify-codex-lifecycle.ts']],
     ["verify-codex-side-query", ['node', '--import', 'tsx/esm', 'scripts/verify-codex-side-query.ts']],
     ["verify-codex-reconnect", ['node', '--import', 'tsx/esm', 'scripts/verify-codex-reconnect.ts']],

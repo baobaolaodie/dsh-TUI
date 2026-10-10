@@ -41,9 +41,59 @@ export const plugin: Config = { backend: 'acme-agent' }
 export const bad: Config = { backend: 42 }
 `
 
+// 第二个 fixture：第三方后端作者按**公开面**手写一份 Backend 贡献声明（B-2）。
+// 与上面同一个判据（零诊断 + 双向可红）：`BackendSpec` 是纯输入面，只收普通 string、
+// 字面量与普通数组；判别联合 / brand 留在包内（roadmap §6 第 10 条）。写成 any 或
+// unknown 时，下面两条 @ts-expect-error 会变成 unused directive。
+const backendFixture = `import type { BackendSpec, BackendInstallRecipe } from '${entry}'
+import { BACKEND, BACKEND_CAPABILITY_NAMES, BACKEND_RESERVED_IDS, backendAdmission, backendContributionOf, validateBackendSpec } from '${entry}'
+
+// 一份第三方的完整声明：字面量的 label、普通数组、普通对象。
+export const declaration: BackendSpec = {
+  id: 'acme-agent',
+  label: { text: 'Acme Agent' },
+  shortLabel: 'Acme',
+  product: 'acme-cli',
+  capabilities: ['permissions', 'models'],
+  grants: [],
+  install: { executor: 'pnpm-profile-add', specifier: '@acme/agent@1.2.3', version: '1.2.3' },
+  unloadExport: 'closeAcmePool',
+}
+// 坐标常量与它的 kind 是字面量；词表是只读数组。
+export const coordinate: 'Backend' = BACKEND.kind
+export const names: readonly string[] = BACKEND_CAPABILITY_NAMES
+export const reserved: readonly string[] = BACKEND_RESERVED_IDS
+// 校验与准入是普通函数，进出都是普通值。
+export const accepted: Readonly<BackendSpec> = validateBackendSpec(declaration)
+export const verdict: string = backendAdmission(accepted, {
+  reservedIds: new Set(reserved),
+  capabilityNames: new Set(names),
+  permissionNames: new Set(['storage.local.read']),
+  granted: new Set<string>(),
+}).decision
+export const projected: Record<string, unknown> = backendContributionOf({
+  id: 'acme-agent',
+  label: { kind: 'literal', text: 'Acme Agent' },
+  shortLabel: 'Acme',
+  inTree: false,
+  capabilities: [],
+  grants: [],
+})
+
+// 输入面不许收判别联合：声明里的能力名是普通字符串，不是某个品牌化的联合。
+// @ts-expect-error capabilities are plain strings, never numbers
+export const badCapabilities: BackendSpec = { ...declaration, capabilities: [1] }
+// @ts-expect-error a label is literal text, not a host key object
+export const badLabel: BackendSpec = { ...declaration, label: { kind: 'key', key: 'kernel-label-dsh' } }
+// 安装配方是普通对象（不是 brand）：缺字段仍然编译不过。
+// @ts-expect-error the install recipe needs all three fields
+export const badRecipe: BackendInstallRecipe = { executor: 'pnpm-profile-add', specifier: '@acme/agent@1.2.3' }
+`
+
 rmSync(workDir, { recursive: true, force: true })
 mkdirSync(workDir, { recursive: true })
 writeFileSync(join(workDir, 'public-config.ts'), fixture, 'utf8')
+writeFileSync(join(workDir, 'public-backend.ts'), backendFixture, 'utf8')
 writeFileSync(join(workDir, 'tsconfig.json'), `${JSON.stringify({
   compilerOptions: {
     noEmit: true,
@@ -55,7 +105,7 @@ writeFileSync(join(workDir, 'tsconfig.json'), `${JSON.stringify({
     // 空 types：这面只测声明形状，不拉 @types/node（包入口的 d.ts 由 skipLibCheck 兜住）。
     types: [],
   },
-  files: ['public-config.ts'],
+  files: ['public-config.ts', 'public-backend.ts'],
 }, null, 2)}\n`, 'utf8')
 
 // `--listFiles` 让"真的检查了这个文件"可证：只看"没有诊断"是不设防的——tsc 没起来、
@@ -67,15 +117,18 @@ if (run.error !== undefined) {
 }
 const stdout = run.stdout ?? ''
 if (run.status !== 0) {
-  console.error('The published Config surface no longer accepts plain backend ids (review R1):')
+  console.error('The published surface no longer accepts plain consumer declarations (review R1 / B-2):')
   console.error(`${stdout}${run.stderr ?? ''}`.trim())
   process.exit(1)
 }
-if (!stdout.includes('public-config.ts')) {
-  console.error('tsc exited 0 but never checked the fixture — the check would pass for any shape:')
-  console.error(stdout.trim())
-  process.exit(1)
+for (const file of ['public-config.ts', 'public-backend.ts']) {
+  if (!stdout.includes(file)) {
+    console.error(`tsc exited 0 but never checked ${file} — the check would pass for any shape:`)
+    console.error(stdout.trim())
+    process.exit(1)
+  }
 }
 console.log('PASS: Config.backend accepts dsh / claude / codex / a plugin id, and still rejects a non-string')
-console.log('\nverify-public-config-types OK (1 check)')
+console.log('PASS: a third-party Backend declaration, its validator and the admission are writable from the published entry alone')
+console.log('\nverify-public-config-types OK (2 checks)')
 process.exit(0)

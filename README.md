@@ -173,9 +173,17 @@ Full guide: [Session migration](docs/migrate.en.md).
 
 **VS Code**: use the integrated terminal or the `dsh-tui-vscode` extension. See [VS Code guide](docs/vscode.en.md). **Herdr**: run `dsh-tui` in a [Herdr](https://herdr.dev) pane; `idle` / `working` / `blocked` are reported through its local integration API.
 
-Bare `--resume` (`-c`, `--continue`) reopens the selected backend's last session.
-If an unknown backend id falls back to DSH, it uses DSH's resume marker.
-An explicit `--resume <id>` passes that id to the selected backend.
+Bare `--resume` (`-c`, `--continue`) reopens the last session of the backend this
+launch selected. Startup recovery only ever targets that backend: a backend with no
+last session, or a derived target that belongs to a different backend than the one
+that actually booted (an unknown backend id falling back to DSH, `--backend` naming
+a backend that is not installed, a remembered kernel that is not the marker's
+source), refuses with a clear error and exit code 1 — never a silent cold start,
+never another backend's session, never a new session. An explicit `--resume <id>`
+passes that id to the selected backend as-is. The one exception is safe mode's
+"retry normal startup": it retries the kernel and session recorded in
+`last-run.json`, so a record whose backend is gone degrades to a warning plus a cold
+start — that retry is the last way back.
 
 ### Experimental: Claude backend
 
@@ -307,7 +315,7 @@ Shortcuts sit below the title and effort levels have their own section; DSH, Cla
 
 In `/provider`'s model list, focus a model and press `Tab` to edit its context window, max output tokens, reasoning efforts, and image input capability.
 
-The session manager focuses the most recently used session in the current workspace; if there is no history, it focuses the new-session card. Press `←` to move to the workspace rail. It paints the last successful list immediately while it checks the persistence store for changes. Titles that require a deeper log scan appear first with a fallback name and update in place when recovery finishes.
+The session manager focuses the most recently used session in the current workspace; if there is no history, it focuses the new-session card. Press `←` to move to the workspace rail. It paints the last successful list immediately while it checks the persistence store for changes. This first-paint snapshot survives restarts on DSH, Claude and Codex and is isolated by backend and storage directory. On a cold Codex scan, pages appear as they arrive. Titles that require a deeper DSH log scan appear first with a fallback name and update in place when recovery finishes.
 With DSH's current JSONL backend, startup and `/new` keep initial permission events in memory until further session activity saves the complete log; an explicit durability flush still runs, but it saves nothing for a session that holds only that initialization. Restarting an unstored empty session starts fresh. A normal exit removes sessions no human ever spoke in.
 Removing a workspace registration keeps its sessions accessible under a "History only" directory in the rail.
 History-only directories offer edit and new-session actions; rename and remove are available for registered workspaces.

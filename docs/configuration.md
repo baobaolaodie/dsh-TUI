@@ -273,8 +273,9 @@ Profile 模式不再使用旧的 `DSH_TUI_COMPACT_RATIO`、`DSH_TUI_COMPACT_RETA
 | `DSH_TUI_DISABLE_TERMINAL_IMAGES` | 设为 `1` 时强制关闭 Kitty/Sixel 探测、预览读取/解码与终端图片渲染，优先于 config 和 /settings；保留文字信息 |
 | `DSH_TUI_IMAGE_PROTOCOL` | `auto`（默认）、`kitty`、`sixel` 或 `none`；覆盖协议选择，但不绕过图片预览偏好、禁用开关、非全屏、无障碍和多路复用器限制 |
 | `DSH_TUI_RESUME_SESSION` | 启动时恢复指定会话，通常由启动器设置 |
-| `DSH_TUI_RESUME_BACKEND` | `DSH_TUI_RESUME_SESSION` 的来源后端，只在启动器**派生**恢复目标时（裸 `--resume` 读该后端的上次会话、安全模式重试按最后运行记录）设置；boot 若落在别的后端（未装的 id 回落 `dsh`、没给 `DSH_TUI_BACKEND` 时跟随记住的内核）就撤销该目标并告警。裸 `--resume` 请求仍保留，改读最终后端自己的上次会话；用户显式给出的 id 不带此标记、原样透传 |
-| `DSH_TUI_BACKEND` | 会话后端（内置 `dsh` / `claude` / `codex`，或已装的插件后端），通常由 `dsh-tui --backend` 设置；未安装或写错的 id 按 `dsh` 启动并告警 |
+| `DSH_TUI_RESUME_BACKEND` | `DSH_TUI_RESUME_SESSION` 的来源后端，只在启动器**派生**恢复目标时（裸 `--resume` 读该后端的上次会话、安全模式重试按最后运行记录）设置；boot 若落在别的后端（未装的 id 回落 `dsh`、没给 `DSH_TUI_BACKEND` 时跟随记住的内核），该目标一律**明确报错并非零退出**——不跨后端恢复、不静默冷启动、不新建会话（安全模式重试是唯一例外，降级为告警 + 冷启动）。用户显式给出的 id 不带此标记、原样透传 |
+| `DSH_TUI_RESUME_RETRY` | 一次性标记：本次启动是安全模式的「重试正常启动」。重试的目标派生自最后运行记录，记录里的内核可能已经不在注册表里，所以带此标记的那次启动在恢复目标被撤销时降级为告警 + 冷启动，而不是报错退出。boot 读到即从 `process.env` 删除 |
+| `DSH_TUI_BACKEND` | 会话后端（内置 `dsh` / `claude` / `codex`，或已装的插件后端），通常由 `dsh-tui --backend` 设置；未安装或写错的 id 按 `dsh` 启动并告警（若同时带了 `--resume` 请求则改为报错退出，见上） |
 | `DSH_TUI_CLAUDE_PERMISSION_MODE` | Claude 后端的起始权限模式（`default`/`acceptEdits`/`plan`/`dontAsk`/`bypassPermissions`），优先于 `/permission` 记住的选择 |
 | `DSH_TUI_WORKSPACE_TARGET` | 启动时解析的工作区路径或 URI，通常由 `dsh-tui <目标>` 设置 |
 | `DSH_TUI_SESSION_ROOT` | 覆盖 JSONL 会话根目录；profile 默认 `$DSH_HOME/sessions`，裸 `cordis.yml` 默认 `~/.dsh-tui/sessions` |

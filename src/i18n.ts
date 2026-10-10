@@ -2487,6 +2487,29 @@ const dict = {
     zh: '上次选择的 {{name}} 内核启动失败，已先以 DSH 内核启动：{{reason}}',
     en: 'The remembered {{name}} kernel failed to start; booted on DSH instead: {{reason}}',
   },
+  // 启动恢复的失败面（roadmap §6 第 11 条，B-2a）：恢复目标只归派生它的后端，落在
+  // 别的后端上就明确报错 + 非零退出，不跨后端恢复、不冷启动、不新建会话。唯一例外
+  // 是安全模式重试（RESUME_RETRY_ENV），它降级为告警并冷启动——那是用户最后的退路。
+  // {{from}} 是后端 id（可直接喂给 --backend），{{kernel}} 是显示名，{{kernelId}} 是
+  // 本次所选后端的 id（命令里只能用 id）。建议必须可执行（PR #1449 review R2）：来源
+  // 后端已不在注册表时，`--backend {{from}} --resume` 会再撞同一条拒绝，那一支因此走
+  // resume-target-revoked-uninstalled，只给「装上再试」。
+  'resume-target-revoked': {
+    zh: '无法恢复上次会话：它由「{{from}}」后端记录，而本次启动使用的是「{{kernel}}」后端。启动恢复只针对所选后端——要恢复「{{from}}」记下的那条：dsh-tui --backend {{from}} --resume；要恢复本次所选后端自己的上次会话：dsh-tui --backend {{kernelId}} --resume；也可以去掉 --resume 重新启动。',
+    en: 'Cannot resume the last session: it was recorded by the "{{from}}" backend while this launch runs on "{{kernel}}". Startup recovery only ever targets the selected backend — to reopen the session "{{from}}" recorded: `dsh-tui --backend {{from}} --resume`; to reopen the last session of this launch\'s backend: `dsh-tui --backend {{kernelId}} --resume`; or drop --resume to start fresh.',
+  },
+  'resume-target-revoked-uninstalled': {
+    zh: '无法恢复上次会话：它由「{{from}}」后端记录，而该后端本次启动未安装（或已不在此 profile 的注册表里），本次启动使用的是「{{kernel}}」后端。恢复它要先装上该后端，再运行 dsh-tui --backend {{from}} --resume；或去掉 --resume 重新启动。',
+    en: 'Cannot resume the last session: it was recorded by the "{{from}}" backend, which is not installed for this launch (or is no longer in this profile\'s registry), while this launch runs on "{{kernel}}". Resuming it needs that backend installed first, then `dsh-tui --backend {{from}} --resume`; or drop --resume to start fresh.',
+  },
+  'resume-target-revoked-retry': {
+    zh: '安全模式重试：忽略由「{{from}}」后端记录的上次会话（本次启动用的是「{{kernel}}」），按冷启动继续。',
+    en: 'Safe-mode retry: ignoring the last session recorded by the "{{from}}" backend (this launch runs on "{{kernel}}") and continuing with a cold start.',
+  },
+  'resume-backend-unavailable': {
+    zh: '无法恢复会话：本次启动指定的后端「{{backend}}」不可用（未安装或 id 不合法；已注册：{{installed}}），而要恢复的会话「{{session}}」属于它。回落 DSH 只会把别的后端的会话 id 交给 dsh，因此本次启动失败——装上该后端后重试，或去掉 --resume 重新启动。',
+    en: 'Cannot resume: the backend named for this launch, "{{backend}}", is unavailable (not installed, or not a valid id; registered: {{installed}}), and the session "{{session}}" belongs to it. Falling back to DSH would only hand another backend\'s session id to dsh, so this launch fails — install the backend and retry, or drop --resume to start fresh.',
+  },
   'kernel-pinned-hint': {
     zh: '启动参数已指定内核：本次会按你的选择重启，下次直接启动仍按参数进入。',
     en: 'A startup flag pins the kernel: this restart follows your choice, a later direct launch follows the flag.',

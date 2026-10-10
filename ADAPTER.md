@@ -24,7 +24,7 @@
 除 `import type` 外只允许 import 自己目录内无运行时依赖的版本常量(唯一登记例外:
 `backends/claude/manifest.ts → contract.ts`),因为构建期索引会静态 import
 每个 manifest(每次启动,含只用 DSH 的启动)。字段与语义见
-`src/agent/backend-manifest.ts`;四条容易踩的边界:
+`src/agent/backend-manifest.ts`;六条容易踩的边界:
 
 - **`id`**:`^[a-z0-9][a-z0-9-]{0,31}$`(`-` 之外的分隔符一律不留,`:`
   在 Windows 上做不了 `~/.dsh-tui/backends/<id>/` 目录)。**成员判断**由运行时注册表
@@ -47,6 +47,26 @@
   选择器的 `sdk-install` 浮层带**后端 id**,安装面在打开时按 id 现查——装的是用户点的那一行
   (Stage A 的做法相反:浮层不带 id、`backends.ts` 静态 import 那一个安装器,于是任何别的
   后端都只能装成 Claude 的 SDK)。
+- **公开子集与 in-tree 私有项**:manifest 是 `tui.dsh/v1alpha1#Backend` 公开声明的
+  **超集**。`inTree`、`alwaysAvailable`、`nativeKey`、`vendorPackages`、`backendExport`
+  与 `label.kind === 'key'` 是仓内私有项,不进公开面;`backendContributionOf()`
+  (`src/dsh-adapter/backend-contribution.ts`) 是唯一的投影方向——剥掉私有项、把 key
+  标签展开成字面量、缺省声明投影成空列表,结果必须过 `validateBackendSpec()`
+  (`tui-profile/protocols/tui-contributions.js`)。`scripts/verify-backend-contribution.ts`
+  断言三个内建后端都投影得干净(私有键零泄漏)、投影是纯函数。
+  `capabilities` 与 `grants` 是这条公开面上的两个新字段:前者必须覆盖运行期
+  `AgentSession.capabilities` 实际返回的键集,后者只取宿主权限词表
+  (`registry/permissions-0.1.json`);两者的未知名字一律**降级不拒绝**,判定是
+  `src/dsh-adapter/backend-admission.ts` 的 `backendAdmission()`(已知权限名无授权 →
+  注册但不进 picker)。声明文本按不可信输入净化。族语义见
+  [说明 0009](tui-profile/notes/0009-backend-contribution.md)。
+- **恢复语义(B-2a fail-closed)**:后端自己的 `lastSession()` 只归自己。启动恢复只
+  针对所选后端,恢复目标绑定后端身份,裸 `--resume` 只查**该后端自己的** `lastSession`;
+  后端不可用、没有上次会话、指定会话不存在一律明确报错并**非零退出**
+  (`src/kernelPrefs.ts` 的 `resolveResumeTarget()`),不回落、不恢复别的后端的上次会话、
+  不自动新建会话。唯一例外是安全模式的"重试正常启动"(一次性 env
+  `DSH_TUI_RESUME_RETRY`,撤销降级为告警 + 冷启动),它不进协议;`lastSession` 接口与
+  恢复目标的传递方式也不在协议内。
 
 新增一个后端 = 新建 `src/backends/<id>/`(`manifest.ts` + 实现),再把
 `pnpm compile` 重新生成的 `src/dsh-adapter/backends.generated.ts` 一并提交;

@@ -183,10 +183,50 @@ export function resolveRememberedBackend(input: {
 export const RESUME_BACKEND_ENV = 'DSH_TUI_RESUME_BACKEND'
 
 /**
+ * Marks a boot the launcher started as the safe-mode **retry** (`dsh-tui safe`
+ * → option 1, and the first-run fallback that shares it).
+ *
+ * A retry derives its target from `last-run.json` — "the kernel and session that
+ * were running when the crash happened" — and the recorded kernel may no longer
+ * be in the registry, which is exactly the case {@link resolveResumeTarget}
+ * revokes. Failing the boot there would close the user's last way back, so a
+ * retry gets the tolerated branch instead: warn, then cold-start on the kernel
+ * that did open. The launcher sets it for the whole retry env, the boot deletes
+ * it as soon as it reads it (one-shot, like the mark above), and it never
+ * reaches the plugin protocol — `lastSession` and this handoff are implementation
+ * details, not a backend contract (roadmap §6 item 11).
+ */
+export const RESUME_RETRY_ENV = 'DSH_TUI_RESUME_RETRY'
+
+/**
+ * What the boot must do with the resume request it inherited.
+ *
+ * The four outcomes the decision names (roadmap §6 item 11): only the selected
+ * backend is ever asked, a target is bound to the backend that derived it, and a
+ * request that cannot be honored fails the boot instead of degrading into a cold
+ * start or a session nobody asked for. `none` and `usable` are the two ordinary
+ * outcomes; `revoked` carries everything the caller needs to report the refusal —
+ * which backend the target came from, and whether the refusal is allowed to be
+ * soft (safe-mode retry only).
+ */
+export type ResumeTarget =
+  /** No resume request survives (nothing was asked for, or the id was blank). */
+  | { readonly kind: 'none' }
+  /** Hand this id to `backendChoice`, the backend this boot landed on. */
+  | { readonly kind: 'usable'; readonly sessionId: string }
+  /**
+   * A **derived** target whose source backend is not the one this boot landed on.
+   * `fatal` says how loud the refusal is: `true` fails the boot (the target is
+   * neither carried across nor silently replaced by a new session), `false`
+   * (safe-mode retry) only warns and lets the boot continue on `backendChoice`.
+   */
+  | { readonly kind: 'revoked'; readonly from: KernelBackendId; readonly fatal: boolean }
+
+/**
  * Whether a resume target may be handed to the backend this boot landed on. A
  * derived target is usable only on the backend it came from; a revoked one is
  * dropped rather than carried over, which is why the result hands the source back
- * for the caller's warning instead of returning nothing. Pure.
+ * for the caller's refusal instead of returning nothing. Pure.
  */
 export function resolveResumeTarget(input: {
   /** The id as given: DSH_TUI_RESUME_SESSION, else Config.sessionId. */
@@ -195,9 +235,13 @@ export function resolveResumeTarget(input: {
   readonly sourceBackend?: KernelBackendId | undefined
   /** The backend this boot landed on (plugin.ts `backendChoice`). */
   readonly backendChoice: KernelBackendId
-}): { readonly sessionId?: string; readonly revokedFrom?: KernelBackendId } {
+  /** RESUME_RETRY_ENV: a safe-mode retry must survive a revoked target. */
+  readonly retry?: boolean | undefined
+}): ResumeTarget {
   const sessionId = input.sessionId?.trim()
-  if (sessionId === undefined || sessionId === '') return {}
-  if (input.sourceBackend === undefined || input.sourceBackend === input.backendChoice) return { sessionId }
-  return { revokedFrom: input.sourceBackend }
+  if (sessionId === undefined || sessionId === '') return { kind: 'none' }
+  if (input.sourceBackend === undefined || input.sourceBackend === input.backendChoice) {
+    return { kind: 'usable', sessionId }
+  }
+  return { kind: 'revoked', from: input.sourceBackend, fatal: input.retry !== true }
 }

@@ -86,34 +86,68 @@ if (probeMode) {
     report(dumps[0])
     process.exit(0)
   }
-  const ctx = { provide(name, value) { this[name] = value } }
+  const warnings = []
+  const ctx = {
+    provide(name, value) { this[name] = value },
+    // The boot reports a tolerated refusal through the Cordis logger; the real
+    // one writes to stderr, which the report channel already owns here.
+    logger: { warn: line => warnings.push(String(line)), error: line => warnings.push(String(line)) },
+  }
   provideCmdline(ctx, { args: program.args, exit: code => process.exit(code) })
   if (process.env.DSH_TUI_ARGV_SHAPE === 'args') ctx.cmdlineArgs = { args: program.args }
 
   const { initialPromptFromCmdlineArgs } = await import('../lib/types/dsh-adapter/startup-args.js')
-  const { resumeTargetFromArgv } = await import('../lib/types/sessionHistory.js')
-  const { KERNEL_SWITCH_HANDOFF_ENV, RESUME_BACKEND_ENV, parseBackendId, readKernelPrefs, resolveRememberedBackend, resolveResumeTarget } = await import('../lib/types/kernelPrefs.js')
-  const { isRegisteredBackend, parseBackendChoice } = await import('../lib/types/dsh-adapter/backend-registry.js')
-  const { startup, resolution, target, submit } = JSON.parse(readFileSync(process.env.DSH_TUI_ARGV_STARTUP, 'utf8'))
+  const { resumeTargetFromArgv, stripResumeArgs } = await import('../lib/types/sessionHistory.js')
+  const { KERNEL_SWITCH_HANDOFF_ENV, RESUME_BACKEND_ENV, RESUME_RETRY_ENV, parseBackendId, readKernelPrefs, resolveRememberedBackend, resolveResumeTarget } = await import('../lib/types/kernelPrefs.js')
+  const { backendLabel, isBackendIdSyntax, isRegisteredBackend, listBackends, parseBackendChoice } = await import('../lib/types/dsh-adapter/backend-registry.js')
+  const { setLang, t } = await import('../lib/types/i18n.js')
+  // Deterministic refusal text: the boot itself sets the language from config,
+  // which is not part of the extracted startup statements.
+  setLang('en')
+  const { startup, backendInput, resolution, target, submit } = JSON.parse(readFileSync(process.env.DSH_TUI_ARGV_STARTUP, 'utf8'))
   const submitted = []
   const scope = {
-    ctx, process, initialPromptFromCmdlineArgs, resumeTargetFromArgv,
-    KERNEL_SWITCH_HANDOFF_ENV, RESUME_BACKEND_ENV, parseBackendId, readKernelPrefs,
-    resolveRememberedBackend, resolveResumeTarget, isRegisteredBackend, parseBackendChoice,
+    ctx, process, initialPromptFromCmdlineArgs, resumeTargetFromArgv, stripResumeArgs,
+    KERNEL_SWITCH_HANDOFF_ENV, RESUME_BACKEND_ENV, RESUME_RETRY_ENV, parseBackendId, readKernelPrefs,
+    resolveRememberedBackend, resolveResumeTarget, backendLabel, isBackendIdSyntax,
+    isRegisteredBackend, listBackends, parseBackendChoice, t,
     config: {
       backend: process.env.DSH_TUI_BACKEND,
       sessionId: process.env.DSH_TUI_RESUME_SESSION,
       workspace: process.env.DSH_TUI_WORKSPACE_TARGET,
+      ...JSON.parse(process.env.DSH_TUI_ARGV_CONFIG ?? '{}'),
     },
+    sessionCwd: process.cwd(),
     shadow: false,
     backendStart: undefined,
     channel: { submit: text => submitted.push(text) },
   }
   const context = createContext(scope)
-  runInContext([
-    ...startup,
-    'globalThis.backendInput = { backend: backendChoice, sessionId: configuredSessionId, argv: cmdlineArgs ?? process.argv.slice(2) }',
-  ].join('\n'), context)
+  let refusal
+  try {
+    runInContext([
+      ...startup,
+      `globalThis.backendInput = { backend: backendChoice, input: ${backendInput} }`,
+    ].join('\n'), context)
+  } catch (error) {
+    refusal = error
+  }
+  if (refusal !== undefined) {
+    // Errors thrown inside the vm belong to the vm's realm, so `instanceof Error`
+    // is false here — read the message off the shape instead.
+    const message = typeof refusal?.message === 'string' ? refusal.message : String(refusal)
+    // The startup statements threw, exactly like the boot's own refusal (roadmap
+    // §6 item 11 / B-2a: a resume request that cannot be honored fails the boot
+    // instead of degrading). Nothing was opened, resumed or created. Any other
+    // throw is a fixture bug, reported as itself instead of as a refusal.
+    if (!message.startsWith('Cannot resume')) {
+      console.error(`PROBE ERROR: ${message}\n${refusal?.stack ?? ''}`)
+      report('probe-error', { message })
+      process.exit(1)
+    }
+    report('resume-refused', { message, warnings })
+    process.exit(1)
+  }
   if (scope.backendInput.backend !== 'dsh') {
     // Replace only the native process boundary. The real startup adapter reads
     // this backend's marker and chooses create/resume against the real ledger.
@@ -142,17 +176,13 @@ if (probeMode) {
         dispose: async () => undefined,
       }),
     }
-    scope.backendStart = await openBackendStartup(ctx, backend, {
-      cwd: process.cwd(), stderr: () => undefined,
-      ...(scope.backendInput.sessionId === undefined ? {} : { configuredSessionId: scope.backendInput.sessionId }),
-      argv: scope.backendInput.argv,
-    })
+    scope.backendStart = await openBackendStartup(ctx, backend, scope.backendInput.input)
   }
   runInContext([
     ...resolution, submit,
     `globalThis.targets = { backend: backendChoice, session: ${target} ?? null, workspace: requestedWorkspace ?? null }`,
   ].join('\n'), context)
-  report('profile', { ...scope.targets, submitted })
+  report('profile', { ...scope.targets, submitted, ...(warnings.length > 0 ? { warnings } : {}) })
   process.exit(0)
 }
 
@@ -167,22 +197,38 @@ async function compiledStartup() {
   for (const statement of apply.body.statements) {
     if (!ts.isVariableStatement(statement)) continue
     for (const declaration of statement.declarationList.declarations) {
-      declarations.set(declaration.name.getText(source), statement.getText(source))
+      declarations.set(declaration.name.getText(source), statement)
     }
   }
   const names = [
     'cmdline', 'cmdlineArgs', 'requestedWorkspace', 'launchSessionId', 'submitChannel', 'initialPrompt',
-    'rawBackend', 'handoffBackendRaw', 'handoffBackend', 'rememberedBackend', 'backendChoice',
-    'resumeBackendRaw', 'resumeTarget', 'effectiveSessionId', 'configuredSessionId',
+    'rawBackend', 'rawBackendGiven', 'handoffBackendRaw', 'handoffBackend', 'rememberedBackend', 'backendChoice',
+    'resumeBackendRaw', 'resumeRetry', 'resumeTarget', 'effectiveSessionId', 'configuredSessionId',
+    ...['configuredBackend', 'startupArgv'].filter(name => declarations.has(name)),
   ]
-  const startup = names.map(name => {
-    assert.ok(declarations.has(name), `compiled startup declaration: ${name}`)
-    return declarations.get(name)
-  })
+  // The two refusal branches (a revoked target, and a resume request aimed at a
+  // backend this host does not have) run for real: they are top-level statements
+  // of the boot, so the probe evaluates whatever plugin.ts has — interleaved with
+  // the declarations in source order — and a throw ends the process the way the
+  // boot's startup funnel does.
+  const refusals = apply.body.statements.filter(node => ts.isIfStatement(node)
+    && /resumeTarget|rawBackendGiven/u.test(node.getText(source)))
+  assert.ok(refusals.length >= 2, 'compiled resume refusal branches exist')
+  const startup = [
+    ...names.map(name => {
+      assert.ok(declarations.has(name), `compiled startup declaration: ${name}`)
+      return declarations.get(name)
+    }),
+    ...refusals,
+  ].sort((a, b) => a.getStart(source) - b.getStart(source)).map(node => node.getText(source))
   const submit = apply.body.statements.find(node => ts.isIfStatement(node) && node.expression.getText(source) === 'initialPrompt')
   assert.ok(submit, 'compiled initial prompt submission branch exists')
   let target
+  let backendInput
   const visit = node => {
+    if (ts.isCallExpression(node) && node.expression.getText(source) === 'openBackendStartup') {
+      backendInput = node.arguments[2].getText(source)
+    }
     if (ts.isCallExpression(node) && node.expression.getText(source) === 'resolveAgent') {
       assert.ok(ts.isIdentifier(node.arguments[1]), 'DSH startup consumes a named resume target')
       target = node.arguments[1].text
@@ -191,8 +237,9 @@ async function compiledStartup() {
   }
   visit(apply.body)
   assert.ok(target && declarations.has(target), 'compiled resume target passed to resolveAgent exists')
-  const resolution = names.includes(target) ? [] : [declarations.get(target)]
-  return { startup, resolution, target, submit: submit.getText(source) }
+  assert.ok(backendInput, 'compiled input passed to openBackendStartup exists')
+  const resolution = names.includes(target) ? [] : [declarations.get(target).getText(source)]
+  return { startup, backendInput, resolution, target, submit: submit.getText(source) }
 }
 
 /** spawnSync's result shape, without blocking the other cases. */
@@ -290,15 +337,62 @@ try {
     { name: 'Claude bare resume before --backend', hostArgs: [], argv: ['--resume', '--backend', 'claude'], backend: 'claude', session: 'claude-last', prompt: '', binOnly: true },
     { name: 'Claude explicit resume', hostArgs: [], argv: ['--backend', 'claude', '--resume', 'claude-explicit'], backend: 'claude', session: 'claude-explicit', prompt: '', binOnly: true },
     { name: 'DSH bare resume after an explicit one (last wins)', hostArgs: [], argv: ['--resume', 'explicit-first', '--resume'], session: 'remembered-session', prompt: '', binOnly: true },
-    // The final boot target must follow the selected backend, including when the
-    // launcher cannot establish membership and an earlier marker is revoked.
-    { name: 'unknown env with no preference still resumes DSH', argv: ['--resume'], envBackend: 'claud', session: 'remembered-session', resumeEnv: null, prompt: '' },
-    { name: 'unknown env with a foreign preference resumes the DSH marker', argv: ['--resume'], envBackend: 'missing-agent', session: 'remembered-session', resumeEnv: 'foreign-session', prompt: '' },
-    { name: 'unknown flag preserves a bare resume before literal input', argv: ['--backend', 'claud', '--resume', '--', '--resume=literal'], session: 'remembered-session', resumeEnv: null, prompt: '--resume=literal', binOnly: true },
-    { name: 'bare resume does not consume the following prompt', argv: ['--resume', '--backend', 'claud', 'explain'], session: 'remembered-session', resumeEnv: null, prompt: 'explain', binOnly: true },
-    { name: 'an explicit final resume wins over a preceding bare one', argv: ['--backend', 'missing-agent', '--resume', '--resume', 'explicit-last'], session: 'explicit-last', prompt: '', binOnly: true },
-    { name: 'remembered Claude uses its own marker after revoking the DSH marker', argv: ['--resume'], memoryBackend: 'claude', backend: 'claude', session: 'claude-last', resumeEnv: 'remembered-session', prompt: '', binOnly: true },
-    { name: 'a backend with no resume history stays a fresh launch', argv: ['--backend', 'claude', '--resume'], noClaudeMarker: true, backend: 'claude', session: null, resumeEnv: null, prompt: '', binOnly: true },
+    // B-2a: a resume request that cannot be honored is refused with a non-zero
+    // exit instead of degrading into a cold start, a foreign session, or a new
+    // one. Three shapes: the launcher cannot derive a target for a bare request
+    // (`launcherError`), the boot revokes a derived target (`refusal`), and the
+    // boot refuses a resume aimed at a backend this host does not have
+    // (`refusal`, the id it would have resumed named in the message). A revoked
+    // target's advice has to be executable (PR #1449 review R2): an unregistered
+    // source backend gets the "install it first" sentence instead of a
+    // `--backend <from> --resume` that would hit this same refusal, while a
+    // registered one names both ways back — by id, never by display label.
+    { name: 'unknown env with no preference: bare resume is refused, not silently DSH', argv: ['--resume'], envBackend: 'claud', launcherError: 'claud', prompt: '', binOnly: true },
+    { name: 'unknown env with a foreign preference: the foreign marker is refused on dsh, with no dead-end advice', argv: ['--resume'], envBackend: 'missing-agent', refusal: '"missing-agent" backend, which is not installed', prompt: '', binOnly: true },
+    { name: 'unknown flag: a bare resume it cannot derive is refused before literal input', argv: ['--backend', 'claud', '--resume', '--', '--resume=literal'], launcherError: 'claud', prompt: '--resume=literal', binOnly: true },
+    { name: 'bare resume does not consume the following prompt, and is refused', argv: ['--resume', '--backend', 'claud', 'explain'], launcherError: 'claud', prompt: 'explain', binOnly: true },
+    { name: 'an explicit final resume wins over a preceding bare one, and is refused on the missing backend', argv: ['--backend', 'missing-agent', '--resume', '--resume', 'explicit-last'], refusal: '"explicit-last"', prompt: '', binOnly: true },
+    { name: 'a bare resume derived from the DSH marker is refused when the remembered kernel is Claude, naming both ways back', argv: ['--resume'], memoryBackend: 'claude', refusal: '--backend dsh --resume.*--backend claude --resume', prompt: '', binOnly: true },
+    { name: 'a backend with no resume history is refused, not turned into a fresh launch', argv: ['--backend', 'claude', '--resume'], noClaudeMarker: true, launcherError: 'claude', prompt: '', binOnly: true },
+    // The safe-mode "retry normal startup" path is the one exception: its target
+    // comes from last-run.json, and the recorded backend may be gone by now. That
+    // retry is the user's last way back, so the refusal degrades to a warning plus
+    // a cold start instead of ending the process (RESUME_RETRY_ENV, roadmap §6
+    // item 11's fail-closed landing with the retry carve-out).
+    {
+      name: 'a safe-mode retry tolerates a target whose backend is gone and continues cold',
+      argv: [],
+      envExtra: { DSH_TUI_RESUME_SESSION: 'stale-1', DSH_TUI_RESUME_BACKEND: 'missing-agent', DSH_TUI_RESUME_RETRY: '1' },
+      session: null, resumeEnv: 'stale-1', warns: '"missing-agent"', prompt: '', binOnly: true,
+    },
+    {
+      name: 'a safe-mode retry drops replayed continue instead of resuming the DSH marker',
+      argv: ['--continue', 'explain'], envBackend: 'missing-agent',
+      envExtra: { DSH_TUI_RESUME_RETRY: '1' },
+      session: null, resumeEnv: 'foreign-session', warns: '"missing-agent"', prompt: 'explain', binOnly: true,
+    },
+    {
+      name: 'a safe-mode retry drops replayed continue instead of resuming the remembered Claude marker',
+      argv: ['--continue', 'explain'], memoryBackend: 'claude', backend: 'claude',
+      envExtra: { DSH_TUI_RESUME_RETRY: '1' },
+      session: null, resumeEnv: 'remembered-session', warns: '"dsh"', prompt: 'explain', binOnly: true,
+    },
+    {
+      name: 'an explicit DSH config resumes despite an overridden unavailable env backend',
+      argv: ['--resume', 'dsh-explicit'], envBackend: 'missing-agent',
+      config: { backend: 'dsh' }, session: 'dsh-explicit', prompt: '',
+    },
+    {
+      name: 'an explicit Claude config resumes despite an overridden unavailable env backend',
+      argv: ['--resume', 'claude-explicit'], envBackend: 'missing-agent',
+      config: { backend: 'claude' }, backend: 'claude', session: 'claude-explicit', prompt: '',
+    },
+    {
+      name: 'a valid handoff resumes despite an overridden unavailable env backend and DSH config',
+      argv: ['--resume', 'claude-explicit'], envBackend: 'missing-agent', config: { backend: 'dsh' },
+      envExtra: { DSH_TUI_BACKEND_HANDOFF: 'claude' },
+      backend: 'claude', session: 'claude-explicit', prompt: '',
+    },
   ]
   // stripResumeArgs: the ONE grammar that decides what a respawned process
   // must not inherit. A kernel switch respawns onto the other backend, where
@@ -360,6 +454,8 @@ try {
               ...env, DSH_TUI_ARGV_SHAPE: shape,
               HOME: caseHome, USERPROFILE: caseHome,
               ...(test.envBackend === undefined ? {} : { DSH_TUI_BACKEND: test.envBackend }),
+              ...(test.config === undefined ? {} : { DSH_TUI_ARGV_CONFIG: JSON.stringify(test.config) }),
+              ...test.envExtra,
               ...(route === 'bin' ? { DSH_TUI_NO_DELEGATE: '1' } : {}),
             },
           }),
@@ -377,7 +473,28 @@ try {
     checks += 1
     try {
       assert.equal(result.error, undefined)
+      if (test.launcherError !== undefined || test.refusal !== undefined) {
+        // Refusals are launcher- or boot-side, both before any session exists.
+        assert.equal(result.status, 1, result.stderr)
+        if (test.refusal !== undefined) {
+          const report = JSON.parse(result.stdout)
+          assert.equal(report.mode, 'resume-refused', JSON.stringify(report))
+          assert.equal(report.backend, null)
+          assert.equal(report.session, null)
+          assert.equal(report.submitted.length, 0)
+          assert.match(report.message, new RegExp(test.refusal, 'u'))
+        } else {
+          assert.equal(result.stdout, '')
+          assert.match(result.stderr, new RegExp(test.launcherError, 'u'))
+        }
+        console.log(`PASS: ${label}`)
+        continue
+      }
       assert.equal(result.status, test.exitCode ?? 0, result.stderr)
+      if (test.warns !== undefined) {
+        const report = JSON.parse(result.stdout)
+        assert.ok(report.warnings?.some(line => new RegExp(test.warns, 'u').test(line)), JSON.stringify(report.warnings))
+      }
       assert.deepEqual(JSON.parse(result.stdout), {
         mode: test.mode ?? 'profile',
         hostOptions: { patches: test.patches ?? [], fromDefaultProfile: test.fromDefaultProfile ?? null },
@@ -387,6 +504,8 @@ try {
         submitted: test.prompt ? [test.prompt] : [],
         resumeEnv: direct ? null : test.resumeEnv === undefined ? test.session ?? null : test.resumeEnv,
         workspaceEnv: test.workspace ?? null,
+        // Content asserted above; here only the field's presence is pinned.
+        ...(test.warns === undefined ? {} : { warnings: JSON.parse(result.stdout).warnings }),
       })
       console.log(`PASS: ${label}`)
     } catch (error) {

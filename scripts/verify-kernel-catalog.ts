@@ -76,18 +76,23 @@ check('an uninstalled-but-well-formed DSH_TUI_BACKEND falls back to dsh, never t
 // The launcher marks what it read out of another backend's prefs
 // (RESUME_BACKEND_ENV); this boot may land elsewhere — an unregistered plugin id
 // falls back to dsh, an unset DSH_TUI_BACKEND follows the remembered kernel — and
-// the id must not follow it there.
-check('R2: a marked target is used when its source is the backend this boot landed on',
-  resolveResumeTarget({ sessionId: 'claude-1', sourceBackend: 'claude', backendChoice: 'claude' }).sessionId === 'claude-1')
-check('R2: a marked target is revoked, source reported, when the backends differ',
-  resolveResumeTarget({ sessionId: 'codex-1', sourceBackend: 'codex', backendChoice: 'dsh' }).sessionId === undefined
-    && resolveResumeTarget({ sessionId: 'codex-1', sourceBackend: 'codex', backendChoice: 'dsh' }).revokedFrom === 'codex'
-    && resolveResumeTarget({ sessionId: 'dsh-1', sourceBackend: 'dsh', backendChoice: 'claude' }).revokedFrom === 'dsh')
+// the id must not follow it there. Since B-2a the refusal is a boot failure, not a
+// cold start, so the shape carries "which backend it came from" plus whether the
+// refusal may be soft (safe-mode retry only); the deep matrix lives in
+// scripts/verify-resume-target.ts.
+const targetOf = (input: Parameters<typeof resolveResumeTarget>[0]) => resolveResumeTarget(input)
+const usable = targetOf({ sessionId: 'claude-1', sourceBackend: 'claude', backendChoice: 'claude' })
+check('R2: a marked target is usable when its source is the backend this boot landed on',
+  usable.kind === 'usable' && usable.sessionId === 'claude-1')
+const revoked = targetOf({ sessionId: 'codex-1', sourceBackend: 'codex', backendChoice: 'dsh' })
+check('R2: a marked target from another backend is revoked with its source, never usable',
+  revoked.kind === 'revoked' && revoked.from === 'codex' && revoked.fatal
+    && targetOf({ sessionId: 'dsh-1', sourceBackend: 'dsh', backendChoice: 'claude' }).kind === 'revoked')
 check('R2: an unmarked target (--resume <id>, a Config row) is never revoked here',
-  resolveResumeTarget({ sessionId: 'typed-1', backendChoice: 'dsh' }).sessionId === 'typed-1')
+  targetOf({ sessionId: 'typed-1', backendChoice: 'dsh' }).kind === 'usable')
 check('R2: a blank target is no target, marked or not',
-  resolveResumeTarget({ sessionId: '   ', sourceBackend: 'claude', backendChoice: 'dsh' }).sessionId === undefined
-    && resolveResumeTarget({ backendChoice: 'dsh' }).sessionId === undefined)
+  targetOf({ sessionId: '   ', sourceBackend: 'claude', backendChoice: 'dsh' }).kind === 'none'
+    && targetOf({ backendChoice: 'dsh' }).kind === 'none')
 
 const entries = kernelEntriesOf(backends)
 const entryOf = (id: string) => entries.find(entry => entry.id === id)
