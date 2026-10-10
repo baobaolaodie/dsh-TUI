@@ -20,6 +20,8 @@
  *      preset 段 → 卡片显示完整名 → 指针移开卡片消失。这一组钉的是 `Chat.tsx`
  *      落地页分支末尾那一行 `<TooltipLayer />`——删掉它 R1 必红（F-01 的守卫；
  *      verify-launchpad 的 S 组是孤立夹具自挂层，删 Chat 那一行那边照绿）。
+ *   S. 启动自动展开侧栏：启动页 /resume、/home、/jobs 打开整屏，Esc 返回
+ *      时输入框为空；选中会话后恢复侧栏路由与输入（fullscreen / inline / 窄屏）。
  *
  *
  * Run: node --import tsx/esm scripts/verify-launchpad-onboarding-chat.tsx
@@ -39,7 +41,7 @@ import { stringWidth } from '../src/ink/stringWidth.js'
 const { Terminal: XTerm } = xterm
 
 const [
-  { render, Box, ThemeProvider },
+  { render, Box, ThemeProvider, AlternateScreen },
   { Chat },
   { LOCAL_COMMANDS, completeCommands },
   { QuestionStore },
@@ -49,6 +51,7 @@ const [
   { noteBoundaryRecoveryRemount },
   { kernelEntriesOf },
   { listBackends },
+  { applySidePanelOpen, applySidePanelPanels, getSidePanelOpen, getSidePanelPanels },
 ] = await Promise.all([
   import('../src/ui.js'),
   import('../src/screens/Chat.js'),
@@ -60,6 +63,7 @@ const [
   import('../src/ink/update-overflow-guard.js'),
   import('../src/components/kernelCatalog.js'),
   import('../src/dsh-adapter/backend-registry.js'),
+  import('../src/tuiDisplayPrefs.js'),
 ])
 
 /** 内核目录：与真机组合根同源（`kernelEntriesOf(listBackends())`）——选择器那一屏
@@ -268,17 +272,19 @@ interface Flags {
   launchpadOnBoot?: boolean
   onboardingOnBoot?: boolean
   openHomeOnBoot?: boolean
+  columns?: number
 }
 
 async function mountChat(flags: Flags, over: Record<string, unknown> = {}, chatProps: Record<string, unknown> = {}) {
-  const term = new XTerm({ cols: COLS, rows: ROWS, scrollback: 0, allowProposedApi: true })
+  const columns = flags.columns ?? COLS
+  const term = new XTerm({ cols: columns, rows: ROWS, scrollback: 0, allowProposedApi: true })
   const stdout = new FakeStdout(term)
   const stdin = new FakeStdin()
   const { channel, notifications, calls } = makeChannel(over)
-  const instance = await render(
+  const node = (
     <ThemeProvider theme="dark">
       {/* 与真机同构：根是整屏尺寸（Chat 的每个整屏 early-return 都按整屏排版）。 */}
-      <Box width={COLS} height={ROWS} flexDirection="column">
+      <Box width={columns} height={ROWS} flexDirection="column">
         <Chat
           channel={channel as never}
           questionStore={new QuestionStore()}
@@ -294,7 +300,10 @@ async function mountChat(flags: Flags, over: Record<string, unknown> = {}, chatP
           {...chatProps}
         />
       </Box>
-    </ThemeProvider>,
+    </ThemeProvider>
+  )
+  const instance = await render(
+    chatProps.fullscreen === true ? <AlternateScreen mouseTracking>{node}</AlternateScreen> : node,
     { stdin: stdin as never, stdout: stdout as never, stderr: new FakeStderr() as never, exitOnCtrlC: false, patchConsole: false },
   )
   /** 当前屏幕（xterm 视口）。用视口而不是 painted 流的最后一帧：ink 会分块写，
@@ -325,13 +334,9 @@ const LAUNCHPAD_MARK = '说点什么，或输入 /' + ' 看命令…'
 const WIZARD_MARK = '第 1 / 4 步'
 /** 帮助盖屏的标记：HelpMenu 快捷键列头与命令区标题。 */
 const HELP_MARK = '? 查看本帮助'
-/**
- * 模型选择器「展开」的双标记：套件前面的用例（D2/Q1）切过模型 →
- * modelRecents 落盘 → 之后 /model 首屏可能是「最近使用」分组视图而非
- * 模型列表（Q1 同款口径）。
- */
+/** 最近使用标签标记 /model 浮层；模型名也会出现在启动页参数行。 */
 const modelOpen = (screen: string): boolean =>
-  screen.includes('deepseek-reasoner') || screen.includes('最近使用')
+  screen.includes('最近使用')
 const HELP_COMMANDS_MARK = '命令：'
 /**
  * 参数行（值 + 双空格·双空格 分隔）里某段的终端坐标：浮层（选择器/滑杆）
@@ -390,10 +395,10 @@ const heroIdentical = (before: readonly string[], after: readonly string[]): boo
     await settled(() => chat.screen().includes(WIZARD_MARK) && !chat.screen().includes('说点什么')),
     chat.screen().slice(0, 200))
   // Esc 跳过向导后回到落地页。
-  // 草稿 '/setup' 还在输入框里（前缀 ⌘）——落地页状态原样保留。
+  // 已执行的 /setup 清空输入；向导关闭后仍回到落地页。
   await chat.send('\x1b')
-  check('A2b 向导 Esc 跳过回到落地页（不是对话页；草稿 /setup 原样在）',
-    await settled(() => chat.screen().includes('⌘') && chat.screen().includes('/setup')
+  check('A2b 向导 Esc 跳过回到落地页（输入框为空）',
+    await settled(() => chat.screen().includes(LAUNCHPAD_MARK) && !chat.screen().includes('⌘')
       && !chat.screen().includes(WIZARD_MARK)),
     chat.screen().slice(0, 200))
   await chat.unmount()
@@ -429,13 +434,14 @@ const heroIdentical = (before: readonly string[], after: readonly string[]): boo
   await chat.send('\r')
   // /help 的帮助浮层盖在启动页之上，不切换到对话页，也不触发 submit。
   check('B6 命令行走命令表：不触发 channel.submit（本地命令不发模型）',
-    await settled(() => chat.screen().includes(HELP_MARK) && chat.screen().includes('⌘'))
+    await settled(() => chat.screen().includes(HELP_MARK) && chat.screen().includes(LAUNCHPAD_MARK)
+      && !chat.screen().includes('⌘'))
       && !chat.calls.some(c => c.startsWith('submit:')),
     chat.screen().slice(0, 240))
   await chat.send('\x1b')
-  check('B6b /help 盖屏 Esc → 回到启动页（草稿 /help 原样在、聊天页不上屏）',
+  check('B6b /help 盖屏 Esc → 回到启动页（输入框为空、聊天页不上屏）',
     await settled(() => !chat.screen().includes(HELP_MARK)
-      && chat.screen().includes('⌘') && chat.screen().includes('/help')),
+      && chat.screen().includes(LAUNCHPAD_MARK) && !chat.screen().includes('⌘')),
     chat.screen().slice(0, 240))
   await chat.unmount()
 }
@@ -497,7 +503,11 @@ const heroIdentical = (before: readonly string[], after: readonly string[]): boo
   await chat.send('\r')
   check('D1 模型段点开 /model 选择器：盖在落地页之上（两屏同帧可见、键盘可达）',
     await settled(() => chat.screen().includes('说点什么')
-      && chat.screen().includes('deepseek-reasoner')), chat.screen().slice(0, 300))
+      && modelOpen(chat.screen())), chat.screen().slice(0, 300))
+  await chat.send('\t') // 最近使用 → DeepSeek 提供商，浏览完整模型列表。
+  check('D1b Tab 切到提供商模型列表，启动页仍保持可见',
+    await settled(() => chat.screen().includes('deepseek-reasoner')
+      && chat.screen().includes('说点什么')))
   // ↑/↓ 走到另一个模型，Enter 切换：值就地更新、仍停在落地页。
   await chat.send('\u001b[B')
   await chat.send('\r')
@@ -660,7 +670,8 @@ const heroIdentical = (before: readonly string[], after: readonly string[]): boo
   await chat.type('/plan')
   await chat.send('\r')
   check('N1 registry 命令 /plan 走命令表：plan 选择器盖上来、绝不 submit',
-    await settled(() => chat.screen().includes('计划模式') && chat.screen().includes('⌘'))
+    await settled(() => chat.screen().includes('计划模式') && chat.screen().includes(LAUNCHPAD_MARK)
+      && !chat.screen().includes('⌘'))
     && !chat.calls.some(c => c.startsWith('submit:')),
     JSON.stringify(chat.calls))
   await chat.unmount()
@@ -686,11 +697,102 @@ const heroIdentical = (before: readonly string[], after: readonly string[]): boo
   check('N3 输入 / 弹出命令补全面板（/pre 过滤出 preset）',
     await settled(() => chat.screen().includes('preset')), chat.screen().slice(0, 200))
   await chat.send('\r')
-  check('N4 面板选中即执行：/preset 选择器盖在落地页之上（无 submit）',
-    await settled(() => chat.screen().includes('PTC') && chat.screen().includes('⌘'))
+  check('N4 Enter 执行并清空输入：/preset 选择器盖在落地页之上（无 submit）',
+    await settled(() => chat.screen().includes('PTC') && chat.screen().includes(LAUNCHPAD_MARK)
+      && !chat.screen().includes('⌘'))
     && !chat.calls.some(c => c.startsWith('submit:')),
     JSON.stringify(chat.calls))
   await chat.unmount()
+}
+{
+  const chat = await mountChat({ launchpadOnBoot: true }, {}, { fullscreen: true })
+  try {
+    await settle(() => chat.screen().includes('说点什么'))
+    await chat.type('/pre')
+    await chat.click('preset')
+    check('N4a 点击命令与 Enter 一致：执行 /preset 并清空输入',
+      await settled(() => chat.screen().includes('PTC') && !chat.screen().includes('⌘'))
+        && !chat.calls.some(call => call.startsWith('submit:')),
+      chat.screen())
+    await chat.send('\x1b')
+    check('N4b 点击执行后关闭选择器回到空输入的启动页',
+      await settled(() => chat.screen().includes('说点什么') && !chat.screen().includes('/pre')
+        && !chat.screen().includes('PTC')),
+      chat.screen())
+  } finally {
+    await chat.unmount()
+  }
+}
+{
+  for (const [mode, fullscreen, columns] of [
+    ['fullscreen', true, 120], ['inline', false, 120], ['narrow', true, 60],
+  ] as const) {
+    const chat = await mountChat({ launchpadOnBoot: true, columns }, {}, { fullscreen })
+    try {
+      await settle(() => chat.screen().includes('说点什么'))
+      await chat.type('/pre')
+      await chat.send('\t')
+      check(`N5[${mode}] Tab 补全 /preset，保留启动页且不执行命令`,
+        await settled(() => chat.screen().includes('/preset') && chat.screen().includes('⌘')
+          && !chat.screen().includes('PTC'))
+          && !chat.calls.some(call => call.startsWith('submit:')),
+        chat.screen())
+      await chat.send('\r')
+      check(`N6[${mode}] Tab 后 Enter 执行 /preset 并清空输入`,
+        await settled(() => chat.screen().includes('PTC') && !chat.screen().includes('⌘'))
+          && !chat.calls.some(call => call.startsWith('submit:')),
+        chat.screen())
+      await chat.send('\x1b')
+      check(`N7[${mode}] 关闭选择器后启动页输入框为空`,
+        await settled(() => chat.screen().includes('说点什么') && !chat.screen().includes('/preset')
+          && !chat.screen().includes('⌘') && !chat.screen().includes('PTC')),
+        chat.screen())
+      await chat.type('/pre')
+      check(`N8[${mode}] 清空后再次输入同一前缀仍显示补全面板`,
+        await settled(() => chat.screen().includes('/pre') && chat.screen().includes('preset')
+          && chat.screen().includes('⌘') && !chat.screen().includes('PTC')),
+        chat.screen())
+      await chat.send('\r')
+      await settle(() => chat.screen().includes('PTC') && !chat.screen().includes('⌘'))
+      await chat.send('\x1b')
+      await settle(() => chat.screen().includes('说点什么') && !chat.screen().includes('PTC')
+        && !chat.screen().includes('⌘'))
+      await chat.type('fresh')
+      await chat.send('\r')
+      check(`N9[${mode}] 命令执行后的下一条消息原样发送一次`,
+        await settled(() => chat.calls.includes('submit:fresh'))
+          && chat.calls.filter(call => call.startsWith('submit:')).length === 1,
+        JSON.stringify(chat.calls))
+    } finally {
+      await chat.unmount()
+    }
+  }
+}
+{
+  const chat = await mountChat({ launchpadOnBoot: true }, {
+    commandCompletions: (input: string) => completeCommands(input, LOCAL_COMMANDS, path =>
+      path.join(' ') === 'preset' ? [{ name: 'ptc', description: 'PTC' }] : []),
+  }, { fullscreen: true })
+  try {
+    await settle(() => chat.screen().includes('说点什么'))
+    await chat.type('/pre')
+    await chat.send('\t')
+    await chat.type('pt')
+    await chat.send('\t')
+    check('N10 Tab 可逐级补全命令与参数，完整路径留在输入框且不执行',
+      await settled(() => chat.screen().includes('/preset ptc') && chat.screen().includes('⌘'))
+        && chat.calls.length === 0,
+      chat.screen())
+    await chat.send('\r')
+    check('N11 Enter 按完整参数执行并清空输入，仍保留启动页',
+      await settled(() => chat.calls.includes('preset:ptc') && chat.screen().includes(LAUNCHPAD_MARK)
+        && !chat.screen().includes('⌘'))
+        && chat.calls.filter(call => call.startsWith('preset:')).length === 1
+        && !chat.calls.some(call => call.startsWith('submit:')),
+      JSON.stringify(chat.calls))
+  } finally {
+    await chat.unmount()
+  }
 }
 
 // ── P. 选择器的空白关闭与段间切换 ──
@@ -717,7 +819,9 @@ const heroIdentical = (before: readonly string[], after: readonly string[]): boo
   await chat.send('\r')
   check('P2a 切换参数段前模型选择器确实展开',
     await settled(() => modelOpen(chat.screen())), chat.screen().slice(0, 240))
-  await chat.click('High') // 参数行的思考深度段
+  const effortCell = findParamCell(chat.term, 'High')
+  if (effortCell === null) throw new Error('effort param segment not on screen')
+  await chat.send(`\u001b[<0;${effortCell.col};${effortCell.row}M\u001b[<0;${effortCell.col};${effortCell.row}m`)
   check('P2 开着模型选择器时点思考深度段：切成 effort 滑杆（且只有一个选择器在屏）',
     await settled(() => !modelOpen(chat.screen())
       && chat.screen().includes('Max') && chat.screen().includes('说点什么')),
@@ -872,18 +976,16 @@ const heroIdentical = (before: readonly string[], after: readonly string[]): boo
   await chat.type('/model')
   await settled(() => chat.screen().includes('model'))
   await chat.send('\r') // 面板选中 /model → runCommand（不是 submit）
-  // 注意：query 还是 '/model'，所以输入行是 ⌘ 前缀（占位不显示）——「落地页
-  // 还在」的判据用输入卡片（⌘ /model），不是占位文案。选择器首屏可能是分组
-  // 视图（本套件前面的用例写过「最近使用」名册）也可能是模型列表，两个标记
-  // 任一在屏即算选择器真的盖了上来。
+  // 命令已执行，输入框恢复占位文案，最近使用标签标记选择器已展开。
   check('Q1 面板执行 /model：选择器盖在落地页之上（无 submit）',
-    await settled(() => (chat.screen().includes('deepseek-reasoner') || chat.screen().includes('最近使用'))
-      && chat.screen().includes('⌘') && chat.screen().includes('/model'))
+    await settled(() => modelOpen(chat.screen())
+      && chat.screen().includes(LAUNCHPAD_MARK) && !chat.screen().includes('⌘'))
       && !chat.calls.some(c => c.startsWith('submit:')),
     chat.screen().slice(0, 240))
   await chat.send('\x1b')
-  check('Q1b 选择器 Esc → 回到启动页（不是对话页；草稿 /model 原样在）',
-    await settled(() => chat.screen().includes('⌘') && chat.screen().includes('/model')
+  check('Q1b 选择器 Esc → 回到启动页（输入框为空）',
+    await settled(() => chat.screen().includes(LAUNCHPAD_MARK) && !chat.screen().includes('⌘')
+      && !chat.screen().includes('/model')
       && !chat.screen().includes('deepseek-reasoner') && !chat.screen().includes('最近使用')),
     chat.screen().slice(0, 240))
   {
@@ -1317,6 +1419,83 @@ const AC4_CUT_PRESET = 'Standard (Git Bash'
     `cut=${cutOnScreen} card=${cardShown} picker=${pickerOpen} cardStill=${cardStillThere} `
       + `:: ${chat.screen().slice(0, 260)}`)
   await chat.unmount()
+}
+
+// ── S. 启动自动展开侧栏时，落地页仍走整屏命令路由 ──
+{
+  const previousOpen = getSidePanelOpen()
+  const previousPanels = getSidePanelPanels()
+  const job = {
+    id: 'boot-job', kind: 'bash', label: 'boot-sidebar-job', status: 'running',
+    startedAt: Date.now(), outputLines: [],
+  }
+  try {
+    applySidePanelOpen(true)
+    applySidePanelPanels('workspace,jobs')
+    for (const [mode, fullscreen, columns] of [
+      ['fullscreen', true, 120], ['inline', false, 120], ['narrow', true, 80],
+    ] as const) {
+      for (const command of ['resume', 'home', 'jobs']) {
+        const chat = await mountChat({ launchpadOnBoot: true, columns }, { backgroundJobs: [job] }, { fullscreen })
+        try {
+          await settle(() => chat.screen().includes('说点什么'))
+          await chat.type('/' + command)
+          await chat.send('\r')
+          const marker = command === 'jobs' ? job.label : '新建会话'
+          const opened = await settled(() => chat.screen().includes(marker) && !chat.screen().includes('⌘'))
+          check(`S1[${mode} /${command}] 自动展开侧栏时，启动页命令打开可见整屏`,
+            opened && !chat.calls.some(call => call.startsWith('submit:')), chat.screen())
+          if (opened) {
+            await chat.send('\x1b')
+            check(`S2[${mode} /${command}] Esc 返回启动页，命令已清空且保留侧栏设置`,
+              await settled(() => chat.screen().includes('说点什么') && !chat.screen().includes('⌘')
+                && !chat.screen().includes('/' + command)
+                && !chat.screen().includes(marker)) && getSidePanelOpen(), chat.screen())
+          }
+        } finally {
+          await chat.unmount()
+        }
+      }
+    }
+
+    const summary = {
+      id: 'boot-resume', kind: { kind: 'root' }, title: { text: 'boot-resume-session', source: 'renamed' },
+      cwd: 'C:/code/demo-project', createdAt: 1, updatedAt: 9, bytes: 10, hasPrompt: true,
+    }
+    const calls: string[] = []
+    const chat = await mountChat({ launchpadOnBoot: true }, {
+      cachedSessions: () => [summary], listSessions: async () => [summary],
+      listWorkspaceRegistry: async () => [], backgroundJobs: [job],
+      resumeTo: async (id: string) => { calls.push(id); return { ok: true } },
+    }, { fullscreen: true })
+    try {
+      await settle(() => chat.screen().includes('说点什么'))
+      await chat.type('/resume')
+      await chat.send('\r')
+      const opened = await settled(() => chat.screen().includes(summary.title.text) && !chat.screen().includes('⌘'))
+      check('S3 启动页 /resume 展示可选择的历史会话', opened, chat.screen())
+      if (opened) {
+        await chat.click(summary.title.text)
+        check('S4 选择会话后进入聊天，侧栏仍按启动设置展开',
+          await settled(() => calls.includes(summary.id) && (findCell(chat.term, '当前工作区')?.col ?? 0) > 64),
+          chat.screen())
+        await chat.type('/jobs')
+        await chat.send('\r')
+        check('S5 聊天页 /jobs 恢复侧栏路由',
+          await settled(() => (findCell(chat.term, job.label)?.col ?? 0) > 64), chat.screen())
+        await chat.send('\x1b')
+        await chat.type('after-resume')
+        await chat.send('\r')
+        check('S6 侧栏 Esc 交还输入焦点，恢复后的会话可以继续发送',
+          await settled(() => chat.calls.includes('submit:after-resume')) && getSidePanelOpen(), JSON.stringify(chat.calls))
+      }
+    } finally {
+      await chat.unmount()
+    }
+  } finally {
+    applySidePanelOpen(previousOpen)
+    applySidePanelPanels(previousPanels)
+  }
 }
 
 if (failures === 0) console.log(`\nverify-launchpad-onboarding-chat: ${checks} checks, all passed`)

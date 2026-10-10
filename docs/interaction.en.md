@@ -77,16 +77,16 @@ The startup **launchpad** and the **first-run wizard** each own the keyboard; bo
 results back to the chat screen and add no new behavior.
 
 - **Launchpad**: printable input goes into the input box (the prefix turns from `❯` to `⌘` when the line
-  starts with `/`), `Backspace`/`Delete`/`←`/`→`/`Home`/`End` edit it; the caret is an **inverse block
-  sitting on the current character** (inverse on that one character; an inverse blank cell at end of
-  line — a theme that declares the `cursor` key paints a solid fill with a contrasting glyph instead,
-  see [Themes](themes.en.md)), blinking is a pure style toggle (inverse ↔ regular, ~550ms per phase)
-  and never occupies an extra cell or eats a character; `Alt+R` continues the most recent session
+  starts with `/`), `Backspace`/`Delete`/`←`/`→`/`Home`/`End` edit it; the **native terminal cursor**
+  inherits your terminal's shape, color, blinking, and enabled animation or trail effects.
+  Cursor movement never adds a cell or eats a character. Static rendering retains the
+  [theme-painted fallback](themes.en.md); `Alt+R` continues the most recent session
   (= the first entry row slot, bound only on this screen, no-op when there is nothing to continue,
   remappable in `/settings`);
   a leading `/` opens the
   **command palette** (the same data source and component as the chat composer: `↑`/`↓` move the selection,
-  `Enter`/`Tab`/click **run** the selected command, `Esc` dismisses only the palette and keeps the draft);
+  `Tab` **completes** the selected command in the input box with the caret at the end,
+  `Enter`/click **run** it and clear the input, `Esc` dismisses only the palette and keeps the draft);
   with the palette dismissed, `Enter` **sends** the line straight away (a leading `/` line — including
   plugin/registry commands — goes through the chat page's merged command table and never reaches the model);
   `↑`/`↓`/`Tab` walk the focus ring (input box → the four param segments under the box → the quick
@@ -331,6 +331,7 @@ The four commands and the `⌸` entry at the head of the prompt row all open the
 
 - The workspace rail (the durable registry) on the left.
 - The sessions of the selected workspace on the right, every row carrying that session's live state.
+- Focus starts on the most recently used session in the current workspace, ready for `Enter`; with no history, it starts on the new-session card.
 
 They used to be three implementations that grew apart — a session browser, an agent view,
 a workspace home — each listing the same session with its own selection model and its own
@@ -501,6 +502,14 @@ A full-screen scene (no scrollback pollution) over the whole session timeline:
 
 ### Model and preset
 
+`/model` shows the model list and the highlighted model's reasoning effort on one page. DSH also has provider tabs, with **Recently used** first; opening records the current model as the latest use and moves it to the front without duplicates, initially focusing it when it is still in the catalog.
+Codex and Claude show their complete model catalogs directly, without provider or recents tabs; the current model is initially focused when the catalog loads.
+In DSH, `Tab` selects the next provider and `Shift+Tab` the previous one, wrapping at either end; all backends use `↑/↓` to select a model and `←/→` to adjust its effort.
+The native terminal cursor follows the **region you used last**: `Tab`/`Shift+Tab` moves to the provider tab, `↑/↓` to the focused model's `❯`, and `←/→` to the effort level. Movement shows the terminal's original cursor shape, blinking, and enabled animation or trail effects; the cursor hides after **0.5 seconds at rest**, then reappears and restarts the timer on the next movement. Ordinary repaints do not extend this window; text input carets stay visible, and accessibility mode retains visible focus anchors. Clipped tabs or unavailable effort levels fall back to the model row. Inverse tabs and the `❯` pointer always remain visible, including in static rendering.
+Confirmation submits only explicit effort drafts. Changing only the model leaves saved-effort validation to the backend; candidate defaults do not become new preferences. While the picker is open, `Ctrl+B` and `Alt+Z` still control the sidebar, and picker navigation stays with the model picker.
+`Enter` applies the model and effort; `Esc` cancels the draft. Shortcuts sit below the title, and a separate effort heading and level strip sit below the models, with the `←/→` hint beside the effort heading. Selectable levels use the body text color and the current level is highlighted. DSH, Claude, and Codex use the terminal background while covering the text underneath.
+Click tabs, models, and effort levels, then click **select** or **cancel** below the title; the wheel moves through the model list. When space above the input is tight, navigation hints, model descriptions and neighboring models are omitted, effort collapses to one row, and Select / Cancel stay at the bottom. With only two rows, effort is hidden too, keeping the focused model and actions visible.
+
 `/model` switches through a session fork at the end of current history, because DSH has no in-place model-switch API. The old session remains in `/resume`.
 
 - A session nobody has typed into records no branch: switching models there yields an independent session with no `parentSession` (inheriting the same session-scaffolding prefix), so the first real prompt you send still triggers automatic session-title generation. A session that already holds a conversation keeps its lineage as before.
@@ -614,8 +623,9 @@ In inline mode, the terminal emulator owns native scrollback and selection.
   transcript behind an open overlay. Moves the cursor in the trajectory scene (±3 rows per
   notch on the timeline, ±1 in hotspot; scrolls the detail while expanded). Walks the
   focused row in /settings.
-- **Drag** — Select text, copy on release, then clear the selection; a "Copied N characters"
-  notice pops up. With `dsh-tui.scrollGutter: scrollbar`, the right-edge scrollbar is a drag
+- **Drag** — Select text and copy on release, keeping the selection; a "Copied N characters"
+  notice pops up. A new selection replaces the retained one. With
+  `dsh-tui.scrollGutter: scrollbar`, the right-edge scrollbar is a drag
   target: an unmodified left drag scrubs the transcript to the track position (same mapping
   as a track click — drag to point), while `Shift`/`Alt`/`Ctrl`+drag still selects text (the
   drag protocol opens only for unmodified left presses).
@@ -852,6 +862,16 @@ Additional forms:
   path (the same handler, real events) and confirms via event/readback. When neither is
   available, it fails loudly instead of sending the input to the model.
 - Exiting plan mode restores the pre-plan atoms first, then the durable preset you were on before plan mode (while the registry still offers it).
+- The DSH `/permission` pick is persisted the same way at `~/.dsh-tui/permission.json`: every durable
+  preset switch teaches it (picker, typed command, Shift+Tab static mode, or a switch the official
+  command performed on its own), and a session that never customized its permission planes starts on
+  the remembered preset — applied through the same official switch path. "Never customized" means the
+  USER never touched it: the composition itself writes its default preset into every fresh session at
+  creation (`dsh-permission-presets`' `session/created` → `pinInitialPermission`), and those events are
+  not a user choice — only a session that ran a turn, or whose identity is not the composition default,
+  keeps its own planes. Plan-mode transients are excluded (entering plan keeps the pre-plan memory; the
+  exit restore teaches it again), `DSH_PERMISSION_MODE` is this launch's initial permission plane and
+  outranks the file when set, and an identity the mounted roster no longer offers is skipped.
 - When the registry service is absent, TUI uses its legacy three-row compatibility roster; a mounted but broken service is unavailable and fails closed.
 - Non-DSH backends (Claude) that declare native permission modes answer
   `/permission` with that backend's own modes: `default` (ask before each risky

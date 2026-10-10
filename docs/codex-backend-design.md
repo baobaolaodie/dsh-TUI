@@ -249,6 +249,17 @@ export function spawnTransport(options: TransportOptions): Transport
   `CODEX_CI`、`CODEX_SANDBOX`、`CODEX_SANDBOX_NETWORK_DISABLED`、`CODEX_PERMISSION_PROFILE`、
   `CODEX_APPLY_PATCH_PRESERVE_LINE_ENDINGS`、`CODEX_INTERNAL_ORIGINATOR_OVERRIDE`、
   `CODEX_MANAGED_BY_*`、`CODEX_MANAGED_PACKAGE_ROOT` 与前缀 `CODEX_NETWORK_PROXY_`。
+- provider 密钥注入（`backend.ts`）：用户自己 config.toml 里 provider 的 `env_key`（如
+  `DEEPSEEK_API_KEY`）若未随启动环境导出、但 DSH 凭据库（`$DSH_HOME/.credentials.yaml`，经
+  `BackendHost.tokenStore` 同一文件视图）声明了该 ref，则在 `config/read` 后把值注入子进程环境并
+  重取 hub——存储的 key 无需 shell 导出即可用。key 记入 `injectedEnvKeys` 参与 hub 指纹，无 key 的
+  hub 不会被需要 key 的会话复用；值只进 spawn 管道，不进日志/提示/事件。两边都拿不到时**不拦启动**：
+  拒绝发生在 Codex 自己的每个回合，运行时只把原因作为 start notice 报一次（点名 provider 与变量名，
+  不含值），用户可导出变量、写入凭据库或改用渠道。
+- 凭据库读取顺序（`utils/credentials.ts`、`backends/shared/channel-tokens.ts`）：先活动 home 的
+  `.credentials.yaml`（`$DSH_HOME`，未设置时为 `~/.dsh`），再回退默认 `~/.dsh/.credentials.yaml`——
+  `DSH_HOME` 覆盖不再让写在文档位置（README 与 `/doctor` 都点名 `~/.dsh`）的 key 失联。**写只进活动
+  home**，回退只影响读；启动器 `bin/dsh-tui.js` 的 doctor 镜像同一顺序，两处不许分叉。
 
 ### 5.2 `rpc/client.ts`
 
@@ -729,8 +740,11 @@ thread 时 `thread/resume` 返回 `-32600`，message `thread <id> already has an
   设计后端命令前先查重；完整对照见 §8.6。
 - `/btw`（`sideQuery`）：`thread/fork{threadId, ephemeral:true}` → `turn/start{input, approvalPolicy:'never', sandboxPolicy: read-only, developerInstructions 附加"只回答，不使用工具"}` →
   收集 agentMessage delta 为 `onText` → 完成后 `thread/unsubscribe`；`signal` 中断 →
-  `turn/interrupt`。**C0 已验证**（V12）：ephemeral fork（`path:null`）带原上下文可跑回合，不出现在
-  `thread/list`、不写 rollout 文件。`/recap` 同路径（固定提示词）。
+  `turn/interrupt`。fork 不带 `deferGoalContinuation`：0.162 起 app-server 拒绝它与 `ephemeral`
+  组合，且 ephemeral fork 本就不延续目标。fork 报 "no rollout found"（会话还没落过盘，
+  例如新会话首轮未完成）时回退 `thread/start{ephemeral:true}` 新线程作答——该状态下
+  对话本就为空，无上下文可携带。**C0 已验证**（V12）：ephemeral fork（`path:null`）带原
+  上下文可跑回合，不出现在 `thread/list`、不写 rollout 文件。`/recap` 同路径（固定提示词）。
 - hooks：`hook/started`/`hook/completed` → info notice（`key: hook:<run.id>`，完成时替换为
   "hook <eventName> 完成/失败（耗时）"）；`hookPrompt` item → `user.message{source:'injected', label:'hook'}`。
 

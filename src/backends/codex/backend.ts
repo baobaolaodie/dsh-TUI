@@ -97,6 +97,33 @@ export async function prepareCodexRuntime(target: OpenTarget, host: CodexBackend
       try { config = rec(rec(await hub.call(CLIENT.configRead, { includeLayers: false, cwd }))?.config) }
       catch { host.debug('codex: config/read failed; managed injection disabled') }
     }
+    // A provider in the user's own config can take its credential from an
+    // environment key (`env_key`, e.g. DEEPSEEK_API_KEY). When the launching
+    // environment does not export it but the DSH credential store declares
+    // it, inject it into the child: a stored key then works without an
+    // exported variable. The key joins `injectedEnvKeys`, so the hub
+    // fingerprint separates keyless and keyed children and a keyless hub is
+    // never reused for a session whose provider needs the key. A key nothing
+    // can supply is not a startup failure — Codex itself rejects each turn —
+    // so it is remembered and reported once at start instead.
+    let missingProviderEnvKey: { readonly provider: string; readonly env: string } | undefined
+    if (launch.provider === undefined) {
+      const providerId = str(config?.model_provider) || 'openai'
+      const providerEnvKey = str(rec(rec(config?.model_providers)?.[providerId])?.env_key)
+      if (providerEnvKey !== undefined && providerEnvKey !== '' && (settings.env[providerEnvKey] ?? '') === '') {
+        const stored = host.tokenStore?.read(providerEnvKey)
+        if (stored !== undefined) {
+          release()
+          settings = { ...settings, env: { ...settings.env, [providerEnvKey]: stored }, injectedEnvKeys: [...(settings.injectedEnvKeys ?? []), providerEnvKey] }
+          hub = acquireCodexHub(settings, deps)
+          release = hub.retain()
+          await hub.ready
+          host.debug(`codex: provider env ${providerEnvKey} resolved from the DSH credential store`)
+        } else {
+          missingProviderEnvKey = { provider: providerId, env: providerEnvKey }
+        }
+      }
+    }
     const route = codexAuthRoute(config, env, launch.provider !== undefined)
     const externalAllowed = settings.credentialMode === 'external' && route.firstParty
     if (settings.credentialMode === 'external' && !externalAllowed) {
@@ -117,9 +144,13 @@ export async function prepareCodexRuntime(target: OpenTarget, host: CodexBackend
       debug: host.debug,
     })
     await auth.start()
-    let startNotices: readonly string[] | undefined
+    // Codex rejects every turn of a provider whose env key is unset: name the
+    // reason once at start instead of leaving a bare turn failure behind.
+    let startNotices: readonly string[] | undefined = missingProviderEnvKey === undefined || route.firstParty
+      ? undefined
+      : [t('codex-provider-env-key-missing', { provider: missingProviderEnvKey.provider, env: missingProviderEnvKey.env })]
     if (auth.managedFailed) {
-      startNotices = [t('codex-auth-login-failed')]
+      startNotices = [...(startNotices ?? []), t('codex-auth-login-failed')]
       // Only an already-observed startup failure takes this path. No logout:
       // a different process starts clean on the user's native credentials.
       release()

@@ -3,17 +3,18 @@ import { t, getLang, setLang, isLang, writeLangPref, readLangPref, subscribeLang
 import { checkForTuiUpdate, installedTuiVersion } from '../update.js'
 import { installedKernelVersion } from '../dsh-adapter/contract.js'
 import { readThemePref } from '../themePrefs.js'
-import { readPresetPref } from '../presetPrefs.js'
+import { presetOverrideFromEnv, readPresetPref } from '../presetPrefs.js'
 import { readModelPref } from '../modelPrefs.js'
 import { readActivityFrames } from '../activityPrefs.js'
 import { envThemeOverride } from '../components/design-system/ThemeProvider.js'
 import { resolveBrand, setActiveBrand } from '../branding.js'
 import { hasPath } from '../dsh-adapter/settingsEditor.js'
 import { planReload, type ReloadKind } from '../reload.js'
-import { AlternateScreen, Box, Image, Text, useInput, ScrollBox, type ScrollBoxHandle, useTheme, useTerminalSize } from '../ui.js'
+import { AlternateScreen, Box, Image, Text, InputCaret, useInput, ScrollBox, type ScrollBoxHandle, useTheme, useTerminalSize } from '../ui.js'
 import * as tuiKit from '../ui.js'
 import { usePageInset } from '../components/PageMargin.js'
 import { POINTER } from '../terminal-utils/figures.js'
+import { previousCodePoint } from '../components/AgentMessageComposer.js'
 import { isPlainReturnInput } from '../utils/modifiers.js'
 import { actionMatches, effectiveComboDisplay, primaryComboString } from '../utils/keymap.js'
 import { formatTokens } from '../terminal-utils/format.js'
@@ -22,12 +23,6 @@ import { homeDir } from '../utils/paths.js'
 import { execFileNoThrow } from '../utils/execFileNoThrow.js'
 import type { LlmModelInfo, LlmProviderInfo } from '../adapter/ports/channel-view.js'
 import { cleanRenderText, cleanScalarText } from '../dsh-adapter/sanitize.js'
-import {
-  deriveModelGroups,
-  modelPickerLanding,
-  recentCatalogModels,
-  RECENTS_GROUP_PROVIDER,
-} from '../modelGroups.js'
 import { readModelRecents, recordModelUse, type ModelRecentsRef } from '../modelRecents.js'
 import { WORKING_GATE_NOTICES } from '../commands.js'
 import type { ChannelUi as Channel } from '../adapter/channel/ui-policy.js'
@@ -51,6 +46,7 @@ import type { TuiThemeHost } from '../dsh-adapter/themes.js'
 import type { TuiRewindMode } from '../dsh-adapter/extension-events.js'
 import { runOAuthLogin, runProviderWizard } from '../dsh-adapter/providerWizard.js'
 import { useKernelPicker } from './chat/useKernelPicker.js'
+import { useModelPicker } from './chat/useModelPicker.js'
 import { useBackendChannels } from './chat/useBackendChannels.js'
 import { backendModeStatus as modeStatus, backendPermissionCommand, parseMcpCommand } from './chat/backendCommands.js'
 import { PermissionStore, type PermissionPanelSource } from '../channel/permissions.js'
@@ -126,7 +122,7 @@ import { PermissionsPicker } from '../components/PermissionsPicker.js'
 import { ModePicker } from '../components/ModePicker.js'
 import { KernelPicker } from '../components/KernelPicker.js'
 import { SdkInstallWizard, type SdkInstallPhase } from '../components/SdkInstallWizard.js'
-import type { SdkInstaller, SdkInstallTarget } from '../agent/backend.js'
+import type { SdkInstaller, SdkInstallSurface } from '../agent/backend.js'
 import { ChannelPicker } from '../components/ChannelPicker.js'
 import type { KernelEntry, KernelStatus } from '../components/kernelCatalog.js'
 import type { KernelBackendId } from '../kernelPrefs.js'
@@ -171,8 +167,6 @@ import { extendTrajectory, projectWave, type TrajBuild } from '../dsh-adapter/tr
 import { miniWakeWidth } from '../components/trajectory/MiniWake.js'
 import { readTrajectorySeen, writeTrajectorySeen } from '../trajectoryPrefs.js'
 import type { RawTrajEvent as SessionEvent } from '../adapter/ports/channel-view.js'
-import { LoadingState } from '../components/design-system/LoadingState.js'
-import { Pane } from '../components/design-system/Pane.js'
 import { loadHistory, type HistoryEntry } from '../history.js'
 import { formatLoadedContextReport } from '../utils/loaded-context.js'
 import {
@@ -390,10 +384,7 @@ export function Chat({
   onRestartFreshSession,
   onProbeKernels,
   kernelEntries = EMPTY_KERNEL_ENTRIES,
-  onResolveSdkInstallTarget,
-  onStartSdkInstall,
-  onCheckPnpm,
-  sdkInstallPinned,
+  onResolveSdkInstall,
   kernelPinned,
   fullscreen = false,
   trajectorySeen: trajectorySeenProp,
@@ -465,16 +456,16 @@ export function Chat({
    */
   kernelEntries?: readonly KernelEntry[]
   /**
-   * SDK 安装向导（组合根注入，同上不 import 具体后端）。resolveTarget 同步
-   * 快（argv + 文件系统判定）；start 在 profile 目录跑 `pnpm add`，返回可
-   * 取消的句柄；checkPnpm 是确认后的预检。与 {@link sdkInstallPinned} 齐
-   * 备时向导可用，缺一则「未安装」行保持死路提示。
+   * SDK 安装向导（组合根注入，同上不 import 具体后端）：**按后端 id 现查安装面**——
+   * 清单声明"装什么、用哪个执行器"，宿主查表给出动作（resolveTarget 同步、只读
+   * argv + 文件系统；start 在 profile 目录跑 `pnpm add` 并返回可取消句柄；
+   * preflight 是确认后的预检）。
+   *
+   * 返回 undefined＝该后端没有安装面（没声明配方，或配方的执行器不是本宿主实现的），
+   * 「未安装」行保持死路提示。按 id 查而不是开局定一份：行上的「可装」与这里查的是
+   * 同一个派生事实，用户点哪行就装哪行（Stage B / §6 第 12 条）。
    */
-  onResolveSdkInstallTarget?: () => SdkInstallTarget
-  onStartSdkInstall?: (dir: string) => SdkInstaller
-  onCheckPnpm?: () => Promise<boolean>
-  /** 向导显示与手动兜底命令用的安装目标（`@anthropic-ai/claude-agent-sdk@<pin>`）。 */
-  sdkInstallPinned?: { readonly specifier: string; readonly version: string }
+  onResolveSdkInstall?: (id: KernelBackendId) => SdkInstallSurface | undefined
   /** 启动参数（Config 行 / DSH_TUI_BACKEND）压过了记忆：选择器明说。 */
   kernelPinned?: boolean
   /**
@@ -686,35 +677,14 @@ export function Chat({
     }
   }, [overlay])
   const [models, setModels] = React.useState<readonly LlmModelInfo[]>([])
-  /** Provider display identities for the /model group level; refreshed alongside `models`. */
+  const [modelsLoading, setModelsLoading] = React.useState(false)
+  const modelCatalogGeneration = React.useRef(0)
+  /** Provider display identities for the /model tabs; refreshed alongside `models`. */
   const [providerInfos, setProviderInfos] = React.useState<readonly LlmProviderInfo[]>([])
   /** /model 最近使用分组：成功切换即记录（去重置顶，上限 10），重启保留。 */
-  // Recents are per backend: a Claude session's picks never evict the DSH list.
+  const modelProviderTabs = channel.backendCapabilities?.modelRoutes !== 'backend'
   const recentsBackend = channel.backendCapabilities?.backendId
-  const [modelRecents, setModelRecents] = React.useState<readonly ModelRecentsRef[]>(() => readModelRecents(undefined, recentsBackend))
-  /** Two-level /model: the drilled-in provider route; undefined = group level.
-   *  Reset on open; stale ids resolve back to the group level via `activeModelGroup`. */
-  const [modelGroup, setModelGroup] = React.useState<string | undefined>(undefined)
-  /** True while the picker sits in the single-provider fast path (drilled in
-   *  at open, the group level never shown): Esc closes directly and no back
-   *  hint renders — a pinned recents pseudo-group must not fake a two-level
-   *  walk the user never saw (issue #527 regression: repro-picker-windowing). */
-  const [modelPickerDirect, setModelPickerDirect] = React.useState(false)
-  /** Group rows over the current catalog, first-appearance (registry) order,
-   *  with the pinned recents pseudo-group first when any entry is catalogued. */
-  const modelGroups = React.useMemo(
-    () => deriveModelGroups(models, providerInfos, modelRecents),
-    [models, providerInfos, modelRecents],
-  )
-  /** The drilled-in group, but only while it still exists in the catalog. */
-  const activeModelGroup = modelGroup !== undefined && modelGroups.some(group => group.provider === modelGroup)
-    ? modelGroup
-    : undefined
-  const groupModels = React.useMemo(() => {
-    if (activeModelGroup === undefined) return []
-    if (activeModelGroup === RECENTS_GROUP_PROVIDER) return recentCatalogModels(modelRecents, models)
-    return models.filter(model => model.provider === activeModelGroup)
-  }, [models, modelRecents, activeModelGroup])
+  const [modelRecents, setModelRecents] = React.useState<readonly ModelRecentsRef[]>(() => modelProviderTabs ? readModelRecents(undefined, recentsBackend) : [])
   /** Switch + record: every successful switch feeds the /model recents group
    *  (picker Enter/click, `/model provider/id`, the wizard's live switch,
    *  and /reload's applied model all ride this one path). */
@@ -723,10 +693,22 @@ export function Chat({
     return channel.switchModel(provider, id).then((ok) => {
       if (!ok) return ok
       if (name !== undefined) channel.notify(t('model-switched', { name }))
-      setModelRecents(recordModelUse({ provider, id }, undefined, recentsBackend))
+      if (modelProviderTabs) setModelRecents(recordModelUse({ provider, id }, undefined, recentsBackend))
       return ok
     })
   }
+  const modelPicker = useModelPicker({
+    channel, models, providers: providerInfos, recents: modelProviderTabs ? modelRecents : undefined, open: overlay.kind === 'model',
+    onCancel: () => dispatchOverlay({ type: 'close-if', kind: 'model' }),
+    onPick: (model, effort) => {
+      dispatchOverlay({ type: 'close-if', kind: 'model' })
+      void switchModelRecorded(model.provider, model.id, model.name).then(ok => {
+        // Validate/apply on the adopted route; a refused switch leaves both
+        // the live effort and its persisted preference untouched.
+        if (ok && effort !== undefined) return channel.setEffort(effort)
+      })
+    },
+  })
   /** `/skills` 技能目录（issue #204）：null = 注册表快照在途。 */
   const [skillsList, setSkillsList] = React.useState<readonly SkillInfo[] | null>(null)
   /**
@@ -848,8 +830,7 @@ export function Chat({
       setLaunchpadUpdateAvailable(update !== undefined)
     }).catch(() => undefined)
   }, [launchpadShown])
-  const canInstallSdk = onResolveSdkInstallTarget !== undefined && onStartSdkInstall !== undefined
-    && onCheckPnpm !== undefined && sdkInstallPinned !== undefined
+  const canInstallSdk = onResolveSdkInstall !== undefined
   const { currentId: kernelCurrentId, options: kernelOptions, open: openKernelPicker, pick: pickKernel, reprobe: reprobeKernels } = useKernelPicker({
     channel, kernelVersion, kernelEntries, launchpadShown, onProbeKernels, onSwitchBackend, canInstallSdk, dispatchOverlay,
   })
@@ -858,58 +839,73 @@ export function Chat({
   const kernelCurrentOption = kernelOptions.find(option => option.current)
   /**
    * SDK 安装向导的步骤态（异步进程状态，按 chatOverlay 的分工留在 Chat，
-   * 不进 overlay union）。生命周期约定：向导打开时从 idle 初始化，安装
-   * （checking/running）期间面板保持打开——所有异步落地都发生在面板还在
-   * 的窗口内；关闭路径（Esc/Enter 离开）一律重置回 idle，下一次打开重新
-   * 解析安装目标。
+   * 不进 overlay union）。每次打开独占安装面与进程句柄；浮层关闭或替换时
+   * 取消安装并重置步骤，旧预检/安装结果不能落进下一次打开的向导。
    */
   const [sdkPhase, setSdkPhase] = React.useState<SdkInstallPhase>({ kind: 'idle' })
-  const sdkInstallerRef = React.useRef<SdkInstaller | undefined>(undefined)
-  // 打开即解析安装目标（同步、只读 argv + 文件系统）：profile → 确认面板；
-  // standalone / 无 profile → 直接给手动指引面板。
+  const sdkInstallRef = React.useRef<{ readonly surface: SdkInstallSurface; installer?: SdkInstaller } | undefined>(undefined)
+  const sdkOverlay = overlay.kind === 'sdk-install' ? overlay : undefined
+  // 安装面在这次打开时快照；宿主回调更新不重启正在进行的安装。
   React.useEffect(() => {
-    if (overlay.kind !== 'sdk-install' || sdkPhase.kind !== 'idle' || onResolveSdkInstallTarget === undefined) return
-    const target = onResolveSdkInstallTarget()
-    if (target.kind === 'profile' && sdkInstallPinned !== undefined) {
-      setSdkPhase({ kind: 'confirm', dir: target.dir, version: sdkInstallPinned.version, specifier: sdkInstallPinned.specifier })
+    if (sdkOverlay === undefined) return
+    const surface = onResolveSdkInstall?.(sdkOverlay.backendId)
+    if (surface === undefined) {
+      dispatchOverlay({ type: 'close' })
+      return
+    }
+    const installation: NonNullable<typeof sdkInstallRef.current> = { surface }
+    sdkInstallRef.current = installation
+    const target = surface.resolveTarget()
+    if (target.kind === 'profile') {
+      setSdkPhase({ kind: 'confirm', dir: target.dir, version: surface.version, specifier: surface.specifier })
     } else {
       setSdkPhase({ kind: 'no-target', reason: target.kind === 'standalone' ? 'standalone' : 'no-profile' })
     }
-  }, [overlay.kind, sdkPhase.kind, onResolveSdkInstallTarget, sdkInstallPinned])
+    return () => {
+      sdkInstallRef.current = undefined
+      installation.installer?.cancel()
+      setSdkPhase({ kind: 'idle' })
+    }
+  }, [sdkOverlay])
   const closeSdkInstallToKernelPicker = (): void => {
-    setSdkPhase({ kind: 'idle' })
     dispatchOverlay({ type: 'close' })
     openKernelPicker()
   }
   const closeSdkInstall = (): void => {
-    setSdkPhase({ kind: 'idle' })
     dispatchOverlay({ type: 'close' })
   }
   const runSdkInstall = (dir: string): void => {
-    if (onStartSdkInstall === undefined || sdkInstallPinned === undefined) return
-    const installer = onStartSdkInstall(dir)
-    sdkInstallerRef.current = installer
+    const installation = sdkInstallRef.current
+    if (installation === undefined) return
+    const { surface } = installation
+    const installer = surface.start(dir)
+    installation.installer = installer
     setSdkPhase({ kind: 'running' })
     void installer.result.then(result => {
+      if (sdkInstallRef.current !== installation) return
+      installation.installer = undefined
       if (result.kind === 'ok') {
         // 装好了：重探内核（灰行变亮，无需重启进程），停在完成面板。
         reprobeKernels()
         setSdkPhase({ kind: 'done', rebuiltStore: result.rebuiltStore === true })
       } else if (result.kind === 'failed') {
-        setSdkPhase({ kind: 'failed', exitCode: result.exitCode, tail: result.tail, dir, version: sdkInstallPinned.version, specifier: sdkInstallPinned.specifier })
+        setSdkPhase({ kind: 'failed', exitCode: result.exitCode, tail: result.tail, dir, version: surface.version, specifier: surface.specifier })
       } else if (result.kind === 'pnpm-missing') {
-        setSdkPhase({ kind: 'pnpm-missing', dir, version: sdkInstallPinned.version, specifier: sdkInstallPinned.specifier })
+        setSdkPhase({ kind: 'pnpm-missing', dir, version: surface.version, specifier: surface.specifier })
       } else {
         setSdkPhase({ kind: 'cancelled' })
       }
     })
   }
   const confirmSdkInstall = (dir: string): void => {
-    if (onCheckPnpm === undefined) return
+    const installation = sdkInstallRef.current
+    if (installation === undefined) return
+    const { surface } = installation
     setSdkPhase({ kind: 'checking' })
-    void onCheckPnpm().then(ok => {
-      if (!ok && sdkInstallPinned !== undefined) {
-        setSdkPhase({ kind: 'pnpm-missing', dir, version: sdkInstallPinned.version, specifier: sdkInstallPinned.specifier })
+    void surface.preflight().then(ok => {
+      if (sdkInstallRef.current !== installation) return
+      if (!ok) {
+        setSdkPhase({ kind: 'pnpm-missing', dir, version: surface.version, specifier: surface.specifier })
         return
       }
       runSdkInstall(dir)
@@ -1506,7 +1502,7 @@ export function Chat({
   }, [launchpadCoverScreenUp])
   /**
    * 从落地页出发的交互要开整屏前先授权（配合 `launchpadGate`）：调用点只在
-   * 落地页自己的回调里（onAction / onCommandPick / onEscape 的会话浏览路）。
+   * 落地页自己的回调里（onAction / onSubmit / onCommandPick / onEscape）。
    * 异步误置真的整屏状态没有这道授权 → 闸门挡下，落地页留在最上层。
    */
   const authorizeLaunchpadCover = (): void => { launchpadCoverRef.current = true }
@@ -2074,7 +2070,7 @@ export function Chat({
   // Mouse text selection auto-copy: active only in
   // fullscreen (<AlternateScreen> supplies mouse tracking); a no-op
   // subscription in inline mode, where selection belongs to the terminal.
-  // The copy clears the highlight and posts a transient notification.
+  // The copy retains the highlight and posts a transient notification.
   // Smart migration hint (product ask): ~12s after mount, one background
   // pass over the foreign-agent stores; when a source was active inside the
   // 20-minute window, surface the user's own wording once per session. The
@@ -2082,7 +2078,11 @@ export function Chat({
   // off the render path; failures read as "no data" and stay silent.
   const migrateHintShownRef = React.useRef(false)
   React.useEffect(() => {
+    // A replaced Channel must not retain the old hint's Enter shortcut.
+    setMigrateHintAgent(null)
     if (migrateHintShownRef.current) return
+    let disposed = false
+    let hintTimer: ReturnType<typeof setTimeout> | undefined
     const timer = setTimeout(() => {
       migrateHintShownRef.current = true
       void (async () => {
@@ -2092,6 +2092,7 @@ export function Chat({
             adapter => MIGRATE_SCAN_SPECS[adapter.id],
           )))
         })
+        if (disposed) return
         const top = recentAgentsFrom(newest, Date.now())[0]
         if (top !== undefined) {
           channel.notify(t('migrate-hint-notify', { agent: top.label }), { timeoutMs: 10000 })
@@ -2099,11 +2100,15 @@ export function Chat({
           // overlay) jumps into the picker with this source pre-checked;
           // the global key layer below consumes it, anything else disarms.
           setMigrateHintAgent(top.agentId)
-          setTimeout(() => setMigrateHintAgent(current => current === top.agentId ? null : current), 10_000)
+          hintTimer = setTimeout(() => setMigrateHintAgent(current => current === top.agentId ? null : current), 10_000)
         }
       })()
     }, 12_000)
-    return () => clearTimeout(timer)
+    return () => {
+      disposed = true
+      clearTimeout(timer)
+      if (hintTimer !== undefined) clearTimeout(hintTimer)
+    }
   }, [channel])
 
   useCopyOnSelect(
@@ -2113,8 +2118,11 @@ export function Chat({
     // letting the highlight vanish silently.
     () => channel.notify(t('copy-refused-stale'), { timeoutMs: 2500 }),
   )
-  const { clearSelection: clearMouseSelection, hasSelection: hasMouseSelection } =
-    useSelection()
+  const {
+    clearSelection: clearMouseSelection,
+    hasSelection: hasMouseSelection,
+    getState: getMouseSelectionState,
+  } = useSelection()
   React.useEffect(() => {
     if (!channel.working || !terminalFocused) return
     const interval = setInterval(() => {
@@ -2442,7 +2450,7 @@ export function Chat({
   }
 
   /**
-   * Close the launchpad and hand the draft to the chat screen.
+   * Submit launchpad input or a selected command through the chat routes.
    *
    * THREE cases, and they are genuinely different:
    *
@@ -2453,6 +2461,8 @@ export function Chat({
    *     decides whether the line is a command — isLocalCommandName alone missed
    *     registry-only names (e.g. /plan, /goal), which then fell through to
    *     channel.submit and went to the model as a user message.
+   *     Picker and full-screen commands keep the launchpad mounted underneath;
+   *     the consumed command is cleared before either surface opens.
    *   - ordinary text  → SENT DIRECTLY (fifth revision, user-reported bug:
    *     "按了回车就直接进入流式输出"). The line rides the composer's own
    *     submit path (`channel.submit`, which queues through the DSH inbox
@@ -2463,9 +2473,8 @@ export function Chat({
    * History is appended for the two non-empty cases (matching what PromptInput
    * does on submit) so the launchpad's first line is reachable with ↑ later.
    */
-  const closeLaunchpad = React.useCallback((submit: string): void => {
+  const submitLaunchpad = (submit: string): void => {
     const text = submit.trim()
-    setLaunchpadOpen(false)
     // 首启时 openHomeOnBoot 与落地页同时为真：会话浏览器已经开着、只是被落地页盖住。
     // 提交首句后必须把它收掉，否则用户落到浏览器而不是"草稿就在眼前的对话"，
     // 与本函数 doc 承诺的落点直接矛盾。
@@ -2473,7 +2482,10 @@ export function Chat({
     setLaunchpadFocus(-1)
     setLaunchpadDraft('')
     setLaunchpadCaret(0)
-    if (text === '') return
+    if (text === '') {
+      setLaunchpadOpen(false)
+      return
+    }
     void appendHistory(text)
     const parsed = text.startsWith('/') ? parseCommandName(text) : undefined
     // 第八版：/help 在落地页上也是盖屏浮层（补全面板被 Esc 收掉后直接
@@ -2491,14 +2503,20 @@ export function Chat({
       || isHiddenCommandName(parsed.name)
       || channel.commandList.some(entry => entry.name === parsed.name)
     )) {
+      if (launchpadScreenCommands.has(parsed.name)) {
+        authorizeLaunchpadCover()
+      } else if (!overlayCommandNames.has(parsed.name)) {
+        setLaunchpadOpen(false)
+      }
       void runCommand(parsed.name, parsed.rawInput)
       return
     }
     // 直接发送：与 composer 回车同一条提交路径。发出去之后输入框是空的
     // （内容已作为首轮发出，绝不"既发了又留在框里"），也没有交接提示——
     // 没有草稿要交，一句"已放进输入框"的 toast 反而是假的。
+    setLaunchpadOpen(false)
     channel.submit(text)
-  }, [channel, launchpadOpen])
+  }
 
   /**
    * The screen's command dispatcher. Every entry point reaches this one
@@ -2864,37 +2882,32 @@ export function Chat({
           return true
         }
         setHelpOpen(false)
-        // Opens over the cached catalog (empty cache shows the loading
-        // pane); the fresh list lands with the authoritative focus, and the
-        // kind-guarded set-index cannot re-focus a picker the user left.
-        // Seed-on-open: the model in use IS a use — recording it here means
-        // the recents group exists before the first post-update switch, and
-        // switching A→B keeps A in the list (the file records what was
-        // used, not only switches made after the file appeared).
-        let recentsNow = modelRecents
-        if (channel.provider !== '' && channel.model !== ''
-          && !recentsNow.some(ref => ref.provider === channel.provider && ref.id === channel.model)) {
-          recentsNow = recordModelUse({ provider: channel.provider, id: channel.model }, undefined, recentsBackend)
-          setModelRecents(recentsNow)
+        // Opening counts the live route as the latest use, including when
+        // restoring a session whose model already exists later in recents.
+        // Refresh the catalog without overriding navigation made meanwhile.
+        const latestRecent = modelRecents[0]
+        if (modelProviderTabs && channel.provider !== '' && channel.model !== ''
+          && (latestRecent?.provider !== channel.provider || latestRecent?.id !== channel.model)) {
+          setModelRecents(recordModelUse({ provider: channel.provider, id: channel.model }, undefined, recentsBackend))
         }
-        // Two-level landing: recents (when catalogued) focus their pinned
-        // row; else multi-provider catalogs focus the current provider's
-        // group row; a single-provider catalog without a meaningful recents
-        // list drills straight into its model list (pre-grouping UX).
-        {
-          const landing = modelPickerLanding(models, channel.provider, channel.model, recentsNow)
-          setModelGroup(landing.group)
-          setModelPickerDirect(landing.group !== undefined)
-          dispatchOverlay({ type: 'open', overlay: { kind: 'model', index: landing.index } })
-        }
+        modelPicker.reset()
+        dispatchOverlay({ type: 'open', overlay: { kind: 'model' } })
+        setModelsLoading(true)
+        const generation = ++modelCatalogGeneration.current
         void channel.listModels().then((list) => {
+          if (generation !== modelCatalogGeneration.current) return
           setModels(list)
-          const landing = modelPickerLanding(list, channel.provider, channel.model, recentsNow)
-          setModelGroup(landing.group)
-          setModelPickerDirect(landing.group !== undefined)
-          dispatchOverlay({ type: 'set-index', kind: 'model', index: landing.index })
+          setModelsLoading(false)
+        }).catch(() => {
+          if (generation !== modelCatalogGeneration.current) return
+          setModelsLoading(false)
+          channel.notify(t('model-load-failed'), { color: 'error' })
         })
-        void channel.listProviders().then(setProviderInfos).catch(() => setProviderInfos([]))
+        if (modelProviderTabs) void channel.listProviders().then(list => {
+          if (generation === modelCatalogGeneration.current) setProviderInfos(list)
+        }).catch(() => {
+          if (generation === modelCatalogGeneration.current) setProviderInfos([])
+        })
         return true
       }
       case 'skills': {
@@ -3648,13 +3661,9 @@ export function Chat({
           currentLang: getLang(),
           langOverriddenBySettings: tuiNamespace !== undefined && hasPath(tuiNamespace.user, ['lang']),
           configuredLang: channel.configuredLang,
-          configuredPreset: channel.configuredPreset,
+          envPreset: presetOverrideFromEnv(),
           presetPref: readPresetPref(),
           currentPreset: channel.agentPreset,
-          configuredModel: {
-            provider: channel.configuredProvider,
-            model: channel.configuredModel,
-          },
           modelPref: readModelPref(),
           currentModel: { provider: channel.provider, model: channel.model },
           configuredActivity: channel.configuredActivityFrames,
@@ -3986,10 +3995,11 @@ export function Chat({
   const pageInsetX = usePageInset().x
   // 侧栏控制器：几何（chatColumns/panelColumns）、焦点与键盘分发都在
   // 这个 hook 里（设计文档 §16.5——Chat 只多一次调用、一处键盘让位、
-  // 一条 runCommand case）。编辑器展开时几何强制 collapsed。
+  // 一条 runCommand case）。启动页没有侧栏，命令走整屏回退；编辑器
+  // 展开时几何同样强制 collapsed。
   const sidePanel = useSidePanel({
     columns: terminalColumns,
-    fullscreen,
+    fullscreen: fullscreen && !launchpadShown,
     editorOpen: promptEditorOpen,
   })
   /**
@@ -4238,7 +4248,7 @@ export function Chat({
     // The launchpad owns the whole terminal while it is up — including the
     // plain letters that would otherwise reach the composer, which is exactly
     // the point: it IS the composer on this screen, and its draft is submitted
-    // directly (see closeLaunchpad). ONE exception (fifth revision): a picker
+    // directly (see submitLaunchpad). ONE exception (fifth revision): a picker
     // opened from the param row renders ABOVE the launchpad and therefore owns
     // the keyboard — fall through to the overlay branches below (Esc closes the
     // picker back onto the launchpad). The launchpad's own useInput is paused
@@ -4368,6 +4378,19 @@ export function Chat({
       }
       return
     }
+    if (overlay.kind === 'model') {
+      if (actionMatches('sidePanel', input, key) || actionMatches('sidePanelZoom', input, key)) {
+        if (sidePanel.handleKey(input, key, event)) return
+      }
+      // The model picker owns both navigation axes, including when a side
+      // panel or transcript selection held focus before it opened.
+      const now = Date.now()
+      const confirm = isPlainReturnInput(input, key) && now - lastModalEnterAtRef.current >= 80
+      if (confirm) lastModalEnterAtRef.current = now
+      modelPicker.handleKey(input, key, confirm)
+      event.stopImmediatePropagation()
+      return
+    }
     // 侧栏键盘分发（v2.1 优先级）：上面的审批 / 问卷 / 对话框守卫仍然
     // 最先，其次是侧栏全局快捷键（Ctrl+B / Alt+Z，两种焦点都生效），
     // 然后焦点在右栏时一切按键归侧栏——活动面板的业务键优先，宿主
@@ -4398,11 +4421,10 @@ export function Chat({
       event.stopImmediatePropagation()
       return
     }
-    // Esc clears a settled mouse selection before the ordinary chat meanings
-    // below, but never before a top-level modal. Otherwise a preview opened
-    // over selected transcript text needed two Esc presses to close.
-    // hasSelection() is an imperative read — no subscription needed.
-    if (key.escape && hasMouseSelection()) {
+    // With no overlay open, Esc cancels an active mouse drag or retained
+    // selection before ordinary chat meanings. Open overlays own Esc.
+    // Selection queries are imperative reads — no subscription needed.
+    if (overlay.kind === 'none' && key.escape && (hasMouseSelection() || getMouseSelectionState()?.isDragging)) {
       clearMouseSelection()
       event.stopImmediatePropagation()
       return
@@ -4593,59 +4615,6 @@ export function Chat({
       }
       return
     }
-    if (overlay.kind === 'model') {
-      // Two-level picker: group rows at the top (Enter drills in), one
-      // provider's models below (Enter switches, the same live-fork path as
-      // the flat picker always had). Esc/⌫ climbs one level and only closes
-      // at the top; a single-group catalog never shows the group level, so
-      // Esc there closes directly.
-      const rowCount = activeModelGroup === undefined ? modelGroups.length : groupModels.length
-      if (key.upArrow || key.downArrow) {
-        dispatchOverlay({ type: 'move', delta: key.upArrow ? -1 : 1, count: rowCount })
-      } else if (plainReturn) {
-        if (activeModelGroup === undefined) {
-          const group = modelGroups[overlay.index]
-          if (!group) {
-            dispatchOverlay({ type: 'close' })
-            return
-          }
-          setModelGroup(group.provider)
-          // The recents group opens on its most-recent entry; a provider
-          // group on its current model when it owns one, else its first row.
-          if (group.provider === RECENTS_GROUP_PROVIDER) {
-            dispatchOverlay({ type: 'set-index', kind: 'model', index: 0 })
-            return
-          }
-          const landing = modelPickerLanding(
-            models.filter(model => model.provider === group.provider),
-            channel.provider,
-            channel.model,
-          )
-          dispatchOverlay({ type: 'set-index', kind: 'model', index: landing.index })
-          return
-        }
-        const model = groupModels[overlay.index]
-        // oxlint-disable-next-line typescript/no-unnecessary-condition -- runtime guard: out-of-range index on an empty list
-        if (model) {
-          // Enter switches the live model right away: the conversation is
-          // forked at its end and continued with an agent routed to the new
-          // model (history replays unchanged) — and feeds the recents group.
-          dispatchOverlay({ type: 'close' })
-          void switchModelRecorded(model.provider, model.id, model.name)
-        } else {
-          dispatchOverlay({ type: 'close' })
-        }
-      } else if (key.escape || key.backspace) {
-        if (activeModelGroup !== undefined && modelGroups.length > 1 && !modelPickerDirect) {
-          setModelGroup(undefined)
-          const groupIndex = Math.max(0, modelGroups.findIndex(group => group.provider === activeModelGroup))
-          dispatchOverlay({ type: 'set-index', kind: 'model', index: groupIndex })
-        } else {
-          dispatchOverlay({ type: 'close' })
-        }
-      }
-      return
-    }
     if (overlay.kind === 'skills') {
       const list = skillsList ?? []
       if (key.upArrow || key.downArrow) {
@@ -4833,14 +4802,14 @@ export function Chat({
     }
     if (overlay.kind === 'sdk-install') {
       // 向导按键按步骤态分派；checking/running 期间除 Esc（取消安装）外
-      // 全部吞掉——异步落地只发生在面板还在的窗口内（见 sdkPhase 注释）。
+      // 全部吞掉；鼠标关闭/替换浮层由向导的 effect 取消并隔离迟到结果。
       if (sdkPhase.kind === 'confirm') {
         if (plainReturn) confirmSdkInstall(sdkPhase.dir)
         else if (key.escape) closeSdkInstallToKernelPicker()
       } else if (sdkPhase.kind === 'checking') {
         // 亚秒级预检，无键可按。
       } else if (sdkPhase.kind === 'running') {
-        if (key.escape) sdkInstallerRef.current?.cancel()
+        if (key.escape) sdkInstallRef.current?.installer?.cancel()
       } else if (sdkPhase.kind === 'done') {
         if (plainReturn) closeSdkInstallToKernelPicker()
         else if (key.escape) closeSdkInstall()
@@ -5437,49 +5406,26 @@ export function Chat({
           )}
           {overlay.kind === 'model' && (
             <Box flexDirection="column" marginTop={1}>
-              {models.length === 0 ? (
-                <ModelPickerLoading />
-              ) : activeModelGroup === undefined ? (
-                <ModelPicker
-                  groups={modelGroups}
-                  focusIndex={overlay.index}
-                  currentProvider={channel.provider}
-                  onPick={(index) => {
-                    // 点击分组行 = 进入该组（与 Enter 同一条路径）
-                    const group = modelGroups[index]
-                    if (!group) return
-                    setModelGroup(group.provider)
-                    if (group.provider === RECENTS_GROUP_PROVIDER) {
-                      dispatchOverlay({ type: 'set-index', kind: 'model', index: 0 })
-                      return
-                    }
-                    const landing = modelPickerLanding(
-                      models.filter(model => model.provider === group.provider),
-                      channel.provider,
-                      channel.model,
-                    )
-                    dispatchOverlay({ type: 'set-index', kind: 'model', index: landing.index })
-                  }}
-                />
-              ) : (
-                <ModelPicker
-                  models={groupModels}
-                  groupLabel={activeModelGroup === RECENTS_GROUP_PROVIDER
-                    ? t('picker-group-recent')
-                    : modelGroups.find(group => group.provider === activeModelGroup)?.label}
-                  showBack={modelGroups.length > 1 && !modelPickerDirect}
-                  showProviderPrefix={activeModelGroup === RECENTS_GROUP_PROVIDER}
-                  focusIndex={overlay.index}
-                  currentModel={`${channel.provider}/${channel.model}`}
-                  onPick={(index) => {
-                    // 点击行 = 应用该行模型（与 Enter 同一条路径）
-                    const model = groupModels[index]
-                    if (!model) return
-                    dispatchOverlay({ type: 'close' })
-                    void switchModelRecorded(model.provider, model.id, model.name)
-                  }}
-                />
-              )}
+              <ModelPicker
+                groups={modelPicker.groups}
+                provider={modelPicker.provider}
+                models={modelPicker.models}
+                focusIndex={modelPicker.index}
+                currentModel={`${channel.provider}/${channel.model}`}
+                loading={modelsLoading}
+                efforts={modelPicker.efforts}
+                effortId={modelPicker.effortId}
+                effortsLoading={modelPicker.effortsLoading}
+                effortError={modelPicker.effortError}
+                levelsFallback={modelPicker.levelsFallback}
+                cursorZone={modelPicker.cursorZone}
+                onProvider={modelPicker.focusProvider}
+                onFocus={modelPicker.focusModel}
+                onEffort={modelPicker.pickEffort}
+                onMove={modelPicker.moveModel}
+                onConfirm={modelPicker.confirm}
+                onCancel={modelPicker.cancel}
+              />
             </Box>
           )}
           {overlay.kind === 'migrate' && (
@@ -5891,7 +5837,7 @@ export function Chat({
           // 第七版：明确选中一个会话 = 有意导航（与 Esc「退出」相对）——浏览页
           // 与盖在它底下的落地页**一起收**，人落在那个会话的聊天页。只收浏览页
           // 会露出启动页，正是用户实测的「选完会话还是回到启动页」。落地页的
-          // 草稿/焦点也按 closeLaunchpad 同一口径清掉（进入的是别的会话，旧草稿
+          // 草稿/焦点也按 submitLaunchpad 同一口径清掉（进入的是别的会话，旧草稿
           // 不该跟过去）。
           setLaunchpadOpen(false)
           setLaunchpadFocus(-1)
@@ -6198,7 +6144,7 @@ export function Chat({
           setLaunchpadDraft(text)
           setLaunchpadCaret(cursor)
         }}
-        onSubmit={closeLaunchpad}
+        onSubmit={submitLaunchpad}
         onFocusChange={setLaunchpadFocus}
         onAction={(action) => {
           // 第八版（用户实测：「刚点帮助，不知道为什么直接进入聊天页面了」）：
@@ -6258,24 +6204,7 @@ export function Chat({
             ? undefined
             : channel.commandCompletions(launchpadDraft)
         }
-        onCommandPick={(commandLine) => {
-          // 补全面板选中（Enter/Tab/点击）：走 runCommand，与快捷入口同一条
-          // 白名单口径——覆盖层与整屏命令（第七版 launchpadScreenCommands）
-          // 不收落地页（盖在它之上），其余收掉再执行。/help 与快捷入口同一条
-          // 拦截：盖屏浮层，不进对话页（第八版）。
-          const parsed = parseCommandName(commandLine)
-          if (parsed === undefined) return
-          if (parsed.name === 'help') {
-            dispatchOverlay({ type: 'open', overlay: { kind: 'help' } })
-            return
-          }
-          if (launchpadScreenCommands.has(parsed.name)) {
-            authorizeLaunchpadCover()
-          } else if (!overlayCommandNames.has(parsed.name)) {
-            setLaunchpadOpen(false)
-          }
-          void runCommand(parsed.name, parsed.rawInput)
-        }}
+        onCommandPick={submitLaunchpad}
         cwd={channel.displayCwd}
         branch={channel.gitBranch}
         tuiVersion={tuiVersion}
@@ -6700,6 +6629,9 @@ export function Chat({
           key="prompt-input"
           channel={channel}
           suspended={promptReplacementOpen}
+          // 选择器、搜索框或侧栏持有键盘焦点时，让对应输入框接管原生
+          // 光标与 IME 锚点，避免主输入框在后续提交中抢回声明。
+          cursorParking={overlay.kind === 'none' && sidePanel.focus !== 'panel'}
           // 宠物面板是活动面板时，通知由它的头顶气泡「说出来」，输入框上方
           // 不再重复弹同一条（error 色除外——可能要行动的信号永远走 toast）。
           // 渲染期判定（split + activePanelId），与气泡同一次提交切换，不会
@@ -6895,24 +6827,6 @@ function NewMessagesPill({
   )
 }
 
-/** /model while the provider catalog is still loading. */
-function ModelPickerLoading(): React.ReactNode {
-  return (
-    <Pane color="permission">
-      <Box flexDirection="column" gap={1}>
-        <Text bold color="permission">
-          {t('picker-title-model')}
-        </Text>
-        <LoadingState
-          message={t('model-loading')}
-          bold
-          subtitle={t('model-loading-subtitle')}
-        />
-      </Box>
-    </Pane>
-  )
-}
-
 /**
  * The `/` incsearch bar: a
  * single row above the prompt input with the query, a block cursor, and the
@@ -6928,7 +6842,8 @@ function ModelPickerLoading(): React.ReactNode {
   count: number
   current: number
 }): React.ReactNode {
-  const cursorChar = cursorOffset < query.length ? query[cursorOffset] : ' '
+  const caretOffset = cursorOffset < query.length ? previousCodePoint(query, cursorOffset + 1) : query.length
+  const cursorChar = [...query.slice(caretOffset)][0] ?? ' '
   return (
     // noSelect: the bar's own text must not match the search query (the
     // screen-space highlight would self-match).
@@ -6943,9 +6858,9 @@ function ModelPickerLoading(): React.ReactNode {
       width="100%"
     >
       <Text>/</Text>
-      <Text>{query.slice(0, cursorOffset)}</Text>
-      <Text inverse>{cursorChar}</Text>
-      {cursorOffset < query.length && <Text>{query.slice(cursorOffset + 1)}</Text>}
+      <Text>{query.slice(0, caretOffset)}</Text>
+      <InputCaret>{cursorChar}</InputCaret>
+      {caretOffset < query.length && <Text>{query.slice(caretOffset + cursorChar.length)}</Text>}
       <Box flexGrow={1} />
       {query && count === 0 ? (
         <Text color="error">{t('search-no-matches')} </Text>

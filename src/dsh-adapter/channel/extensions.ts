@@ -74,6 +74,7 @@ import { createSkillCatalog } from './skill-catalog.js'
 import { createSubagentProjection, type SubagentsServiceView } from './subagent-projection.js'
 import { readChildTranscriptPage } from './subagent-transcript.js'
 import { DSH_BACKEND_LABEL, type ChannelLaunchOptions } from './state.js'
+import { ensureUpstreamRetry } from './upstream-retry.js'
 import { foldBack } from './transcript.js'
 import type { BackgroundResult, ResumeResult } from './types.js'
 import { createWorkspaceActions } from './workspace-actions.js'
@@ -116,6 +117,20 @@ export function attachDshExtensions(
     if (native === undefined) throw new Error('dsh-tui: the bound session is not a DSH session')
     return native
   }
+  // Upstream auto-retry seeding (upstream-retry.ts), scoped to the route
+  // the bound session actually uses: the binding feed calls this on every
+  // bind (boot, /model switch, resume). The config gate defaults on,
+  // observational (shadow) compositions never write settings, and the
+  // fire-and-forget promise never blocks a bind.
+  const upstreamRetryAttempted = new Set<string>()
+  const seedUpstreamRetry = (provider: string | undefined): void => {
+    if (options.upstreamRetry === false) return
+    if (adapterRuntime.mode === 'passive-shadow' || adapterRuntime.mode === 'replay-shadow') return
+    if (provider === undefined || provider === '' || upstreamRetryAttempted.has(provider)) return
+    upstreamRetryAttempted.add(provider)
+    void ensureUpstreamRetry(ctx, notify, [provider])
+  }
+
   // Detached work (/fork and agent-view dispatch) is owned until a caller
   // explicitly transfers the temporary handle to its destination ledger.
   const createDetachedHandle = createDetachedHandleFactory(owner)
@@ -175,6 +190,7 @@ export function attachDshExtensions(
   // service attachment has no authority after its injected lifetime ends.
   const jobProjection = createJobProjection(() => state, {
     owner, notify: (...args) => notify(...args), rowIds, agent: () => binding.agent, steer: text => channelCommands(state).steer(text),
+    history: () => dshNative().rawHistory(),
   })
 
   // The DSH slash-command registry (optional service): /plan, /goal and
@@ -530,8 +546,10 @@ export function attachDshExtensions(
     modeActions,
     projector,
     subagents: subagentProjection,
+    jobs: jobProjection,
     agentView,
     messageObserver,
+    seedUpstreamRetry,
     retireAttachment: core.input.retireAttachment,
   })
 

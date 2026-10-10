@@ -44,7 +44,7 @@ export function createModelActions(
       listModels(provider: string): Promise<readonly LlmModelInfo[]>
     }
     | undefined
-  let preferredEffort: string | undefined = deps.initialEffort ?? readEffortPref()
+  let preferredEffort: string | undefined = readEffortPref() ?? deps.initialEffort
   // Last fallback notice shown for a (preferred → applied) pair: bind fires on
   // every session switch, so an unchanged downgrade must not re-toast.
   let lastEffortFallbackNotice: { preferred: string; applied: string | undefined } | undefined
@@ -210,7 +210,22 @@ export function createModelActions(
     notify(t('effort-switched', { name: effort.name }))
     state.emit()
   }
-  const listEfforts = async (): Promise<{ efforts: readonly EffortOption[]; defaultEffort: string | undefined }> => {
+  const listEfforts = async (route?: { provider: string; model: string }): Promise<{ efforts: readonly EffortOption[]; defaultEffort: string | undefined; levelsFallback?: true }> => {
+    if (route !== undefined) {
+      const binding = deps.binding.capture()
+      if (llmRuntime === undefined || typeof llmRuntime.resolveModelInfo !== 'function') return { efforts: [], defaultEffort: undefined }
+      // Preview is independent of the live effort operation: browsing the
+      // picker must neither invalidate a pending preference nor publish the
+      // candidate's context window/tiers into the current session.
+      const info = await llmRuntime.resolveModelInfo(route.provider, route.model)
+      if (!owner.current() || !deps.binding.isCurrent(binding)) return { efforts: [], defaultEffort: undefined }
+      return {
+        efforts: tiersOf(info.reasoning),
+        defaultEffort: typeof info.reasoning === 'object' && info.reasoning !== null ? info.reasoning.defaultEffort : undefined,
+        ...(info.reasoning === true || (typeof info.reasoning === 'object' && info.reasoning !== null && info.reasoning.efforts === undefined)
+          ? { levelsFallback: true as const } : {}),
+      }
+    }
     const capture = captureEffort()
     const resolved = await resolveEfforts(capture)
     if (resolved === 'stale') return { efforts: [], defaultEffort: undefined }
@@ -236,10 +251,11 @@ export function createModelActions(
   }
   /**
    * Re-seat the future-sessions default reasoning effort. `id` is the settings
-   * user layer (the settings user layer outranks the cordis.yml `effort` pin);
-   * an absent level re-derives the boot chain (cordis `effort` → the persisted
-   * /effort choice). Also re-pins the live agent when its route offers the
-   * level, so the change lands on the next request. No-op when unchanged.
+   * user layer (an explicit value there outranks the persisted `/effort`
+   * choice); an absent level re-derives the boot chain (the persisted
+   * `/effort` choice → the cordis.yml `effort` deployment default). Also
+   * re-pins the live agent when its route offers the level, so the change
+   * lands on the next request. No-op when unchanged.
    */
   const setDefaultEffort = (id: string | undefined): void => {
     const resolved = resolveEffortDefault(id, deps.initialEffort, readEffortPref())

@@ -25,8 +25,9 @@
 ## Highlights
 
 - **Pixel whale pet** — three startup intros, click to wake; freezes after the first task.
-- **Launchpad and first-run guide** — every launch lands on a landing page with a **real input box** (big text + whale + quick actions, dropping whole blocks on short/narrow terminals); the first run walks a four-step wizard (API key / language+theme / model+workspace / shortcuts), re-runnable with `/setup`.
+- **Launchpad and first-run guide** — every launch lands on a landing page with a **real input box** (big text + whale + quick actions, dropping whole blocks on short/narrow terminals); command completion matches chat: `Tab` fills the input, `Enter` runs the command and clears it. The first run walks a four-step wizard (API key / language+theme / model+workspace / shortcuts), re-runnable with `/setup`.
 - **Terminal-native UI** — streaming Markdown, tool cards, `/` and `@` completion, `#L12-14` ranges, history search, zh/en UI.
+- **Native cursor** — focused text inputs inherit your terminal's cursor shape, color, blinking, and enabled animation or trail effects in both inline and fullscreen modes. The `/model` picker shows the same cursor during movement between provider tabs, model rows, and effort levels, then hides it after **0.5 seconds at rest**; clipped regions fall back to the model row. Configure animation and trail effects in your terminal.
 - **Images** — Kitty/Sixel thumbnails, centered preview with zoom and pan, paste-time fitting, text fallback.
 - **Mermaid diagrams** — ````mermaid ```` fences drawn as Unicode diagrams.
 - **LaTeX math** — `$…$` and `$$…$$` formulas as Unicode text, fractions and limits stacked in display blocks; `mathRendering: image` typesets block and one-row inline formulas as terminal images on graphics terminals.
@@ -192,6 +193,8 @@ The easiest install: open the kernel picker (the launchpad "Kernel" entry or
 `/kernel`) and press Enter on the dim Claude row — the wizard locates the
 profile directory and installs the pinned SDK for you; the command above is
 its manual equivalent.
+The confirmation shows the exact package and version. Closing the wizard,
+including clicking outside it on the launchpad, cancels a pending installation.
 
 - **Sign-in**: a `/channel` relay profile, your dsh-auth `anthropic` sign-in
   (`/login`), `ANTHROPIC_API_KEY` or cloud-provider variables, or an existing
@@ -234,7 +237,13 @@ settings are respected, not overwritten with defaults. `/login` offers
 ChatGPT OAuth, a device code or an API key (the last writes to Codex’s own
 credential store). Relay `/channel` connections take precedence; managed
 subscription tokens are only injected on first-party routes. dsh-TUI does
-not write `~/.codex/config.toml` or log out your native Codex account.
+not write `~/.codex/config.toml` or log out your native Codex account. A
+provider `env_key` from your own config (e.g. `DEEPSEEK_API_KEY`) that the
+shell did not export is injected from the DSH credential store when the ref
+is stored there — the active store first, then the default `~/.dsh` one — so
+keep the key in the store, no per-shell export needed. When nothing can
+supply it, the session still starts and the reason is reported once as a
+start notice: Codex itself rejects every turn of that provider.
 
 TPS includes hidden reasoning time and excludes tool execution time. Live
 text estimates are corrected when Codex reports output token usage.
@@ -275,6 +284,10 @@ Fragmented SGR mouse reports no longer land in the prompt as text: an incomplete
 
 Mouse (fullscreen): drag to select and copy, double/triple click to select a word or line, click tool cards, timeline ticks and `[Image #N]` previews.
 
+Automatic copies keep the text selected; press `Esc` to clear it or start a new selection to replace it. Selection highlighting skips trailing padding and blank rows while preserving spaces within text and code indentation. Inline mode uses the terminal's native selection.
+
+During a fullscreen text drag, the native cursor follows the selected text's edge using your terminal's enabled cursor animation or trail effects. Moving into trailing padding or blank rows keeps it at the nearest selected text edge. Releasing or cancelling the drag restores the focused input's caret.
+
 File paths in prose can open the file-action menu; automatic detection does not extract a path from inside a slash-delimited token such as `working/idle/needs-input` or a date such as `2024/01/15`.
 
 **Pasting**: native and bracketed paste keeps ordinary text and newlines, and never submits itself on arrival. On Windows terminals that deliver a paste as win32-input-mode key records, a record stream leaked into the payload is decoded back into the characters its `Uc` field encodes — newlines included — so the composer's line count matches what was pasted; only records with no character meaning are stripped (a multi-line paste no longer leaves stray `_`), and a complete record is always consumed before an ESC-less tail, so no payload character is deleted along with an orphan escape. Pasted CRLF collapses to a single newline; genuine underscores and bracketed-paste text are untouched.
@@ -287,9 +300,14 @@ Full reference: [Interaction and commands](docs/interaction.en.md).
 
 `/resume` · `/home` · `/agentview` · `/bg` · `⌸` open the same session manager: workspace rail, live state, filter, ★ pins. Also `/model` `/new` `/compact` `/export` `/btw` `/tree` `/fork` `/rewind` `/settings` `/setup` `/status` `/cost` `/jobs` `/skills` `/mcp` `/provider` `/auth` `/login` `/update`.
 
+`/model` shows models and reasoning effort on one page. DSH has provider tabs with **Recently used** first, moving the current model to the top; `Tab` / `Shift+Tab` select the next / previous provider. Codex and Claude open their model catalogs directly, without provider or recents tabs. `↑/↓` select a model, `←/→` adjust its effort, `Enter` applies the model and any explicit effort draft, and `Esc` cancels. Changing only the model preserves the backend's preference handling. Mouse users can click the available tabs, models, effort levels, and select/cancel hints; the wheel moves through models.
+
+Short terminals keep the focused model and select/cancel actions visible, hiding descriptions and neighboring models first, then the effort row when only two rows remain.
+Shortcuts sit below the title and effort levels have their own section; DSH, Claude, and Codex use the terminal background while covering the text underneath.
+
 In `/provider`'s model list, focus a model and press `Tab` to edit its context window, max output tokens, reasoning efforts, and image input capability.
 
-The session manager paints the last successful list immediately while it checks the persistence store for changes. Titles that require a deeper log scan appear first with a fallback name and update in place when recovery finishes.
+The session manager focuses the most recently used session in the current workspace; if there is no history, it focuses the new-session card. Press `←` to move to the workspace rail. It paints the last successful list immediately while it checks the persistence store for changes. Titles that require a deeper log scan appear first with a fallback name and update in place when recovery finishes.
 With DSH's current JSONL backend, startup and `/new` keep initial permission events in memory until further session activity saves the complete log; an explicit durability flush still runs, but it saves nothing for a session that holds only that initialization. Restarting an unstored empty session starts fresh. A normal exit removes sessions no human ever spoke in.
 Removing a workspace registration keeps its sessions accessible under a "History only" directory in the rail.
 History-only directories offer edit and new-session actions; rename and remove are available for registered workspaces.
@@ -386,6 +404,10 @@ Everything, bilingual: [docs/README.md](docs/README.md).
 > **Windows security warning:** the Windows profile defaults to `danger-full-access` with approval set to `never`, so tools have unrestricted access. Inspect and tighten the profile before starting next to sensitive credentials or in an untrusted repository.
 
 No sandbox of its own: dsh-TUI uses the active DSH profile's filesystem, shell, sandbox and approval policies. Permission presets come from the DSH `permissionPresets` registry.
+
+**Permission persistence** (all three backends): the Claude and Codex backends keep their `/permission` picks in `~/.dsh-tui/backends/<id>/prefs.json`; the DSH pick is kept at `~/.dsh-tui/permission.json`. Every durable preset switch teaches it (picker, typed `/permission`, Shift+Tab static modes, or a switch the official command performed on its own), and a session that never customized its permission planes starts on the remembered preset — applied through the same official switch path. "Never customized" is about the user: the composition writes its own default preset into every fresh session at creation, and those events do not count. Plan-mode transients are excluded, a `DSH_PERMISSION_MODE` launch pin (this run's initial permission plane) outranks the file, and an identity the mounted roster no longer offers is skipped.
+
+**Upstream auto-retry** (DSH): whenever a session binds (boot, `/model` switch, resume), the TUI seeds a retry policy — 5 attempts, transport-drop-aware failure codes including `STREAM_CLOSED` (a dropped upstream stream) — on **the provider route that session actually uses**, through the official `llm-pi-ai` settings section (the policy the kernel's `llm-retry` plugin executes). Only routes without an explicit `retryPolicy` are seeded — dormant channels are never written — and `upstreamRetry: false` in cordis.yml opts out.
 
 Details: [Permissions and security boundary](docs/architecture.en.md#permissions-and-security-boundary).
 

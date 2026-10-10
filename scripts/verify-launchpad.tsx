@@ -53,6 +53,9 @@ import { settle, settled, sleep, viewportLines } from './lib/term-test.mjs'
 import { stringWidth } from '../src/ink/stringWidth.js'
 // 只借类型（import type 被 tsx 整体擦除，不影响上面 fake-home 的加载顺序）。
 import type { KernelOption } from '../src/components/kernelCatalog.js'
+import type { Brand } from '../src/branding.js'
+import type { SplashEgg } from '../src/components/splashEggs.js'
+import type { CommandCompletion } from '../src/commands.js'
 
 const { Terminal: XTerm } = xterm
 const [
@@ -193,6 +196,10 @@ interface OpenOptions {
   query?: string
   firstRun?: boolean
   whale?: boolean
+  fontId?: string
+  brand?: Brand
+  egg?: SplashEgg | null
+  fullscreen?: boolean
   /** 参数行四段；false = 全不传（卡片矮一行的档）、对象 = 自定义四段。默认带全。 */
   params?: boolean | ParamFixture
   /** 双角铭牌三段；false = 全不传。默认带全。 */
@@ -210,11 +217,7 @@ interface OpenOptions {
   /** 高探针面板：探针行加六行空白，覆盖部分大字。 */
   overlayPanelTall?: boolean
   /** 提供时才显示命令补全面板。 */
-  commands?: readonly { name: string; description: string; commandLine?: string }[]
-  /** 提供时才显示命令补全面板。 */
-  commands?: readonly { name: string; description: string; commandLine?: string }[]
-  /** 提供时才显示命令补全面板。 */
-  commands?: readonly { name: string; description: string; commandLine?: string }[]
+  commands?: readonly CommandCompletion[]
   /** 模拟键盘交给覆盖层处理。 */
   inputPaused?: boolean
   /** Tips 轮换间隔。 */
@@ -234,6 +237,13 @@ async function openLaunchpad(events: Ev[], options: OpenOptions = {}) {
   const columns = options.columns ?? COLS
   const rows = options.rows ?? ROWS
   const term = new XTerm({ cols: columns, rows, scrollback: 0, allowProposedApi: true })
+  let nativeCursorVisible = true
+  for (const [final, next] of [['h', true], ['l', false]] as const) {
+    term.parser.registerCsiHandler({ prefix: '?', final }, params => {
+      if (params.includes(25)) nativeCursorVisible = next
+      return false
+    })
+  }
   const out = new FakeStdout(term)
   const input = new FakeStdin()
   const paramFixture: ParamFixture = options.params === false
@@ -256,7 +266,9 @@ async function openLaunchpad(events: Ev[], options: OpenOptions = {}) {
         whaleIdle={false}
         whaleGirl={false}
         starred={false}
-        fontId="bold"
+        fontId={options.fontId ?? 'bold'}
+        brand={options.brand}
+        egg={options.egg ?? null}
         firstRun={options.firstRun ?? false}
         actions={options.actions ?? DEFAULT_ACTIONS}
         overlayPanel={options.overlayPanel === true ? <Text>PICKER-PROBE 选择器探针</Text>
@@ -324,9 +336,11 @@ async function openLaunchpad(events: Ev[], options: OpenOptions = {}) {
 
   const app = await render(
     <ThemeProvider theme="dark">
-      <AlternateScreen>
-        <Harness />
-      </AlternateScreen>
+      {options.fullscreen === false ? <Harness /> : (
+        <AlternateScreen>
+          <Harness />
+        </AlternateScreen>
+      )}
     </ThemeProvider>,
     {
       stdin: input as never,
@@ -363,7 +377,7 @@ async function openLaunchpad(events: Ev[], options: OpenOptions = {}) {
       await settle(() => out.writeCount > writes)
     }
   }
-  return { term, input, app, out, screen, send, click, close: () => { app.unmount() } }
+  return { term, input, app, out, screen, send, click, cursorVisible: () => nativeCursorVisible, close: () => { app.unmount() } }
 }
 
 /**
@@ -597,6 +611,26 @@ check('A6c 输入卡片只有一层圆角边框（╭ ╰ 各恰好一个，不�
 }
 check('A7 输入框前缀是 ❯（行首不是 /）', await settled(() => base.screen().includes('❯')))
 base.close()
+
+// Shadow 品牌词比默认词对窄：预算必须跟着实际大字走，否则少算十行、吞掉输入。
+for (const brand of ['claude', 'codex'] as const) {
+  for (const fullscreen of [true, false]) {
+    const query = 'SHADOW-INPUT-PROBE'
+    const probe = await openLaunchpad([], {
+      columns: 80, rows: 24, query, fontId: 'shadow', brand, fullscreen,
+    })
+    check(`A Shadow ${brand} 80×24 ${fullscreen ? 'fullscreen' : 'inline'} 输入卡片与底角完整`,
+      await settled(() => {
+        const lines = viewportLines(probe.term)
+        const row = lines.findIndex(line => line.includes(query))
+        const corners = lines.slice(-3).join('\n')
+        return row > 0 && (lines[row] ?? '').includes('│')
+          && (lines[row - 1] ?? '').includes('╭') && (lines[row + 1] ?? '').includes('╰')
+          && corners.includes(CWD + ':' + BRANCH) && corners.includes('dsh-tui v' + VERSION)
+      }), `input row=${rowOf(probe.term, query)}`)
+    probe.close()
+  }
+}
 // 无参数档：三段全拿不到时整条不画（卡片矮一行），框还在、输入还在。
 {
   const ev: Ev[] = []
@@ -657,7 +691,7 @@ base.close()
   //（550ms/相位）再取第二帧比对。
   await new Promise(resolve => setTimeout(resolve, 1300))
   const rowAfter = viewportLines(s.term).find(l => l.includes('闪烁探针')) ?? ''
-  check('A11 光标闪烁不改变视口文本（相位是纯样式切换，回归不抖动）',
+  check('A11 光标闪烁不改变视口文本（动画由终端呈现，回归不抖动）',
     rowBefore !== '' && rowBefore === rowAfter, JSON.stringify([rowBefore, rowAfter]))
   s.close()
 }
@@ -1974,16 +2008,14 @@ for (const cols of [120, 100, 72, 60, 48]) {
   }
 }
 {
-  // 自动呼吸：**不注入任何 focus 事件**（isTerminalFocused=false）时，光标
-  // 闪烁必须在 1.4s 内产生 ≥2 个新渲染帧（相位切换 = 样式重绘；文本不变）。
+  // TTY 闪烁交给终端；没有收到终端 focus 事件时仍保留原生光标。
   const ev: Ev[] = []
   const s = await openLaunchpad(ev, { terminalFocused: false })
   await settled(() => s.screen().includes('❯'))
-  const before = s.out.writeCount
-  // 固定窗:呼吸相位 无完成事件可观测（相位切换本身是被测语义），按两个相位窗口等。
+  // 固定窗:探针 观察超过两个旧软件闪烁相位，光标仍应可见。
   await new Promise(resolve => setTimeout(resolve, 1400))
-  check('G3 没有焦点事件光标也自动闪烁（1.4s 内 ≥2 个相位帧，不用手动点一下）',
-    s.out.writeCount - before >= 2, `frames=${s.out.writeCount - before}`)
+  check('G3 没有焦点事件时原生光标保持可见',
+    s.cursorVisible(), `visible=${s.cursorVisible()}`)
   s.close()
 }
 {
@@ -2119,8 +2151,8 @@ for (const cols of [120, 100, 72, 60, 48]) {
   const ev: Ev[] = []
   const s = await openLaunchpad(ev, {
     commands: [
-      { name: 'setup', description: 'Re-run the first-run guide', commandLine: '/setup ' },
-      { name: 'help', description: 'Show shortcuts', commandLine: '/help ' },
+      { name: 'setup', description: 'Re-run the first-run guide', commandLine: '/setup', replacement: '/setup ' },
+      { name: 'help', description: 'Show shortcuts', commandLine: '/help', replacement: '/help ' },
     ],
   })
   await s.send('/')
@@ -2130,33 +2162,43 @@ for (const cols of [120, 100, 72, 60, 48]) {
   // 面板选中（Enter）= 执行命令（onCommandPick），不是 submit。
   await s.send('\r')
   check('K2 面板开着时 Enter 执行选中命令（onCommandPick，绝不 submit）',
-    last(ev, 'command')?.value === '/setup ' && last(ev, 'submit') === undefined,
+    last(ev, 'command')?.value === '/setup' && last(ev, 'submit') === undefined,
     JSON.stringify(ev.slice(-2)))
   s.close()
 }
 {
-  // ↓ 移选中、Enter 执行第二条；Tab 与 Enter 同路径。
+  // ↓ 移选中、Enter 执行第二条；Tab 只补全。
   const ev: Ev[] = []
   const s = await openLaunchpad(ev, {
     commands: [
-      { name: 'setup', description: 'Re-run the first-run guide', commandLine: '/setup ' },
-      { name: 'help', description: 'Show shortcuts', commandLine: '/help ' },
+      { name: 'setup', description: 'Re-run the first-run guide', commandLine: '/setup', replacement: '/setup ' },
+      { name: 'help', description: 'Show shortcuts', commandLine: '/help', replacement: '/help ' },
     ],
   })
   await s.send('/')
   await s.send('\u001b[B')
   await s.send('\r')
-  check('K3 ↓ 移到第二条、Enter 执行那一条', last(ev, 'command')?.value === '/help ',
+  check('K3 ↓ 移到第二条、Enter 执行那一条', last(ev, 'command')?.value === '/help',
     JSON.stringify(last(ev, 'command')))
   s.close()
   const ev2: Ev[] = []
   const s2 = await openLaunchpad(ev2, {
-    commands: [{ name: 'setup', description: 'Re-run the first-run guide', commandLine: '/setup ' }],
+    commands: [{ name: 'setup', description: 'Re-run the first-run guide', commandLine: '/setup', replacement: '/setup ' }],
   })
   await s2.send('/')
+  await s2.send('\u001b[Z')
+  check('K4a 补全面板开着时 Shift+Tab 不执行命令、不改变输入或焦点',
+    last(ev2, 'command') === undefined && last(ev2, 'query')?.value === '/'
+      && last(ev2, 'focus')?.value === -1,
+    JSON.stringify(ev2))
   await s2.send('\t')
-  check('K4 Tab 也是执行选中命令（与聊天页补全菜单同键位）',
-    last(ev2, 'command')?.value === '/setup ' && last(ev2, 'submit') === undefined,
+  check('K4 Tab 只补全选中命令，保留尾随空格并把光标移到末尾',
+    last(ev2, 'command') === undefined && last(ev2, 'submit') === undefined
+      && last(ev2, 'query')?.value === '/setup ' && last(ev2, 'query')?.cursor === '/setup '.length,
+    JSON.stringify(ev2.slice(-2)))
+  await s2.send('x')
+  check('K4b Tab 补全后继续输入接在命令末尾',
+    last(ev2, 'query')?.value === '/setup x' && last(ev2, 'command') === undefined,
     JSON.stringify(ev2.slice(-2)))
   s2.close()
 }
@@ -2164,7 +2206,7 @@ for (const cols of [120, 100, 72, 60, 48]) {
   // Esc 只收面板（草稿不动）；收掉后 Enter 才走 onSubmit 原文。
   const ev: Ev[] = []
   const s = await openLaunchpad(ev, {
-    commands: [{ name: 'help', description: 'Show shortcuts', commandLine: '/help ' }],
+    commands: [{ name: 'help', description: 'Show shortcuts', commandLine: '/help', replacement: '/help ' }],
   })
   await s.send('/he')
   await settled(() => s.screen().includes('help'))
@@ -2182,7 +2224,7 @@ for (const cols of [120, 100, 72, 60, 48]) {
   // 普通文本走 submit，不触发 onCommandPick。
   const ev: Ev[] = []
   const s = await openLaunchpad(ev, {
-    commands: [{ name: 'setup', description: 'Re-run the first-run guide', commandLine: '/setup ' }],
+    commands: [{ name: 'setup', description: 'Re-run the first-run guide', commandLine: '/setup', replacement: '/setup ' }],
   })
   await s.send('h')
   await s.send('i')
@@ -2196,12 +2238,12 @@ for (const cols of [120, 100, 72, 60, 48]) {
   // 鼠标：点面板里的命令行 = 选中执行（与 Enter 同路径）。
   const ev: Ev[] = []
   const s = await openLaunchpad(ev, {
-    commands: [{ name: 'setup', description: 'Re-run the first-run guide', commandLine: '/setup ' }],
+    commands: [{ name: 'setup', description: 'Re-run the first-run guide', commandLine: '/setup', replacement: '/setup ' }],
   })
   await s.send('/')
   await s.click('setup')
   check('K8 点击面板命令行执行该命令（不是点空白）',
-    last(ev, 'command')?.value === '/setup ' && last(ev, 'blank') === undefined,
+    last(ev, 'command')?.value === '/setup' && last(ev, 'blank') === undefined,
     JSON.stringify(ev.slice(-2)))
   s.close()
 }
@@ -2269,145 +2311,55 @@ for (const cols of [120, 100, 72, 60, 48]) {
 }
 
 
-// ── N. 输入光标反显 ──
+// ── N. 终端原生输入光标 ──
 {
-  // ① 行尾打字：刚输入的字符与光标**同时可见**（EN + ZH 各一次）。判据用
-  //    终端格级属性：行里既有非反显的字符格、又有反显格（行尾反显空格），
-  //    且视口纯文本里字符原样在（没有被光标顶掉/吃掉）。
-  const cellScan = (s: ReturnType<typeof openLaunchpad>, ch: string) => {
-    const lines = viewportLines(s.term)
-    for (let row = 0; row < lines.length; row++) {
-      if (!lines[row]!.includes(ch)) continue
-      const line = s.term.buffer.active.getLine(row)!
-      let charPlain = false
-      let inverseCell = false
-      for (let col = 0; col < s.term.cols; col++) {
-        const cell = line.getCell(col)
-        if (cell === undefined) continue
-        if (cell.getChars() === ch && !cell.isInverse()) charPlain = true
-        if (cell.isInverse()) inverseCell = true
-      }
-      return { charPlain, inverseCell, text: lines[row]!.trim() }
-    }
-    return { charPlain: false, inverseCell: false, text: '' }
+  const atInput = (s: ReturnType<typeof openLaunchpad>, text: string, offset = stringWidth(text)) => {
+    const pos = findCell(s.term, `❯ ${text}`)
+    const cursor = s.term.buffer.active
+    return pos !== null && s.cursorVisible()
+      && cursor.cursorX === pos.col - 1 + stringWidth('❯ ') + offset
+      && cursor.cursorY === pos.row - 1
+  }
+  const cellUnderCursor = (s: ReturnType<typeof openLaunchpad>) => {
+    const buffer = s.term.buffer.active
+    return buffer.getLine(buffer.baseY + buffer.cursorY)?.getCell(buffer.cursorX)
   }
   {
-    const ev: Ev[] = []
-    const s = await openLaunchpad(ev)
+    const s = await openLaunchpad([])
     await settled(() => s.screen().includes('❯'))
     await s.send('a')
-    const en = cellScan(s, 'a')
-    check('N1 行尾打英文字：字符与光标同时可见（字符格非反显 + 行内存在反显格 = 行尾反显空格）',
-      en.charPlain && en.inverseCell && en.text.includes('a'),
-      JSON.stringify(en))
+    check('N1 英文字完整可见，原生光标在字符后',
+      await settled(() => atInput(s, 'a') && !cellUnderCursor(s)?.isInverse()), s.screen())
     await s.send('好')
-    const zh = cellScan(s, '好')
-    check('N1b 行尾打中文：宽字符与光标同时可见（不被劈半、不被吃掉）',
-      zh.charPlain && zh.inverseCell && zh.text.includes('好'),
-      JSON.stringify(zh))
+    check('N1b CJK 宽字符完整可见，原生光标按显示列定位',
+      await settled(() => atInput(s, 'a好') && !cellUnderCursor(s)?.isInverse()), s.screen())
     s.close()
   }
   {
-    // ② 行中光标：反显块**压在当前字符身上**（对那一个字符 inverse），
-    //    前后字符常规显示、一个都不消失；视口纯文本逐字符等于原文
-    //    （绝不另起一格画方块、绝不增删字符）。
-    const ev: Ev[] = []
-    const s = await openLaunchpad(ev, { query: 'abc' })
+    const s = await openLaunchpad([], { query: 'abc' })
     await settled(() => s.screen().includes('abc'))
     await s.send('\u001b[D')
     await s.send('\u001b[D')
-    const lines = viewportLines(s.term)
-    const row = lines.findIndex(l => l.includes('abc'))
-    check('N2 行中光标压在字身上（b 反显，a/c 常规可见，文本逐字符不变）',
-      row >= 0 && (() => {
-        const line = s.term.buffer.active.getLine(row)!
-        let aPlain = false; let bInverse = false; let cPlain = false
-        for (let col = 0; col < s.term.cols; col++) {
-          const cell = line.getCell(col)
-          if (cell === undefined) continue
-          if (cell.getChars() === 'a') aPlain = !cell.isInverse()
-          if (cell.getChars() === 'b') bInverse = cell.isInverse()
-          if (cell.getChars() === 'c') cPlain = !cell.isInverse()
-        }
-        return aPlain && bInverse && cPlain && (lines[row]!.trim().includes('abc'))
-      })(),
-      row >= 0 ? lines[row]!.trim() : 'row not found')
+    check('N2 原生光标落在 b 格，文本不增加空格或反色块',
+      await settled(() => atInput(s, 'abc', 1)
+        && cellUnderCursor(s)?.getChars() === 'b' && !cellUnderCursor(s)?.isInverse()), s.screen())
     s.close()
   }
-  // ③ 闪烁相位逐字节不变已由 A11 钉死（相位只切样式）；此处补「反显 ↔ 常规」
-  //    的相位语义：相位帧数 ≥2 已由 G3 钉死，不重复挂机。
-  {
-    // ④ 空输入：光标压在占位文本的第一个字符上。
-    //    文本与「无光标」逐字节相同（没有多出来的块字符格），首字符带反显。
-    const ev: Ev[] = []
-    const s = await openLaunchpad(ev)
-    await settled(() => s.screen().includes('说点什么'))
-    const lines = viewportLines(s.term)
-    const row = lines.findIndex(l => l.includes('说点什么'))
-    const ph = '说点什么，或输入 / 看命令…'
-    check('N3 空输入：光标压在占位首字身上（行文本与无光标逐字节相同，首字符反显）',
-      row >= 0 && (() => {
-        const text = lines[row]!.trimEnd()
-        // 逐字节契约：行里就是 前缀 + 空格 + 占位原文，没有额外格子。
-        if (!text.includes('❯ ' + ph)) return false
-        const line = s.term.buffer.active.getLine(row)!
-        let firstInverse = false
-        for (let col = 0; col < s.term.cols; col++) {
-          const cell = line.getCell(col)
-          if (cell === undefined) continue
-          if (cell.getChars() === '说') firstInverse = cell.isInverse()
-        }
-        return firstInverse
-      })(),
-      row >= 0 ? lines[row]!.trim() : 'row not found')
+  for (const terminalFocused of [true, false]) {
+    const s = await openLaunchpad([], { terminalFocused })
+    const placeholder = '说点什么，或输入 / 看命令…'
+    check(`N3/N4 空输入的光标在占位首字，terminalFocused=${terminalFocused}`,
+      await settled(() => atInput(s, placeholder, 0)
+        && cellUnderCursor(s)?.getChars() === '说' && !cellUnderCursor(s)?.isInverse()), s.screen())
     s.close()
   }
   {
-    // ⑤ 失焦不消失（用户原话「哪怕焦点没了也不消失」）：从不注入 focus 事件
-    //    （terminalFocused:false）光标仍在——输入行里存在反显格。
-    const ev: Ev[] = []
-    const s = await openLaunchpad(ev, { terminalFocused: false })
-    await settled(() => s.screen().includes('说点什么'))
-    const lines = viewportLines(s.term)
-    const row = lines.findIndex(l => l.includes('说点什么'))
-    check('N4 无 focus 事件光标仍在（反显格存在；闪烁帧数由 G3 另行钉死）',
-      row >= 0 && (() => {
-        const line = s.term.buffer.active.getLine(row)!
-        for (let col = 0; col < s.term.cols; col++) {
-          const cell = line.getCell(col)
-          if (cell !== undefined && cell.isInverse()) return true
-        }
-        return false
-      })(),
-      row >= 0 ? lines[row]!.trim() : 'row not found')
-    s.close()
-  }
-  {
-    // ⑥ 行尾反显空格不额外占格：反显格紧贴最后一个字符之后，且那一格是空格
-    //    （不是把某个字符顶掉），其后没有别的非空内容。
-    const ev: Ev[] = []
-    const s = await openLaunchpad(ev)
+    const s = await openLaunchpad([])
     await settled(() => s.screen().includes('❯'))
     await s.send('ab')
-    await settled(() => s.screen().includes('ab'))
-    const lines = viewportLines(s.term)
-    const row = lines.findIndex(l => l.includes('ab'))
-    check('N5 行尾光标 = 紧贴末字符的反显空格（不占文本格、不吃字符）',
-      row >= 0 && (() => {
-        const raw = lines[row]!
-        // 行 = 缩进 + │ + ' ❯ ab ' + 空格 + 右边框：行首到 ab 全是 ASCII
-        //（空格/│/❯ 都是单宽），字符串下标 == 终端列号。
-        if (!raw.includes('❯ ab')) return false
-        const at = raw.indexOf('ab')
-        const line = s.term.buffer.active.getLine(row)!
-        const caretCell = line.getCell(at + 2)
-        const beyond = line.getCell(at + 3)
-        return caretCell !== undefined && caretCell.isInverse()
-          && (caretCell.getChars() === '' || caretCell.getChars() === ' ')
-          // 反显空格之后就是普通空白（没有被顶出来的字符），行没有被撑动。
-          && beyond !== undefined && !beyond.isInverse() && (beyond.getChars() === '' || beyond.getChars() === ' ')
-      })(),
-      row >= 0 ? lines[row]!.trim() : 'row not found')
+    check('N5 行尾原生光标紧贴末字符，保留空白落点',
+      await settled(() => atInput(s, 'ab') && !cellUnderCursor(s)?.isInverse()
+        && ['', ' '].includes(cellUnderCursor(s)?.getChars() ?? 'missing')), s.screen())
     s.close()
   }
 }

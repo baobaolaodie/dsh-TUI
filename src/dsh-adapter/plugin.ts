@@ -12,9 +12,8 @@ import { configValues, createSettingsScope, resolveSettingsNamespace, type Runti
 import { createChannel } from './channel.js'
 import { createDshSession } from './backend/session.js'
 import { kernelEntriesOf } from '../components/kernelCatalog.js'
-import { openBackendStartup, probeKernels, sdkInstallSurface } from './backends.js'
+import { openBackendStartup, probeKernels, installSurfaceFor } from './backends.js'
 import { backendLabel, isBackendIdSyntax, isRegisteredBackend, listBackends, loadBackend, parseBackendChoice, unloadBackends } from './backend-registry.js'
-import type { SdkInstaller, SdkInstallTarget } from '../agent/backend.js'
 import { formatSessionRef } from '../agent/refs.js'
 import type { AgentSession } from '../agent/session.js'
 import { mountFailureText } from '../sessions/resumeFailure.js'
@@ -38,7 +37,7 @@ import { commitFullscreenFactoryMigration, planFullscreenFactoryMigration, readA
 import { readModelPref } from '../modelPrefs.js'
 import { explicitModelRoute, recordedModelRoute, resolveModelRoute, validateModelRoute } from '../modelRoute.js'
 import type { ModelRoute } from '../modelRoute.js'
-import { migratePresetPref, readPresetPref } from '../presetPrefs.js'
+import { migratePresetPref, presetOverrideFromEnv, readPresetPref } from '../presetPrefs.js'
 import { readEffortPref } from '../effortPrefs.js'
 import { composePreset, filterMinimalPresetTools, resolvePersistedPreset, resolvePersistedRoute, runningPresetOf } from './presets.js'
 import { createFreshAgent, isUnstoredFreshSession } from './fresh-agent.js'
@@ -421,12 +420,13 @@ export async function apply(ctx: Context, runtimeConfig: RuntimeConfig<Config>, 
     provider: config.provider,
     model: config.model,
   }
-  // Atomic route resolution (issue #67): a complete cordis.yml route wins
-  // whole, else the persisted `/model` choice wins whole, else Harness's
-  // provider-neutral agent-default-model selection. The local DeepSeek pair
-  // remains the final fallback for bare embedders without that service. This
-  // lets optional provider bundles supply the same default to Web and TUI
-  // without patching this front door by name.
+  // Atomic route resolution (issue #67): the persisted `/model` choice — the
+  // route the last session ran — wins whole; else a complete cordis.yml route
+  // wins whole as the deployment DEFAULT (it decides the first run, never a
+  // later one); else Harness's provider-neutral agent-default-model
+  // selection. The local DeepSeek pair remains the final fallback for bare
+  // embedders without that service. This lets optional provider bundles supply
+  // the same default to Web and TUI without patching this front door by name.
   const configuredDefault = (ctx.get('agentDefaultModel') as {
     currentSelection?(): { provider?: unknown; model?: unknown }
   } | undefined)?.currentSelection?.()
@@ -437,6 +437,10 @@ export async function apply(ctx: Context, runtimeConfig: RuntimeConfig<Config>, 
     ? { provider: configuredDefault.provider, model: configuredDefault.model }
     : undefined
   const startupRoute = resolveModelRoute(configuredRoute, readModelPref(), harnessDefault)
+  // What a rejected preference falls back to: the deployment default — a
+  // complete cordis.yml route, else the harness default — never the lock the
+  // user's own pick replaced, and never a half-pinned config (issue #67).
+  const deploymentRoute = resolveModelRoute(configuredRoute, undefined, harnessDefault)
   // Session cwd (issue #96): explicit cordis.yml `cwd` wins; otherwise the
   // git worktree root containing the launch directory (the launch directory
   // itself outside any worktree), so `@` completion and mention expansion
@@ -661,6 +665,7 @@ export async function apply(ctx: Context, runtimeConfig: RuntimeConfig<Config>, 
       bootSessionId,
       configuredRoute,
       startupRoute,
+      deploymentRoute,
       meta,
       config.preset,
     )
@@ -799,6 +804,9 @@ export async function apply(ctx: Context, runtimeConfig: RuntimeConfig<Config>, 
     // Edit/Write diff presentation (schema default 'auto'); the /settings
     // screen edits this key live through the dsh-tui namespace.
     diffLayout: config.diffLayout,
+    // Upstream auto-retry seeding (cordis.yml upstreamRetry, default on):
+    // only an explicit opt-out disables it.
+    upstreamRetry: config.upstreamRetry,
     thinkingFold: config.thinkingFold,
     jobGroupFold: config.jobGroupFold,
     toolBackground: config.toolBackground,
@@ -1477,10 +1485,10 @@ export async function apply(ctx: Context, runtimeConfig: RuntimeConfig<Config>, 
           ...settingField('effortDefault'),
           format(value: unknown): string {
             // Unset in settings.yaml: show what a boot would actually start
-            // on (the cordis effort pin → the persisted /effort choice)
+            // on (the persisted /effort choice → the cordis effort default)
             // instead of a misleading blank.
             if (value === undefined || value === null || value === 'auto') {
-              return config.effort ?? readEffortPref() ?? 'auto'
+              return readEffortPref() ?? config.effort ?? 'auto'
             }
             return String(value)
           },
@@ -2147,9 +2155,10 @@ export async function apply(ctx: Context, runtimeConfig: RuntimeConfig<Config>, 
     // registry (P0). dsh first, then the manifest order — picker order.
     kernelEntries: kernelEntriesOf(listBackends()),
     onProbeKernels: () => probeKernels(ctx, sessionCwd),
-    // The kernel picker's SDK install wizard (the dim Claude row, Enter): the
-    // spec comes from the entry that declares it, the actions from this host.
-    ...sdkInstallProps(),
+    // The kernel picker's SDK install wizard (a dim row's Enter): the surface of
+    // whichever row the user picked, looked up by id — the manifest says what to
+    // install and with which executor, this host holds the actions.
+    onResolveSdkInstall: installSurfaceFor,
     kernelPinned: backendPinned,
     // Only a `dsh --profile <name>` launch has a profile installation for
     // `/update` to act on; source checkouts and `--config` overlays get the
@@ -2326,33 +2335,36 @@ export async function apply(ctx: Context, runtimeConfig: RuntimeConfig<Config>, 
  * without a session id.
  *
  * Preset composition (issue #8): a create resolves the requested preset
- * (cordis.yml `preset` over the persisted `/preset` choice over the roster
- * default) and mounts it in the factory's setup hook; a resume re-mounts the
- * preset the session's own log records. Without the roster both paths behave
- * as before presets existed.
+ * (`DSH_TUI_PRESET` over the persisted `/preset` choice over the cordis.yml
+ * default over the roster default) and mounts it in the factory's setup hook;
+ * a resume re-mounts the preset the session's own log records. Without the
+ * roster both paths behave as before presets existed.
  *
  * Model route (issues #14/#30/#67): a create adopts the caller's atomically
  * resolved route (validated against the adapter catalog below); a resume
- * passes only a COMPLETE cordis.yml route through — a provider-only pin must
- * not half-override the route the target session's own records carry.
+ * prefers the route the target session's own records carry and falls back to
+ * a COMPLETE cordis.yml route — a provider-only pin must not half-override
+ * the session's route, and the static route is only the deployment default.
  */
 async function resolveAgent(
   ctx: Context,
   requestedSessionId: string | undefined,
   configuredRoute: { provider?: string; model?: string },
   startupRoute: ModelRoute,
+  deploymentRoute: ModelRoute,
   meta: { cwd: string },
   configuredPreset?: string,
 ): Promise<{ agent: Agent; handle?: AgentHandle; agentPreset?: string; route?: ModelRoute }> {
-  // Resume override (issue #67): cordis.yml overrides the target session's
-  // recorded route only when it pins BOTH halves; undefined halves let the
-  // session's own request/header records win (issue #30). The recorded route
-  // is ALSO fed back into agentOptions (not just the status line): a resume
+  // Deployment fallback (issue #67): a resumed session continues on the route
+  // its own request/header records carry (issue #30) — the route it actually
+  // ran is more specific than any static config — and only a session that
+  // records none adopts the complete cordis.yml route. The recorded route is
+  // ALSO fed back into agentOptions (not just the status line): a resume
   // whose cordis.yml pins only `provider` would otherwise leave
   // agentOptions.model undefined, which breaks the `{{model}}` persona
   // variable for the resumed agent's own assembly and for every subagent it
   // spawns (dsh-subagent inherits `parent.options.model`).
-  const resumeRoute = explicitModelRoute(configuredRoute)
+  const resumeRoute = explicitModelRoute(configuredRoute) ?? deploymentRoute
   if (requestedSessionId !== undefined) {
     const resumeId = SessionId(requestedSessionId)
     const existing = ctx.agents.get(resumeId)
@@ -2411,8 +2423,8 @@ async function resolveAgent(
       const composed = await composePreset(ctx, persisted)
       const recorded = await resolvePersistedRoute(ctx, resumeId)
       const resumeOptions = {
-        provider: resumeRoute?.provider ?? recorded?.provider,
-        model: resumeRoute?.model ?? recorded?.model,
+        provider: recorded?.provider ?? resumeRoute?.provider,
+        model: recorded?.model ?? resumeRoute?.model,
       }
       const resumed = await ctx.agents.resume({
         resumeSessionId: resumeId,
@@ -2420,14 +2432,14 @@ async function resolveAgent(
         ...(composed.setup === undefined ? {} : { setup: composed.setup }),
       })
       // Status-line route on resume: the route the session actually
-      // continues on — a complete cordis.yml pin, else the route its own
-      // request/header records carry (a bare log yields undefined and the
-      // caller falls back to the startup resolution, best effort).
+      // continues on — its own request/header record, else the complete
+      // cordis.yml deployment route (a bare log that pins none falls back to
+      // the startup resolution, best effort).
       return {
         agent: resumed.agent,
         handle: resumed,
         agentPreset: composed.agentPreset,
-        route: resumeRoute ?? recordedModelRoute(snapshotLiveSessionEvents(resumed.agent.session)),
+        route: recordedModelRoute(snapshotLiveSessionEvents(resumed.agent.session)) ?? resumeRoute,
       }
     } catch (error) {
       // A claim says "this process is driving the log". A resume that never
@@ -2452,22 +2464,28 @@ async function resolveAgent(
     }
   }
   const sessionId = SessionId(randomUUID())
-  const presetPref = configuredPreset === undefined ? readPresetPref() : undefined
-  const composed = await composePreset(ctx, configuredPreset ?? presetPref)
-  if (!migratePresetPref(presetPref, composed.agentPreset)) {
+  // Fresh-session preset precedence (issue #8): the DSH_TUI_PRESET launch
+  // instruction, then the persisted `/preset` choice (the standing user
+  // default), then the cordis.yml value as the deployment default, then the
+  // roster default. The pref is migrated only when it was the effective
+  // source — an override must not rewrite the remembered id.
+  const presetOverride = presetOverrideFromEnv()
+  const presetPref = readPresetPref()
+  const composed = await composePreset(ctx, presetOverride ?? presetPref ?? configuredPreset)
+  if (presetOverride === undefined && !migratePresetPref(presetPref, composed.agentPreset)) {
     ctx.logger.warn(
       `dsh-tui: resolved preset preference "${presetPref}" as "${composed.agentPreset}" but could not persist the migrated id`,
     )
   }
   // Fresh-session route precedence (issues #14/#30/#67): resolved atomically
-  // by the caller (complete cordis.yml route > the persisted `/model` choice
+  // by the caller (the persisted `/model` choice > a complete cordis.yml route
   // > the harness default), then validated against the adapter catalog — a
-  // stale persisted choice falls back to the default route wholesale instead
-  // of reaching the server as an unknown model name.
+  // stale persisted choice falls back to the deployment route wholesale
+  // instead of reaching the server as an unknown model name.
   const llm = ctx.get('llm') as
     | { listModels(provider: string): Promise<readonly { id: string }[]> }
     | undefined
-  const { route, rejected } = await validateModelRoute(llm, startupRoute)
+  const { route, rejected } = await validateModelRoute(llm, startupRoute, deploymentRoute)
   if (rejected !== undefined) {
     ctx.logger.warn(
       `dsh-tui: model route ${rejected.provider}/${rejected.model} is not advertised by provider "${rejected.provider}"; falling back to ${route.provider}/${route.model}`,
@@ -2641,7 +2659,7 @@ export function isExitResumable(deps: {
 }
 
 type InkShutdownState = {
-  detachForShutdown?: () => void
+  detachForShutdown?: () => void | Promise<void>
   /**
    * Full stdin detach for the /update child handoff (issues #284/#307):
    * removes the readable/data listeners and pauses the pump so the
@@ -2922,7 +2940,7 @@ export async function finishExit(
     const cursor = fullscreen ? '' : cursorMoveToFrameEnd(runtime)
 
     try {
-      runtime?.detachForShutdown?.()
+      await runtime?.detachForShutdown?.()
       // The /update continuation spawns children that inherit this stdin;
       // strip the readable pump so the parent cannot swallow their input
       // (issues #284/#307). Harmless on plain exits — the process exits
@@ -3117,27 +3135,6 @@ export function handleStartupError(ctx: Context, error: unknown): void {
  */
 function disposeRootAndExit(ctx: Context, code: number): void {
   disposeRootAndThen(ctx, () => process.exit(code), code)
-}
-
-/** Chat's SDK install wizard props (the dim row's Enter path): the spec comes
- *  from the registry entry that declares `sdkInstall`, the actions from this
- *  host. Empty when nothing declares it — `canInstallSdk` wants all four, so the
- *  dim row keeps its dead-end reason instead of opening a wizard with no
- *  target. */
-function sdkInstallProps(): {
-  readonly onResolveSdkInstallTarget?: () => SdkInstallTarget
-  readonly onStartSdkInstall?: (dir: string) => SdkInstaller
-  readonly onCheckPnpm?: () => Promise<boolean>
-  readonly sdkInstallPinned?: { readonly specifier: string; readonly version: string }
-} {
-  const surface = sdkInstallSurface()
-  if (surface === undefined) return {}
-  return {
-    onResolveSdkInstallTarget: surface.resolveTarget,
-    onStartSdkInstall: surface.start,
-    onCheckPnpm: surface.checkPnpm,
-    sdkInstallPinned: { specifier: surface.specifier, version: surface.version },
-  }
 }
 
 /**

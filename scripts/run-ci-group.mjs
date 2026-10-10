@@ -73,6 +73,9 @@ const GROUPS = {
 // SDK 安装向导（内核选择器「未安装」行进入）：各步骤态的正文与提示行、
 // 手动兜底命令、窄终端截断、en 态文案。
     ['verify-sdk-install-wizard', ['node', '--import', 'tsx/esm', 'scripts/verify-sdk-install-wizard.tsx']],
+// 真实 Chat 安装链：两个可安装后端、鼠标关闭、预检/安装取消与迟到结果隔离；
+// inline/fullscreen × 常规/窄终端，安装动作全为夹具。
+    ['verify-sdk-install-chat', ['node', '--import', 'tsx/esm', 'scripts/verify-sdk-install-chat.tsx']],
 // 带断言的回归：提问面板内联输入（issue #9）+ 工具卡排版
 // （⎿ 缩进、diff 红绿行、信封剥离），失败即非零退出。
     ["repro-askpanel", ['node', '--import', 'tsx/esm', 'scripts/repro-askpanel.tsx']],
@@ -296,6 +299,9 @@ const GROUPS = {
     ["verify-btw-thread", ['node', '--import', 'tsx/esm', 'scripts/verify-btw-thread.mjs']],
   ],
   'input-terminal': [
+// 原生光标：inline/fullscreen × 宽/窄终端、无同步输出的重绘顺序、
+// 纯光标移动不隐藏、列表焦点与可见性切换、resize、外部交接与退出恢复。
+    ['verify-native-cursor', ['node', '--import', 'tsx/esm', 'scripts/verify-native-cursor.tsx']],
 // 按键解析回归（issue #110）：Option+Enter（ESC CR）精确/合并/分块
 // 三种到达形态、CSI-u 与 modifyOtherKeys 的 Shift/Ctrl/Meta+Enter。
     ["verify-keys", ['node', '--import', 'tsx/esm', 'scripts/verify-keys.tsx']],
@@ -339,6 +345,8 @@ const GROUPS = {
     ["verify-exit-resume-marker", ['node', '--import', 'tsx/esm', 'scripts/verify-exit-resume-marker.tsx']],
 // 退出阶段 stderr/console 恢复回归（issue #42）：shutdown 解绑恢复物理流并注销监听器。
     ["verify-shutdown-stderr", ['node', '--import', 'tsx/esm', 'scripts/verify-shutdown-stderr.tsx']],
+// 迁移提示的退出生命周期：真实 Chat + UI lease，覆盖待触发/扫描在途/消失定时器与双渲染模式。
+    ["verify-migrate-hint-lifecycle", ['node', '--import', 'tsx/esm', 'scripts/verify-migrate-hint-lifecycle.tsx']],
 // 退出收尾运行时未命中回退：找不到 Ink runtime 时必须走完整 unmount 恢复终端。
     ["verify-shutdown-fallback", ['node', '--import', 'tsx/esm', 'scripts/verify-shutdown-fallback.tsx']],
 // 退出鼠标残留回归（issue #522）：detach 闩锁后自愈探针不再重写
@@ -364,6 +372,9 @@ const GROUPS = {
 // 连续 dragmove、release/focus-out/reset 收尾 dragend；未移动仍走 click，
 // 无 handler 与修饰键区域保留基线文本选择；真实 SGR 管线 + 最小滑块消费者。
     ["verify-drag-protocol", ['node', '--import', 'tsx/esm', 'scripts/verify-drag-protocol.tsx']],
+// 全屏拖选自动复制后保留选区，重复 release 不重复复制；选区高亮跳过
+// 行尾填充/空白行，并保留代码缩进、软换行分隔空格和 Unicode 字符。
+    ['verify-copy-on-select', ['node', 'scripts/verify-copy-on-select.mjs']],
 // hover 事件性能与健壮性回归：同批 motion 保留兴趣边界（tooltip dwell
 // 不提前）、无兴趣矩形快路径跳过全树 hit-test，且渲染提交/帧边界/
 // 多 root 失效；拖拽 motion 逐事件到达。
@@ -445,8 +456,10 @@ const GROUPS = {
   ],
   'session-workspace': [
     ["verify-backend-startup", ['node', '--import', 'tsx/esm', 'scripts/verify-backend-startup.ts']],
-// 后端注册表回归（P0 Stage A）：注册闸门（重复 id / 保留 id / 非 inTree 用宿主
-// 词表 / native 越权 / installable 与 sdkInstall 漂移）、五条来源的两段式解析
+// 后端注册表回归（P0 Stage A + B-1）：注册闸门（重复 id / 保留 id / 非 inTree 用宿主
+// 词表 / native 越权 / 安装配方缺字段）、**安装面按声明不按 id**（非 inTree 条目声明
+// 宿主执行器即可装、装的是它自己的 specifier；codex 式"没有安装面"是缺省配方；
+// 宿主不认识的执行器＝不抛错、不可装、无向导）、五条来源的两段式解析
 // （语法合法但未装的 id → dsh + 告警，绝不打死 boot）、D4 的池记账（未加载即
 // 不 import、不关池；已加载的按序关、幂等、单条失败不阻断也不抛）、生成索引的
 // 发现/行序/失败即红，以及**坏基线必须红**——把边界门禁连同 src 副本搬进临时
@@ -1024,9 +1037,11 @@ const GROUPS = {
 // 已随三合一会话界面删除，其断言一并移除。
     ["verify-agent-view", ['node', '--import', 'tsx/esm', 'scripts/verify-agent-view.mjs']],
 // 后台任务（ctx.jobs）UI 投影：BackgroundJobStore 单元（注册/转换/消失
-// 合成 killed/输出镜像有界）、channel 集成（建卡、job_output 镜像、落定
-// toast、kill 权限传递、无 jobs 服务降级、/new 重置）、JobCard/JobsPanel
-// 渲染冒烟（三行瀑布、settled 折叠、面板行/提示）。
+// 合成 killed/removed 整条丢弃/输出镜像有界）、channel 集成（建卡、job_output
+// 镜像、落定 toast、awaited 落定不报 toast、removed 让前台 shell 的卡离场、
+// 有调用在飞时挂起卡、换绑从会话日志重建在飞台账、kill 权限传递、无 jobs
+// 服务降级、/new 重置）、JobCard/JobsPanel 渲染冒烟（三行瀑布、settled 折叠、
+// 面板行/提示）。
     ["verify-jobs-panel", ['node', '--import', 'tsx/esm', 'scripts/verify-jobs-panel.tsx']],
 // jobs 面板：最近进度跨 settle 保留（带时间与来源）、有界时间线（启动/进度/输出/
 // 缺口/收尾，满了丢最旧）、保留的尾巴如实标注、无历史时的提示。
@@ -1174,11 +1189,12 @@ const GROUPS = {
     ["verify-balance", ['node', '--import', 'tsx/esm', 'scripts/verify-balance.tsx']],
 // 本会话费用估算回归（#1089）：主会话按模型分桶 + 子代理按各自 (provider, model)、峰值/空闲、缓存分项合并计价，非官方/未收录只报 token 并标注未计价。
     ["verify-session-cost", ['node', '--import', 'tsx/esm', 'scripts/verify-session-cost.tsx']],
-// /model 二级选择器派生回归：provider 分组（首现排序、显示名回退、
-// 计数）与落焦规则（多 provider 聚焦当前组、单 provider 直达模型层、
-// 缺席当前 provider 落首行）。键盘与 overlay 归约由 verify-chat-overlay
-// 覆盖，这里钉住两层共用的纯派生。
+// /model 标签选择器派生回归：provider 分组（首现排序、显示名回退、
+// 计数）、最近使用目录交集/持久化与初始提供商/模型焦点。
     ["verify-model-picker-groups", ['node', 'scripts/verify-model-picker-groups.mjs']],
+// /model 同页交互：最近使用置顶、Tab/Shift+Tab、模型/推理草稿、取消、
+// 同批键序、鼠标/滚轮与 inline/fullscreen 窄终端窗口化。
+    ['verify-model-picker-ui', ['node', '--import', 'tsx/esm', 'scripts/verify-model-picker-ui.tsx']],
 // 全屏出厂默认迁移回归（0.9.x schema + cordis.patch.yml false→true 翻转）：
 // 翻转前钉在 settings 用户层的显式 false 首启被 unset 一次（marker 仅在
 // 写入成功后落盘，失败下次自愈重试），此后再写的 false 是用户主动选择
