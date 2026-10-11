@@ -770,9 +770,28 @@ export function Chat({
     setLaunchpadCaret(cursor)
   }
   const launchpadBindingGeneration = resolveBindingGeneration(channel)
+  /** Agent the launchpad draft effect below last reconciled against; a change
+   *  is a switch, the same bookkeeping the composer's `draftSessionRef` keeps. */
+  const launchpadDraftAgentRef = React.useRef(String(channel.agentId))
+  /**
+   * Seed the launchpad draft from the session it is about to start: a
+   * REPLACEMENT of the conversation wipes it, a model switch keeps it. The
+   * switch is the only adoption that declares itself a continuation
+   * (`ChannelUi.continuedFromAgentId`, written in
+   * `dsh-adapter/channel/model-switch.ts` and cleared for every other adoption
+   * by `dsh-adapter/channel/session-reset.ts`), and it counts only when it
+   * names the agent this screen was last rendered against.
+   *
+   * The cleanup stays unconditional either way: the switch revokes the staged
+   * capabilities, so a kept draft shows its `[Image #N]` tokens as plain text.
+   */
   React.useEffect(() => {
-    setLaunchpadDraft('')
-    setLaunchpadCaret(0)
+    const previousAgentId = launchpadDraftAgentRef.current
+    launchpadDraftAgentRef.current = String(channel.agentId)
+    if (channel.continuedFromAgentId !== previousAgentId) {
+      setLaunchpadDraft('')
+      setLaunchpadCaret(0)
+    }
     const bindings = launchpadImagesRef.current
     return () => {
       for (const stageId of bindings.values()) channel.discardStagedImage(stageId)
@@ -1990,9 +2009,16 @@ export function Chat({
    * typed in between (the tree's hand-off, a fast user) would be wiped with the
    * old conversation's text. Which DRAFT the slot keeps is a separate question,
    * answered by the snapshot's owner fields.
+   *
+   * A model switch does not replace the conversation, and the channel declares
+   * that through `ChannelUi.continuedFromAgentId` (see `model-switch.ts` and
+   * `session-reset.ts`): naming the agent this screen was last rendered against
+   * is the one case that keeps the draft. A replacement carries `undefined`, so
+   * it clears exactly as before — as does a host without the property.
    */
   React.useLayoutEffect(() => {
     if (draftSessionRef.current === draftSessionId) return
+    const previous = draftSessionRef.current
     draftSessionRef.current = draftSessionId
     // A stored draft can only belong to the conversation being replaced: the
     // composer is the one that writes it, and it writes it on the way out.
@@ -2001,6 +2027,9 @@ export function Chat({
       pendingFillRef.current = null
       return
     }
+    // The one exemption: this adoption continued the conversation the composer
+    // was last rendered against, so the draft it holds is still the user's own.
+    if (channel.continuedFromAgentId === previous) return
     promptControllerRef.current?.clear()
   }, [draftSessionId])
   const previewGallery = activePreview === null ? [] : activePreview.peek
