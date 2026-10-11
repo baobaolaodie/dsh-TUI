@@ -196,9 +196,14 @@ const noopUnsubscribe = (): (() => void) => () => {}
  * model switch moves. Mutable slices are getters over `state` so a scenario can
  * mutate them and `bump()` exactly like the real channel's adoption transaction.
  *
- * `continuedFromAgentId` is declared here as the fix declares it in `ChannelUi`
- * (present, `undefined` by default). `makeChannel({ legacy: true })` deletes it
- * again to model a stub / older host that never heard of the property (AC-6).
+ * `continuedFromAgentId` is mirrored here the way the fix declares it in
+ * `ChannelUi`: a FLAT field on the channel view itself (present, `undefined` by
+ * default) and NOT only a slice of the internal `state` bag — `Chat.tsx` reads
+ * `channel.continuedFromAgentId` at both clear points, so a stub that keeps the
+ * fact one level down leaves the exemption permanently undefined and makes the
+ * assertions below fail for a reason that has nothing to do with the fix (T01
+ * rework, L-044/L-052). `makeChannel({ legacy: true })` deletes it again to
+ * model a stub / older host that never heard of the property (AC-6).
  */
 function makeChannel(options: { legacy?: boolean } = {}) {
   const listeners = new Set<() => void>()
@@ -260,6 +265,13 @@ function makeChannel(options: { legacy?: boolean } = {}) {
     },
     get backgroundJobs() {
       return EMPTY_LIST
+    },
+    /** The fact under test, on the SAME flat surface the real view exposes it on
+     *  (`ChannelUi.continuedFromAgentId` -> `Chat.tsx:791` / `Chat.tsx:2032`).
+     *  Every `state.continuedFromAgentId` write below is therefore readable by
+     *  the UI, and the `legacy` delete really removes a property that existed. */
+    get continuedFromAgentId(): string | undefined {
+      return state.continuedFromAgentId
     },
     subscribe(cb: () => void) {
       listeners.add(cb)
@@ -676,7 +688,21 @@ async function scenarioLaunchpadContinuation(): Promise<void> {
       'a continuation model switch must keep the launchpad draft (today its effect clears it)',
       launchpadDraftText(app) === draft,
     )
-    assertTrue(scenario, 'the launchpad is still up after the switch', screenHas(app, LAUNCHPAD_PLACEHOLDER))
+    // "The launchpad is still up" cannot be anchored on LAUNCHPAD_PLACEHOLDER:
+    // the placeholder is drawn only while the input is EMPTY, so that assertion
+    // held exactly when the draft was wiped — the opposite of this scenario's
+    // point (T01 rework, L-044). The input row is the anchor that survives a
+    // non-empty draft, but on its own it would merely restate a sub-expression
+    // of the draft assertion above (`launchpadDraftText` returns `''` when there
+    // is no `❯` row, so a non-empty draft already proves the row is there). The
+    // second conjunct is what "still up" adds: the switch did not fall back to
+    // the conversation view, whose composer is the only other `⛶`-bearing box
+    // (`⛶` lives only in `PromptInput.tsx`).
+    assertTrue(
+      scenario,
+      'the launchpad is still up after the switch (the conversation composer did not take over)',
+      launchpadInputRow(app).includes('❯') && !composerMounted(app),
+    )
   } finally {
     app.unmount()
   }
@@ -871,7 +897,11 @@ async function scenarioActionFactSource(): Promise<void> {
     OLD_AGENT_ID,
     state.continuedFromAgentId,
   )
-  assertTrue(scenario, 'the switch emitted once', emits > 0)
+  // The message promises ONCE, so the predicate has to be `=== 1` too: `> 0`
+  // would also accept a switch that double-emits. `model-switch.ts:122` is the
+  // adoption transaction's only `state.emit()` and `resetSessionProjection`
+  // emits nothing, so exactly one is the fact.
+  assertEqual(scenario, 'the switch emitted exactly once', 1, emits)
   // L-049 / L-055: `DATA_DIR` is a module-level constant resolved at import
   // time, so "this run was isolated" has to be EVIDENCED, not assumed — the
   // transaction's own side effects (`touchSession`, `writeModelPref`) must have
