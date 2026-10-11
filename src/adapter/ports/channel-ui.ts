@@ -67,6 +67,23 @@ export interface ChannelUi {
   readonly sessionId: string
   /** TUI-owned generation that changes on every live Agent rebind. */
   readonly agentBindingGeneration: number
+  /** The agent id this binding CONTINUED FROM; `undefined` when the adoption
+   *  behind the binding REPLACED the conversation.
+   *
+   *  Its one writer is the continuation adoption — today the `/model` fork in
+   *  `dsh-adapter/channel/model-switch.ts`, which writes it AFTER calling
+   *  `resetSessionProjection` (a write before that reset would be erased by
+   *  it). Every other adoption path writes nothing: they all reset through
+   *  `dsh-adapter/channel/session-reset.ts`'s `resetSessionProjection`, so
+   *  "not a continuation" is the default an adoption inherits by doing
+   *  nothing.
+   *
+   *  Scope: this answers ONLY "did this one adoption continue the existing
+   *  conversation" — the question a draft owner asks before keeping a draft
+   *  across a model switch. It is NOT a session identity: do not read it as a
+   *  `conversationId`, do not persist it, and do not build infrastructure on
+   *  it — it narrates one adoption and is replaced by the next one. */
+  readonly continuedFromAgentId: string | undefined
   /** Cross-backend identity of the bound session (`backendId` + the
    *  backend's own session id); follows every rebind. */
   readonly sessionRef: ChannelSessionRef

@@ -88,8 +88,14 @@ export function createModelSwitchAction(
     const handle = dshHandleOf(candidate)
     let committed = false
     try {
-      const result = deps.binding.adopt<boolean>(candidate, adoption, (_previous, disposePrevious) => {
+      const result = deps.binding.adopt<boolean>(candidate, adoption, (previous, disposePrevious) => {
         resetSessionProjection(state, deps.rowIds, deps.resetProjector, deps.resetSubagents, deps.resetJobs)
+        // The ONE continuation write, and it must follow the shared reset: this
+        // adoption continues the conversation it forked, so the fact names the
+        // agent the binding came FROM (`previous.agent.id`, the same source
+        // `state.agentId` is written from). Every other adoption leaves the
+        // reset's "none".
+        state.continuedFromAgentId = String(previous.agent.id)
         state.status = handle.agent.status
         state.agentId = handle.agent.id
         state.sessionId = handle.agent.session.id

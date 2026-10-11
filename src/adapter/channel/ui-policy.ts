@@ -161,6 +161,7 @@ export const CHANNEL_UI_PROPERTIES = [
   'agentId',
   'sessionId',
   'agentBindingGeneration',
+  'continuedFromAgentId',
   'sessionRef',
   'backendCapabilities',
   'costReport',
