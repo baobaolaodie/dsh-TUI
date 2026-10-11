@@ -647,6 +647,16 @@ const GROUPS = {
 // 空草稿不留残留。这条测的是「渲染期写回会先于认领 effect 覆盖草稿」，
 // 只靠打字或由浮层换屏都到不了。
     ["verify-composer-draft-handoff", ['node', '--import', 'tsx/esm', 'scripts/verify-composer-draft-handoff.tsx']],
+// 切换模型保留未发送草稿回归（issue #1455 第一条）：`/model` 是 fork 采纳 ⇒
+// agentId 变，Chat 两处清空点（composer 的 session-swap layout effect、启动页的
+// `[channel, agentId, bindingGeneration]` effect）只能靠 channel 的只读事实位
+// `continuedFromAgentId` 区分「延续」与「替换」。五条场景：聊天页 / 启动页的
+// 延续切换逐字保留草稿（含光标、参数行模型名、缺属性 stub 的兼容分支）、裸
+// agentId 变化仍照旧清空、动作层真源（createModelSwitchAction 写入 +
+// resetSessionProjection 复位）、草稿里的 `[Image #N]` 退化为纯文本且旧
+// capability 不再绑定。**实现落地前 A/B/D/E 必红、C 按既有行为绿**——红基线
+// 就是这条断言的判别力自证。`VERIFY_DRAFT_SWITCH_SCENARIOS=A,B` 跑子集。
+    ["verify-composer-draft-model-switch", ['node', '--import', 'tsx/esm', 'scripts/verify-composer-draft-model-switch.tsx']],
 // Tooltip 悬停提示回归：悬停截断元素 ~600ms 后弹完整内容浮层——延迟未到
 // 不出现、到点内容正确、leave 即隐、leave 早于延迟取消、自定义 delayMs、
 // 多行内容锚点上方、屏顶锚点转下方、resize 隐藏（几何失效）、窄屏水平钳制；
