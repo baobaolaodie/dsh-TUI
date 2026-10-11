@@ -347,7 +347,7 @@ screen, and Chat keeps the draft — text, caret position, the staged image refe
 the edit state around them (fold block, fullscreen draft editor, vim mode) — until `Esc`
 brings it back.
 
-- A draft belongs to its **session**, so it never follows you into another conversation. Switching the model does not count as changing the conversation: the unsent draft is kept.
+- A draft belongs to its **session**, so it never follows you into another conversation. Switching the model does not count as changing the conversation: the unsent draft (text and caret) is kept; staged image references are revoked and their [Image #N] tokens become plain text.
 - The message `/rewind` hands back belongs to the session the rewind created, so it does stay in the input.
 
 | Key | Action |
@@ -505,7 +505,7 @@ Confirmation submits only explicit effort drafts. Changing only the model leaves
 `Enter` applies the model and effort; `Esc` cancels the draft. Shortcuts sit below the title, and a separate effort heading and level strip sit below the models, with the `←/→` hint beside the effort heading. Selectable levels use the body text color and the current level is highlighted. DSH, Claude, and Codex use the terminal background while covering the text underneath.
 Click tabs, models, and effort levels, then click **select** or **cancel** below the title; the wheel moves through the model list. When space above the input is tight, navigation hints, model descriptions and neighboring models are omitted, effort collapses to one row, and Select / Cancel stay at the bottom. With only two rows, effort is hidden too, keeping the focused model and actions visible.
 
-`/model` switches through a session fork at the end of current history, because DSH has no in-place model-switch API. The old session remains in `/resume`. Switching the model does not count as changing the conversation: the unsent draft is kept.
+`/model` switches through a session fork at the end of current history, because DSH has no in-place model-switch API. The old session remains in `/resume`. Switching the model does not count as changing the conversation: the unsent draft (text and caret) is kept; staged image references are revoked and their [Image #N] tokens become plain text.
 
 - A session nobody has typed into records no branch: switching models there yields an independent session with no `parentSession` (inheriting the same session-scaffolding prefix), so the first real prompt you send still triggers automatic session-title generation. A session that already holds a conversation keeps its lineage as before.
 
