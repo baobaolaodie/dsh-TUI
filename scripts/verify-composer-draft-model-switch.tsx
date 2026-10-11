@@ -25,11 +25,19 @@
  *   D  action layer — `createModelSwitchAction` writes the fact for the agent
  *      the binding came FROM, and `resetSessionProjection` clears it again
  *   E  images — a visible `[Image #N]` stays as text while its old capability
- *      stops being bound (`hasStagedImage` false)
+ *      stops being bound (`hasStagedImage` false); the colour probe is
+ *      positively controlled before the switch
+ *   F  the real facade — a REAL `createChannel` under the production
+ *      `mountChannelUi` projects the fact a REAL `switchModel` writes, and a
+ *      REAL `/new` leaves it empty (A~E all drive the stub channel, so none of
+ *      them would notice the production projection losing the fact; the live
+ *      `state.continuedFromAgentId` slot is invisible to `Chat.tsx` unless
+ *      `CHANNEL_UI_PROPERTIES` -> `createChannelUi` carries it — F1 in
+ *      `probe/review-adversarial.md` / L-014)
  *
- * A/B/D/E are RED until the implementation lands; C pins existing behaviour and
- * passes on the pre-fix tree. That split is the point of this file: the RED run
- * is the evidence that the new assertions have discriminating power.
+ * A/B/D/E/F are RED until the implementation lands; C pins existing behaviour
+ * and passes on the pre-fix tree. That split is the point of this file: the RED
+ * run is the evidence that the new assertions have discriminating power.
  *
  * Drives the REAL `Chat` (+ `PromptInput` / `Launchpad`) through fake stdin and a
  * headless xterm, like `verify-composer-draft-screen-switch.tsx`. Waits go
@@ -79,6 +87,10 @@ const [
   { createModelSwitchAction },
   { resetSessionProjection },
   { setLang, t },
+  { Context },
+  { createChannel },
+  { mountChannelUi },
+  { registerTuiChannel },
 ] = await Promise.all([
   import('node:stream'),
   import('react'),
@@ -91,6 +103,12 @@ const [
   import('../src/dsh-adapter/channel/model-switch.js'),
   import('../src/dsh-adapter/channel/session-reset.js'),
   import('../src/i18n.js'),
+  // Scenario F only: the real cordis context, the real channel and the
+  // production UI-facade assembly (all `src/` modules, no live DSH services).
+  import('@deepseek-ai/cordis'),
+  import('../src/dsh-adapter/channel.js'),
+  import('../src/dsh-adapter/channel-ui.js'),
+  import('../src/adapter/channel/host-registry.js'),
 ])
 // The script runs in zh (see `DSH_TUI_LANG` above). Set it explicitly rather
 // than trusting the import-time detection: the one dictionary string read below
@@ -940,6 +958,16 @@ async function scenarioImageTokenDegrades(): Promise<void> {
     await waitFor(scenario, 'the staged image token', () => composerHas(app, STAGED_IMAGE_TOKEN), RENDER_TIMEOUT_MS)
     const stageId = [...app.channel.state.staged.keys()].at(-1)!
     assertTrue(scenario, 'the capability is live before the switch', app.channel.hasStagedImage(stageId))
+    // Positive control for the degrade assertion below (L-044 / probe F4): that
+    // assertion only says something if THIS probe can see a chip at all — a
+    // probe stuck at `ok === false` (token invisible, colour read failed, cell
+    // lookup broken) would satisfy it for a reason unrelated to the switch.
+    const chipBefore = tokenIsChip(app, STAGED_IMAGE_TOKEN)
+    assertTrue(
+      scenario,
+      `the token must be a bound chip before the switch (${chipBefore.detail})`,
+      chipBefore.ok,
+    )
 
     emitModelSwitch(app, {
       agentId: AGENT_AFTER,
@@ -973,6 +1001,147 @@ async function scenarioImageTokenDegrades(): Promise<void> {
   }
 }
 
+/**
+ * One fake DSH agent, shaped like `verify-session-reset-hygiene.tsx`'s fixture:
+ * the real adoption transactions only need an id, a session log and an idle
+ * status to run offline (no credentials).
+ */
+function makeFacadeAgent(agentId: string, sessionId: string) {
+  return {
+    id: agentId,
+    status: 'idle',
+    options: {},
+    ctx: { on: () => () => {} },
+    session: { id: sessionId, seq: 0, events: [], header: {} },
+    followup() {},
+    steer() {},
+    inbox: { remove: () => true },
+    cancel() {},
+    whenIdle: () => Promise.resolve(),
+  }
+}
+
+/**
+ * Mount the production UI facade over a REAL channel (scenario F): a real
+ * cordis `Context`, a real `createChannel`, then `mountChannelUi` — the
+ * assembly `Chat.tsx` receives its channel from. With no plugin host the mount
+ * binds its guarded local capability, which is the real `createChannelUi`
+ * projection over the real channel, the same factory the kernel path uses.
+ *
+ * `roster` feeds `agents.create` one agent per adoption, in call order: the
+ * switch and the `/new` after it each take the next entry.
+ */
+function mountRealFacade(options: {
+  boot: { agentId: string; sessionId: string }
+  roster: Array<{ agentId: string; sessionId: string }>
+  provider: string
+}) {
+  const ctx = new Context()
+  const provide = (ctx as unknown as { provide(name: string, value: unknown): void }).provide.bind(ctx)
+  provide('agents', {
+    get: () => undefined,
+    create: () => {
+      const next = options.roster.shift()
+      if (next === undefined) throw new Error('scenario F: unexpected extra agent creation')
+      return Promise.resolve({
+        agent: makeFacadeAgent(next.agentId, next.sessionId),
+        dispose: () => Promise.resolve(),
+      })
+    },
+  })
+  provide('sessions', { fork: () => ({ events: [] }) })
+  const raw = createChannel(ctx as never, makeFacadeAgent(options.boot.agentId, options.boot.sessionId) as never, {
+    model: MODEL_BEFORE,
+    cwd: '/tmp/probe',
+    provider: options.provider,
+    activity: false,
+  })
+  const unregister = registerTuiChannel(ctx, raw)
+  const mounted = mountChannelUi(ctx, raw, undefined, 'new')
+  return {
+    raw,
+    ui: mounted.channel,
+    dispose: () => {
+      mounted.dispose()
+      unregister()
+      raw.releaseContributions()
+    },
+  }
+}
+
+/**
+ * ── F · the REAL facade: the fact survives the production projection ──────
+ *
+ * A~E all drive the stub channel, so every one of them would stay green if the
+ * production UI projection stopped carrying the fact — a key dropped from
+ * `CHANNEL_UI_PROPERTIES`, or the facade reading a JSON snapshot instead of the
+ * live state, leaves `Chat.tsx` reading `undefined` and wiping the draft again
+ * (`review-adversarial.md` §1 / F1, L-014).
+ *
+ * The composition is the minimal one the F1 probe used; what this scenario adds
+ * is a REAL `switchModel` and a REAL `/new` through that facade — the exact
+ * surface `Chat.tsx` consumes. Honest bound: the DSH `agents` / `sessions`
+ * services are fakes (a regression has no live credentials), so the chain is
+ * real from the channel state up through the facade, not a live-DSH run.
+ */
+async function scenarioRealFacadeProjection(): Promise<void> {
+  const scenario = 'F'
+  const PROVIDER = 'probe-provider'
+  const BOOT = { agentId: 'facade-agent-boot', sessionId: 'facade-session-boot' }
+  const SWITCHED = { agentId: 'facade-agent-switched', sessionId: 'facade-session-switched' }
+  const REPLACED = { agentId: 'facade-agent-replaced', sessionId: 'facade-session-replaced' }
+  const facade = mountRealFacade({ boot: BOOT, roster: [SWITCHED, REPLACED], provider: PROVIDER })
+  const { raw, ui } = facade
+  try {
+    const bootAgentId = ui.agentId
+    assertEqual(scenario, 'the facade starts on the boot agent', BOOT.agentId, bootAgentId)
+    assertEqual(scenario, 'the fact starts empty (no adoption yet)', undefined, ui.continuedFromAgentId)
+    // The other half of F1's failure mode: a key missing from
+    // `CHANNEL_UI_PROPERTIES` never lands on the facade at all, so the
+    // `Chat.tsx` read would silently be `undefined` forever.
+    assertEqual(
+      scenario,
+      'the production facade carries the fact at all (CHANNEL_UI_PROPERTIES)',
+      true,
+      'continuedFromAgentId' in (ui as unknown as Record<string, unknown>),
+    )
+
+    // A REAL switch through the facade — the same wire `Chat.tsx` uses.
+    assertEqual(scenario, 'the real model switch reports success', true, await ui.switchModel(PROVIDER, MODEL_AFTER))
+    assertEqual(scenario, 'the switch really adopted another agent', SWITCHED.agentId, ui.agentId)
+    assertEqual(
+      scenario,
+      'the production UI projection must expose the continuation fact as the agent the binding came from '
+        + '(the value `Chat.tsx` compares against its last-rendered agentId to keep the draft)',
+      bootAgentId,
+      ui.continuedFromAgentId,
+    )
+    // ...and it must be the LIVE slot, not a detached copy: `Chat.tsx` reads it
+    // in the same render pass that observes the adoption transaction.
+    assertEqual(
+      scenario,
+      'the facade reading is the live state slot, not a copy',
+      (raw as unknown as Record<string, unknown>)['continuedFromAgentId'],
+      ui.continuedFromAgentId,
+    )
+
+    // A REAL replacement adoption through the same facade: `/new` runs the
+    // shared `resetSessionProjection`, so the fact must be empty again — this
+    // is what stops a replacement from inheriting the previous continuation's
+    // exemption.
+    assertEqual(scenario, 'the real /new reports success', true, await ui.newSession())
+    assertEqual(scenario, '/new really adopted another agent', REPLACED.agentId, ui.agentId)
+    assertEqual(
+      scenario,
+      'a replacement adoption must leave no continuation fact on the facade',
+      undefined,
+      ui.continuedFromAgentId,
+    )
+  } finally {
+    facade.dispose()
+  }
+}
+
 interface Scenario {
   readonly id: string
   readonly name: string
@@ -985,6 +1154,7 @@ const RUNNERS: readonly Scenario[] = [
   { id: 'C', name: 'a replaced conversation still clears its draft', run: scenarioReplacementClears },
   { id: 'D', name: 'the switch writes the fact, resetSessionProjection clears it', run: scenarioActionFactSource },
   { id: 'E', name: 'an image token degrades without binding the old capability', run: scenarioImageTokenDegrades },
+  { id: 'F', name: 'the real channel facade projects the continuation fact', run: scenarioRealFacadeProjection },
 ]
 
 try {
