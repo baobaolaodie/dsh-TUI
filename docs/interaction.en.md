@@ -64,10 +64,13 @@ side panel (`Ctrl+B`/`Alt+Z`), subagent dashboard, show-all, and todo fold are r
 - Plugins may also contribute one text line above the prompt, or a compact rich status view of up to three rows when the host exposes `tuiStatus.registerView`.
 - Rich views receive only host `Box`, `Text`, `Image`, and terminal size. Click/hover/drag work in fullscreen, and the view never owns the keyboard.
 - `Image` takes decoded RGBA pixels plus a same-size cell fallback.
-- After a successful Kitty probe, the host centers the image at its natural aspect ratio
-  using terminal-reported cell geometry (or a conservative default), adding transparent
-  letterboxing and downsampling when needed. Otherwise it renders the fallback (including
+- After a successful Kitty probe, the host enlarges or downsamples the image to the
+  reserved cell box's physical pixels, preserving its aspect ratio with centered transparent
+  letterboxing. It uses terminal-reported cell geometry (or a conservative default) and
+  downsamples boxes that exceed the pixel budget. Otherwise it renders the fallback (including
   inline, accessibility, and multiplexer sessions).
+- The 16 MiB frame budget bounds both decoded sources and fitted rasters;
+  images over the budget keep their text fallback.
 - Plugins provide the keyboard path for the same action through a slash command or `tuiShortcuts`.
 - A refused rich registration returns `undefined`; an admitted one returns a disposer that removes both the view and its Cordis effect.
 
@@ -349,7 +352,7 @@ screen, and Chat keeps the draft — text, caret position, the staged image refe
 the edit state around them (fold block, fullscreen draft editor, vim mode) — until `Esc`
 brings it back.
 
-- A draft belongs to its **session**, so it never follows you into another conversation. Switching the model does not count as changing the conversation: the unsent draft (text and caret) is kept; staged image references are revoked and their [Image #N] tokens become plain text.
+- A draft belongs to its **session**, so it never follows you into another conversation. Switching the model does not count as changing the conversation: the unsent draft (text and caret) is kept. DSH currently switches through a fork, revoking staged image references and leaving their [Image #N] tokens as plain text; Claude and Codex switch in place and keep staged image references.
 - The message `/rewind` hands back belongs to the session the rewind created, so it does stay in the input.
 
 | Key | Action |
@@ -507,7 +510,7 @@ Confirmation submits only explicit effort drafts. Changing only the model leaves
 `Enter` applies the model and effort; `Esc` cancels the draft. Shortcuts sit below the title, and a separate effort heading and level strip sit below the models, with the `←/→` hint beside the effort heading. Selectable levels use the body text color and the current level is highlighted. DSH, Claude, and Codex use the terminal background while covering the text underneath.
 Click tabs, models, and effort levels, then click **select** or **cancel** below the title; the wheel moves through the model list. When space above the input is tight, navigation hints, model descriptions and neighboring models are omitted, effort collapses to one row, and Select / Cancel stay at the bottom. With only two rows, effort is hidden too, keeping the focused model and actions visible.
 
-`/model` switches through a session fork at the end of current history, because DSH has no in-place model-switch API. The old session remains in `/resume`. Switching the model does not count as changing the conversation: the unsent draft (text and caret) is kept; staged image references are revoked and their [Image #N] tokens become plain text.
+`/model` switches through a session fork at the end of current history, because DSH has no in-place model-switch API. The old session remains in `/resume`. Switching the model does not count as changing the conversation: the unsent draft (text and caret) is kept. DSH currently switches through a fork, revoking staged image references and leaving their [Image #N] tokens as plain text; Claude and Codex switch in place and keep staged image references.
 
 - A session nobody has typed into records no branch: switching models there yields an independent session with no `parentSession` (inheriting the same session-scaffolding prefix), so the first real prompt you send still triggers automatic session-title generation. A session that already holds a conversation keeps its lineage as before.
 
@@ -813,7 +816,7 @@ The command menu merges local commands with the DSH command registry. Type `/` t
 - `/update`, `/vim` — vim editing mode toggle, see "Editing keys".
 - `/terminal-setup`, `/connect`, `/help`, `/exit` — aliases `/quit`, `/q`.
 - `/kernel` — opens the kernel picker (the current kernel is ticked; every row
-  carries a version and a one-line explanation), on DSH and Claude sessions alike.
+  carries a version and a one-line explanation), on DSH, Codex and Claude sessions alike.
   Picking the other kernel remembers it and restarts into it with a new session;
   the old session stays in `/resume`, and if the new session fails to start you
   are back on the old one. A running turn blocks the switch. The launchpad's
@@ -822,6 +825,11 @@ The command menu merges local commands with the DSH command registry. Type `/` t
   a later direct launch follows the flag. A fresh launch lands on the launchpad
   whichever kernel is remembered; a launch with a resume target goes straight
   into the session.
+- `/dsh`, `/codex`, `/claude` — directly choose the named kernel through the same
+  checks and restart flow as `/kernel`. Choosing the current kernel only reports
+  that it is already current; a running turn blocks switching. Missing Claude
+  opens the install wizard; missing or outdated Codex shows install/upgrade guidance.
+  These shortcuts also work before startup is ready.
 
 **Registry**
 

@@ -15,9 +15,13 @@
  * plugin surface, and `negotiate.ts` stays untouched (it has no backend concept
  * and does not need one).
  *
- * **Scope (W-1).** This decides; it does not wire the family into the registry /
- * descriptor chain. A third-party bundle still cannot reach a picker through it —
- * that is the C stage's entry condition, not a gap in this function.
+ * **Scope.** This decides; it does not wire the family into the registry /
+ * descriptor chain by itself. Since W-2 (stage C) that chain *is* wired —
+ * `Backend` is a host-published contract, the profile pins this family's contract
+ * profile by digest and the descriptor publishes the coordinate only on real
+ * probe evidence ({@link probeBackendAdmission}) — while the step that reads a
+ * mounted bundle's declaration into {@link registerBackend} is still the stage C
+ * install chain's work.
  *
  * **Published codes.** The contract profile
  * (`tui-profile/registry/contracts/backend-v1alpha1.json`) publishes exactly the

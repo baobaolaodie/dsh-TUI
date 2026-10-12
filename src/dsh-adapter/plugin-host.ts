@@ -77,6 +77,7 @@ import {
 } from './component-identity.js'
 import { activationContext, activationFiber, assertCallerContext, bindCallerEffect, compositionRoot, concreteService, withHostRootCapability } from './host-access.js'
 import { bindHostGrantStore } from './host-grants.js'
+import { probeBackendAdmission, type BackendAdmissionProbe } from './backend-registry.js'
 import { registerCommandLiveProbe } from '../adapter/kernel/host-probe-access.js'
 
 /** Caller-safe grant facade exposed through `ctx.tuiPluginHost.grants`.
@@ -121,6 +122,11 @@ export interface TuiPluginHost {
   selfCheck(): string[]
   /** Read-only DecisionEvents feature probe (host/driver diagnostics). */
   probeDecisionEvents(): readonly string[]
+  /** Read-only backend admission probe (host/driver diagnostics): whether the
+   *  `Backend` contribution family's admission machine is mounted and answers
+   *  for a third-party declaration. This is the evidence the host descriptor
+   *  publishes `tui.dsh/v1alpha1#Backend` on (W-2). */
+  probeBackendAdmission(): BackendAdmissionProbe
 }
 
 declare module '@deepseek-ai/cordis' {
@@ -171,6 +177,15 @@ export class TuiPluginHostRuntime extends Service implements TuiPluginHost {
   probeDecisionEvents(): readonly string[] {
     this.assertEffect('host.decision.probe')
     return probeDecisionEventFeatures(hostContextFor(this))
+  }
+
+  /** Read-only backend admission probe. Read-only and side-effect free: it
+   * exercises the family validator and the host's admission facts on a
+   * synthetic declaration and reports the verdict, so the descriptor never
+   * claims the `Backend` coordinate off a mere mounted service row. */
+  probeBackendAdmission(): BackendAdmissionProbe {
+    this.assertEffect('host.backend.probe')
+    return probeBackendAdmission()
   }
 
   constructor(ctx: Context) {
@@ -381,13 +396,27 @@ export class TuiPluginHostRuntime extends Service implements TuiPluginHost {
     const storageMounted = host.get('tuiPluginStorage') !== undefined
     const observerMounted = host.get('tuiMessageObserver') !== undefined
     const decisionEventsMounted = probeDecisionEventFeatures(host).length > 0
-    const topology = `${Number(commandsMounted)}:${Number(storageMounted)}:${Number(observerMounted)}:${Number(decisionEventsMounted)}`
+    // The `Backend` admission machine is a process-wide module registry, not a
+    // sibling row: the legacy topology can read it directly, exactly like the
+    // DecisionEvents guard probe above. Without this the default (legacy) boot
+    // would never publish the coordinate, which is the "declares support, cannot
+    // deliver" state W-2 exists to end. A machine that cannot admit a contribution
+    // is not evidence — and it must not take the descriptor build down with it, so
+    // the refusal is reported the way the neighbouring exclusions are.
+    let backendMounted = false
+    try {
+      backendMounted = probeBackendAdmission().verdict === 'compatible'
+    } catch (error) {
+      host.logger.warn(`dsh-tui: host descriptor: tui.dsh/v1alpha1#Backend excluded — the backend admission machine did not answer (${error instanceof Error ? error.message : String(error)})`)
+    }
+    const topology = `${Number(commandsMounted)}:${Number(storageMounted)}:${Number(observerMounted)}:${Number(decisionEventsMounted)}:${Number(backendMounted)}`
     if (state.descriptorBuild === undefined || state.descriptorTopology !== topology) {
       const supported = HOST_SUPPORTED_CONTRACTS.filter(contract => {
         if (contract.kind === 'Command') return commandsMounted
         if (contract.kind === 'LocalStorage') return storageMounted
         if (contract.kind === 'MessageObserver') return observerMounted
         if (contract.kind === 'DecisionEvents') return decisionEventsMounted
+        if (contract.kind === 'Backend') return backendMounted
         return false
       })
       state.descriptorBuild = buildLegacyHostDescriptor({

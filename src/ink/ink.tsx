@@ -51,6 +51,7 @@ import { decrqm, kittyGraphics, terminalCellSizePixels, terminalWindowSizePixels
 import { TerminalWriteProvider } from './useTerminalNotification.js';
 import { TerminalImagesContext } from './hooks/use-terminal-images.js';
 import { DEFAULT_TERMINAL_CELL_SIZE, resolveTerminalCellSize, type TerminalImagePlacement } from './terminal-image.js';
+import { detachHandoffStdin } from './stdin-handoff.js';
 
 // Alt-screen: renderer.ts sets cursor.visible = !isTTY || screen.height===0,
 // which is always false in alt-screen (TTY + content fills screen).
@@ -772,6 +773,7 @@ export default class Ink {
       altScreen: this.altScreenActive,
       terminalImages: this.altScreenActive && (this.kittyGraphicsSupported || this.sixelGraphicsSupported),
       imageReady: sixelActive ? this.sixelGraphicsManager.prepare : undefined,
+      imageRasterBytes: this.altScreenActive && this.kittyGraphicsSupported ? this.kittyGraphicsManager.rasterBytes : undefined,
       // Sixel paints rasters over the cells: an image's own cells must then
       // carry the surface background instead of terminal-default blanks.
       opaqueImageBacking: sixelActive,
@@ -1670,17 +1672,10 @@ export default class Ink {
     } catch {
       // A destroyed stream must not block the handoff.
     }
-    stdin.removeAllListeners('readable');
-    stdin.removeAllListeners('data');
     try {
-      stdin.pause();
+      detachHandoffStdin(stdin);
     } catch {
-      // Same destroyed-stream tolerance as above.
-    }
-    try {
-      stdin.unref();
-    } catch {
-      // unref on a closed stream can throw on some Node versions.
+      // A revoked or closed stream must not block shutdown.
     }
   }
 

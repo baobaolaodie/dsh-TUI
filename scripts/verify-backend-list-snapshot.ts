@@ -8,14 +8,16 @@ import { join } from 'node:path'
 import type { SessionCatalog } from '../src/agent/backend.js'
 import type { AgentSession } from '../src/agent/session.js'
 import type { SessionSummary } from '../src/adapter/ports/channel-session.js'
+import type { ChannelStartup } from '../src/dsh-adapter/channel/state.js'
 
 const home = mkdtempSync(join(tmpdir(), 'dsh-tui-backend-list-'))
 process.env.HOME = home
 process.env.USERPROFILE = home
 process.env.DSH_TUI_LANG = 'en'
-const [{ createChannel }, { readListingSnapshot }] = await Promise.all([
+const [{ createChannel }, { beginListingSnapshot, readListingSnapshot }, { createStartingSession }] = await Promise.all([
   import('../src/dsh-adapter/channel.js'),
   import('../src/sessions/listSnapshot.js'),
+  import('../src/agent/starting-session.js'),
 ])
 let checks = 0
 function check(name: string, actual: unknown, expected: unknown): void {
@@ -36,14 +38,17 @@ const row = (id: string, backendId: string): SessionSummary => ({
 })
 const ids = (rows: readonly SessionSummary[] | undefined) => rows?.map(row => row.id)
 const channels: ReturnType<typeof createChannel>[] = []
-function channel(backendId: string, catalog: SessionCatalog) {
-  const session: AgentSession = {
-    ref: { backendId, sessionId: 'current' }, cwd: home, status: 'idle', capabilities: { native: {} },
+function fakeSession(backendId: string, sessionId = 'current', cwd = home): AgentSession {
+  return {
+    ref: { backendId, sessionId }, cwd, status: 'idle', capabilities: { native: {} },
     history: async () => [], subscribe: () => () => {}, submit: async () => ({ accepted: true }),
     cancel: async () => ({ stillQueued: [] }), dispose: async () => {},
   }
+}
+function channel(backendId: string, catalog: SessionCatalog, startup?: Promise<ChannelStartup>) {
+  const session = startup === undefined ? fakeSession(backendId) : createStartingSession(backendId, home)
   const ctx = { on: () => () => {}, get: () => undefined, logger: { warn() {}, info() {}, debug() {} } } as never
-  const result = createChannel(ctx, session, { cwd: home, model: 'fixture', provider: '', sessionCatalog: catalog })
+  const result = createChannel(ctx, session, { cwd: home, model: 'fixture', provider: '', sessionCatalog: catalog, ...(startup === undefined ? {} : { startup }) })
   channels.push(result)
   return result
 }
@@ -113,6 +118,136 @@ try {
     check(backendId + ': completion includes both workspaces', ids(await listing), ['newer-elsewhere', 'current-workspace'])
   }
 
+  for (const backendId of ['claude', 'codex']) {
+    const key = JSON.stringify([backendId, home, 'preload'])
+    beginListingSnapshot(key)([row('cached-old', backendId)])
+    const local = { ...row('native-new', backendId), updatedAt: 999 }
+    const foreign = { ...row('foreign', backendId), cwd: join(home, 'elsewhere') }
+    const workspace = gate<readonly SessionSummary[]>()
+    const global = gate<readonly SessionSummary[]>()
+    const began = gate<void>()
+    const allBegan = gate<void>()
+    const scopes: string[] = []
+    const preloaded = channel(backendId, {
+      snapshotKey: () => key,
+      list: async (scope, onPartial) => {
+        scopes.push(scope?.allProjects ? 'all' : scope?.cwd ?? '')
+        if (scope?.allProjects) { allBegan.resolve(); return global.promise }
+        onPartial?.([local])
+        began.resolve()
+        return workspace.promise
+      },
+    })
+    await began.promise
+    check(backendId + ': startup preloads cwd without opening the browser', scopes, [home])
+    const batches: string[][] = []
+    const browser = preloaded.listSessions(undefined, rows => { batches.push(ids(rows)!) })
+    const reopened = preloaded.listSessions()
+    check(backendId + ': a browser opened during preload receives earlier progress immediately', batches, [['native-new']])
+    check(backendId + ': opening and reopening the browser reuse the pending cwd read', scopes, [home])
+    check(backendId + ': partial preload preserves the complete disk snapshot', ids(readListingSnapshot(key)), ['cached-old'])
+    workspace.resolve([local])
+    await allBegan.promise
+    check(backendId + ': preload fills other workspaces after cwd', scopes, [home, 'all'])
+    global.resolve([local, foreign])
+    check(backendId + ': browser and preload share the final result', ids(await browser), ['native-new', 'foreign'])
+    check(backendId + ': a concurrent reopen receives the same final result', ids(await reopened), ['native-new', 'foreign'])
+    check(backendId + ': successful preload refreshes disk and memory caches', [ids(readListingSnapshot(key)), ids(preloaded.cachedSessions())], [['native-new', 'foreign'], ['native-new', 'foreign']])
+  }
+
+  {
+    const key = JSON.stringify(['codex', home, 'preload-failure'])
+    beginListingSnapshot(key)([row('kept', 'codex')])
+    const failed = gate<void>()
+    let attempts = 0
+    const retry = channel('codex', {
+      snapshotKey: () => key,
+      list: async () => {
+        if (++attempts === 1) { failed.resolve(); throw new Error('offline') }
+        return [row('retried', 'codex')]
+      },
+    })
+    await failed.promise
+    await new Promise<void>(resolve => setImmediate(resolve))
+    check('failed preload preserves the previous disk snapshot', ids(readListingSnapshot(key)), ['kept'])
+    check('opening the browser retries a failed preload', ids(await retry.listSessions()), ['retried'])
+    check('failed preload does not strand a pending request', attempts, 3)
+  }
+
+  {
+    const key = JSON.stringify(['codex', home, 'disposed-preload'])
+    const local = gate<readonly SessionSummary[]>()
+    const began = gate<void>()
+    let reads = 0
+    const disposed = channel('codex', {
+      snapshotKey: () => key,
+      list: async () => { reads++; began.resolve(); return local.promise },
+    })
+    await began.promise
+    disposed.releaseContributions()
+    local.resolve([row('late', 'codex')])
+    await new Promise<void>(resolve => setImmediate(resolve))
+    check('disposing during preload prevents the global read and disk write', [reads, readListingSnapshot(key)], [1, undefined])
+  }
+
+  for (const backendId of ['claude', 'codex']) {
+    const opened = gate<ChannelStartup>()
+    const local = gate<readonly SessionSummary[]>()
+    const began = gate<void>()
+    const scopes: string[] = []
+    const key = JSON.stringify([backendId, home, 'startup-same-cwd'])
+    const summary = row('loaded-while-starting', backendId)
+    const starting = channel(backendId, {
+      snapshotKey: () => key,
+      list: async (scope, onPartial) => {
+        scopes.push(scope?.allProjects ? 'all' : scope?.cwd ?? '')
+        if (scope?.allProjects) return [summary]
+        onPartial?.([summary])
+        began.resolve()
+        return local.promise
+      },
+    }, opened.promise)
+    await began.promise
+    check(backendId + ': catalog preload begins while the backend is still opening', starting.ready, false)
+    const batches: string[][] = []
+    const browser = starting.listSessions(undefined, rows => { batches.push(ids(rows)!) })
+    opened.resolve({ session: fakeSession(backendId, 'opened'), history: [] })
+    await new Promise<void>(resolve => setImmediate(resolve))
+    check(backendId + ': startup adopts the real session without duplicating cwd reads', [starting.ready, scopes], [true, [home]])
+    local.resolve([summary])
+    check(backendId + ': a browser opened before adoption receives the complete pending result', ids(await browser), [summary.id])
+    check(backendId + ': startup adoption keeps preload progress and its disk write valid', [batches[0], scopes, ids(readListingSnapshot(key))], [[summary.id], [home, 'all'], [summary.id]])
+  }
+
+  for (const backendId of ['claude', 'codex']) {
+    const opened = gate<ChannelStartup>()
+    const oldLocal = gate<readonly SessionSummary[]>()
+    const began = gate<void>()
+    const refreshed = gate<void>()
+    const cwd = join(home, 'recorded')
+    const key = JSON.stringify([backendId, home, 'startup-new-cwd'])
+    const summary = { ...row('recorded-workspace', backendId), cwd }
+    const scopes: string[] = []
+    const starting = channel(backendId, {
+      snapshotKey: () => key,
+      list: async scope => {
+        scopes.push(scope?.allProjects ? 'all' : scope?.cwd ?? '')
+        if (scope?.cwd === home) { began.resolve(); return oldLocal.promise }
+        if (scope?.allProjects) refreshed.resolve()
+        return [summary]
+      },
+    }, opened.promise)
+    await began.promise
+    const obsolete = starting.listSessions()
+    opened.resolve({ session: fakeSession(backendId, 'resumed', cwd), history: [] })
+    await refreshed.promise
+    await new Promise<void>(resolve => setImmediate(resolve))
+    check(backendId + ': a recorded cwd discovered at startup gets its own preload', [starting.cwd, scopes], [cwd, [home, cwd, 'all']])
+    oldLocal.resolve([row('old-launch-workspace', backendId)])
+    check(backendId + ': the previous workspace read is revoked after adoption', await obsolete, [])
+    check(backendId + ': a late launch-workspace page cannot replace the recorded-workspace cache', [ids(starting.cachedSessions()), ids(readListingSnapshot(key))], [[summary.id], [summary.id]])
+  }
+
   // A slow page is useful immediately, but cannot masquerade as a complete
   // listing or overwrite the last successful snapshot.
   const key = JSON.stringify(['codex', home, 'paging'])
@@ -140,8 +275,8 @@ try {
   await listing
   check('cold paging: final snapshot has all pages', ids(readListingSnapshot(key)), ['first-page', 'last-page'])
 
-  // Reloads overlap: the newest one wins in memory and on disk, including
-  // across distinct channel instances sharing the same native store.
+  // Overlapping reads share work; a mutation invalidates that work so a late
+  // page cannot overwrite the refreshed title or revive a deleted row.
   const slow = gate<readonly SessionSummary[]>()
   const started = gate<void>()
   let count = 0
@@ -151,15 +286,62 @@ try {
       if (!scope?.allProjects && ++count === 1) { started.resolve(); return slow.promise }
       return [row('newest', 'claude')]
     },
+    rename: async () => {},
   }
   const raced = channel('claude', racing)
   const oldListing = raced.listSessions()
   await started.promise
+  const joinedListing = raced.listSessions()
+  check('overlapping reloads share the pending catalog read', count, 1)
+  await raced.renameSessionTo('late', 'Renamed')
   await raced.listSessions()
   slow.resolve([row('late', 'claude')])
   check('overlapping reload: an obsolete read cannot publish', await oldListing, [])
+  check('overlapping reload: subscribers to the obsolete read are fenced too', await joinedListing, [])
   check('overlapping reload: the latest memory snapshot survives', ids(raced.cachedSessions()), ['newest'])
   check('overlapping reload: the latest disk snapshot survives', ids(readListingSnapshot(racing.snapshotKey!()!)), ['newest'])
+
+  {
+    let sourceKey = JSON.stringify(['codex', home, 'old-store'])
+    const oldKey = sourceKey
+    const slowStore = gate<readonly SessionSummary[]>()
+    const began = gate<void>()
+    const replaced = channel('codex', {
+      snapshotKey: () => sourceKey,
+      list: async () => {
+        if (sourceKey === oldKey) { began.resolve(); return slowStore.promise }
+        return [row('new-store', 'codex')]
+      },
+    })
+    const oldStore = replaced.listSessions()
+    await began.promise
+    sourceKey = JSON.stringify(['codex', home, 'replacement-store'])
+    check('changing stores starts a separate read instead of joining the old store', ids(await replaced.listSessions()), ['new-store'])
+    slowStore.resolve([row('old-store', 'codex')])
+    check('an old store completion is fenced after replacement', await oldStore, [])
+    check('an old store cannot overwrite the replacement cache', ids(readListingSnapshot(sourceKey)), ['new-store'])
+    check('a revoked store read cannot write its snapshot', readListingSnapshot(oldKey), undefined)
+  }
+
+  {
+    const key = JSON.stringify(['codex', home, 'delete-during-preload'])
+    const victim = row('deleted', 'codex')
+    beginListingSnapshot(key)([victim])
+    const slowDelete = gate<readonly SessionSummary[]>()
+    const began = gate<void>()
+    const deleted = channel('codex', {
+      snapshotKey: () => key,
+      list: async () => { began.resolve(); return slowDelete.promise },
+      delete: async () => {},
+    })
+    const obsolete = deleted.listSessions()
+    await began.promise
+    await deleted.deleteSession(victim.id)
+    slowDelete.resolve([victim])
+    check('deleting during a pending read revokes its completion', await obsolete, [])
+    check('a late page cannot revive a deleted cached session', [ids(deleted.cachedSessions()), ids(readListingSnapshot(key))], [[], []])
+  }
+
   const crossKey = JSON.stringify(['codex', home, 'cross-channel'])
   const earlier = gate<readonly SessionSummary[]>()
   const scanning = gate<void>()

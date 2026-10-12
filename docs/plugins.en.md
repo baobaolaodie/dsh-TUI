@@ -26,9 +26,13 @@ live in the admission & development guide.
 
 ## Seam stability reference
 
-An **informal** maturity grading to help plugin authors gauge investment;
-the authoritative status and compatibility agreement live in the
-[admission & development guide](../tui-profile/docs/plugin-admission-and-development.md):
+A maturity grading to help plugin authors gauge investment; the authoritative
+status and compatibility agreement live in the
+[admission & development guide](../tui-profile/docs/plugin-admission-and-development.md).
+**The "stable candidate" tier is part of the frozen public surface as of the first
+published apiVersion (`tui.dsh/v1alpha1`)** — the four commitments are in
+`tui-profile/CHANGELOG.md`'s freeze entry; the other two tiers stay a **maturity
+reference**, not a promise:
 
 | Tier | Seams |
 | --- | --- |
@@ -52,12 +56,14 @@ Also an experimental public surface:
 - The `@deepseek-harness-tui/dsh-tui/test-utils` subpath and
   `ctx.tuiPluginHost.grants.corrupt` were removed in the adapter layering
   refactor (#705).
-- **The backend contribution family (`tui.dsh/v1alpha1` `Backend`, seam XIV) is
-  `alpha` and not promised**: the type surface (`BackendSpec`,
-  `validateBackendSpec`, `backendAdmission`) and conformance
-  (`TUI-BACKEND-001`) are usable, but the real admission wiring (bundle →
-  registry → picker) is stage C work, so a third-party backend cannot pass
-  admission today (W-1).
+- **The backend contribution family (`tui.dsh/v1alpha1` `Backend`, seam XIV) has its
+  public surface frozen with the first published apiVersion**: the type surface
+  (`BackendSpec`, `validateBackendSpec`, `backendAdmission`) and conformance
+  (`TUI-BACKEND-001`) are usable, and the **admission chain (manifest →
+  registry → descriptor) is wired**; what is still missing is the step that
+  reads a mounted bundle's declaration into the registry and the kernel picker
+  (the install chain), so "install a third-party backend, restart, see it in the
+  picker" does not hold end to end yet.
 - `grants` is now the narrower `HostGrantFacade`; see that PR for migration
   details.
 - On `TuiSceneProps.channel` (`ChannelUi`), `minimal` / `setMinimal()` were

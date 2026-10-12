@@ -33,7 +33,7 @@ import { WORKING_GATE_NOTICES } from '../../../commands.js'
 import { markBoot } from '../../../utils/bootTrace.js'
 import { logForDebugging } from '../../../utils/debug.js'
 import { DEFAULT_SESSION_MODES } from '../../../sessionModes.js'
-import { resolveContextOccupancy } from '../../context-occupancy.js'
+import { resolveContextBreakdown, resolveContextOccupancy } from '../../context-occupancy.js'
 import { IdeChannel, ideLockDir, type SelectionSnapshot } from '../../ide-channel.js'
 import { createChannelActionMethods, createChannelActionReadiness, type ChannelActionDelegates } from '../action-readiness.js'
 import { createAttachedContextRegistry } from '../attached-context.js'
@@ -300,7 +300,11 @@ export function createCoreChannel(
     localImageStore ??= createLocalImageStore(() => binding.session.capabilities.images?.limits ?? NO_IMAGES)
     return localImageStore
   }
-  const composer = createComposerImages(ctx, owner, { generation: () => state.agentBindingGeneration, localImages })
+  const composer = createComposerImages(ctx, owner, {
+    generation: () => state.agentBindingGeneration,
+    sessionId: () => state.agentId,
+    localImages,
+  })
   const files = createCoreFiles(ctx, {
     owner,
     binding,
@@ -471,6 +475,15 @@ export function createCoreChannel(
         state.contextWindow,
         feed.projector.contextUsage(),
       )
+    },
+    /**
+     * The composition half of the same meter unit, derived on read for the same
+     * reason (and refreshed by the same change feed). `undefined` on a harness
+     * whose meter publishes no `contextBreakdown`: the bar then weights its
+     * fills with this channel's own per-content-type estimates alone.
+     */
+    get contextBreakdown() {
+      return resolveContextBreakdown(contextPressure?.readBreakdown?.(state.sessionId))
     },
     commandList: localCommandsFor(initialCapabilities.commands),
     backendCapabilities: initialCapabilities,
@@ -960,6 +973,7 @@ export function createCoreChannel(
         })
         if (state.cwd !== previousCwd) resetIdeSelection()
         refreshGitBranch()
+        scheduleSessionPreload()
         markBoot('startup-adopted')
       } catch (error) {
         // The tail segment runs after the open succeeded; its throws take
@@ -1010,7 +1024,10 @@ export function createCoreChannel(
     switchWorkspace: workspaces.switchWorkspace,
     ...sessionActions.delegates,
   })
+  let listedFrom: ChannelActionDelegates['listSessions'] | undefined
+  let listedCwd: string | undefined
   const installActions = (replace: boolean): void => {
+    const listSessions = extension.delegates?.listSessions ?? sessionActions.delegates.listSessions!
     installChannelActions(actionReadiness, {
       unavailable,
       unavailableLines,
@@ -1024,8 +1041,28 @@ export function createCoreChannel(
         guarded,
       }),
       core: coreDelegates(),
-      extension: extension.delegates,
+      extension: {
+        ...extension.delegates,
+        listSessions: (onEnriched, onPartial) => {
+          listedFrom = listSessions
+          listedCwd = state.cwd
+          return listSessions(onEnriched, onPartial)
+        },
+      },
     }, replace)
+  }
+  /** The first adoption can install DSH listing actions or change cwd. */
+  const scheduleSessionPreload = (): void => {
+    if (options.sessionCatalog === undefined && extension.delegates?.listSessions === undefined) return
+    const preload = setImmediate(() => {
+      releasePreload()
+      const listSessions = extension.delegates?.listSessions ?? sessionActions.delegates.listSessions!
+      if (!owner.current() || (listedFrom === listSessions && listedCwd === state.cwd)) return
+      void state.listSessions().catch(error => {
+        logForDebugging(`session list preload failed: ${error instanceof Error ? error.message : String(error)}`)
+      })
+    })
+    const releasePreload = owner.own(() => clearImmediate(preload))
   }
   /** Runs `adoptHook` after the core wrote the session's state, before the
    *  bind; a throw fails the adoption transaction. */
@@ -1101,6 +1138,7 @@ export function createCoreChannel(
       // The startup session's history, read ahead of construction, paints
       // before any live event (an extension owning the facts replays its own).
       feed.bind(extension.bind?.ownsSessionFacts === true ? undefined : options.initialHistory)
+      scheduleSessionPreload()
       // The host owns the Channel lifetime. Rebinding handles the common case;
       // this effect closes the final timer and releases the DecisionEvents
       // dispatch-topology marker when the host unloads the Channel.

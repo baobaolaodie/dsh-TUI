@@ -328,7 +328,7 @@ one-column seam between the two surfaces.
 
 ## 3. Command reference
 
-The command menu = built-in commands (58, aliases included) + DSH registry commands (`/plan` `/goal` etc.) + the skill catalog
+The command menu = built-in commands (aliases included) + DSH registry commands (`/plan` `/goal` etc.) + the skill catalog
 (completion only, hidden from the `/help` menu). `/lang` switches the UI and command descriptions between English and Chinese.
 
 ### 3.1 Session
@@ -341,7 +341,8 @@ The command menu = built-in commands (58, aliases included) + DSH registry comma
 | `/tree` | none | session fork tree: hover to preview, click to rewind / fork / switch branch |
 | `/fork` | none | copy the current session into a resumable clone (original unaffected) |
 | `/restart` | none | restart the process and resume this session (rejected mid-turn, `Ctrl+C` first) |
-| `/kernel` | none | kernel picker: switch between DSH and the experimental Claude backend; remembers the pick and restarts into a new session (rejected mid-turn); see [Claude backend](claude-backend.en.md) |
+| `/kernel` | none | kernel picker: switch between DSH, Codex and the experimental Claude backend; remembers the pick and restarts into a new session (rejected mid-turn); see [Claude backend](claude-backend.en.md) |
+| `/dsh` / `/codex` / `/claude` | none | directly choose the named kernel through the same checks and restart flow as `/kernel`; the current kernel does not restart, a running turn blocks switching, and missing Claude opens the install wizard |
 | `/rename` | `<新名称>` | rename the current session (no arg shows the current title and usage) |
 | `/recap` | none | recent-activity summary (one line) + suggested title; press `a` or click to apply the title. With `dsh-tui.recapOnOpen` (default on), opening/resuming a session auto-shows a divider + `回顾：` summary line at the bottom; hover to view actions, click to expand, gone after the next message |
 | `/workspace` | `resume` / `rename <名称>` / `open <路径或URI>` | manage workspaces; `open` accepts an absolute path, file URI, or plugin scheme |
@@ -562,7 +563,20 @@ An empty session shows the whale logo area at the top (scrolls away with the con
 **Row 1 — context segment bar** (`/settings → statusBar.contextBar`, default on)
 
 - Colored by content type (system / prompt / assistant / thinking / tools).
-- Segment token counts are a **local estimate** (CJK/full-width ≈1.4 chars/token, ASCII ≈4, other scripts ≈2): they describe what the bar is made of and **never** feed the occupancy total — that comes from the ctx reading below.
+- Colored by content type (system / prompt / assistant / thinking / tools). **The used span's length is
+  exactly the reading** (the 13k of `13k/64k`): the five segments only split that span by composition, so
+  an over- or under-estimate can no longer draw the bar short or long.
+- The composition comes from two layers: the harness's `contextBreakdown` projection (system prompt / the
+  request envelope's tool schemas / every other visible node, injected context included) plus this app's
+  local estimate, which alone splits the meter's message side into prompt / assistant / thinking / tool
+  results (ASCII ≈4 chars/token, CJK ≈1.4, other scripts ≈2). A meter that predates the projection leaves
+  the local estimate as the only source.
+- The hover legend reports those same shares, attributed to the occupancy, so **the five segments plus
+  free add up to the window** (`1.2k`-style abbreviations cost at most half a unit each) instead of
+  reporting a second, smaller total. The estimates themselves **never** feed the occupancy total — that
+  comes from the ctx reading below.
+- When no content category can be attributed, the bar keeps one used block and both the bar and ctx
+  hover details report its measured `used` count instead of five zero categories.
 - The only text on the bar is the right-edge reading `13k/64k 19.5%` (narrow screens show only `19.5%`).
 - The reading colors by usage: <80% gray-blue, **≥80% amber, ≥95% red**.
 - Hover the whole bar for the legend: color block + name + token count (narrow screens shorten the names).
@@ -680,7 +694,7 @@ When dsh exits unexpectedly, safe mode gives a **read-only** environment diagnos
 | Model | `/model` | selector; **switching = fork the session** (history kept, routing only); persisted to `~/.dsh-tui/model.json` and reused on restart and `/new` — it OUTRANKS a `provider`/`model` pair written in cordis.yml/profile (that pair is only the first-run deployment default). Never chosen → the configured pair, else the harness default (currently `deepseek-flash`) |
 | Reasoning effort | `/effort` | slider (`←/→` live) or `/effort <id>`; `/effort status` for current; new-session default in /settings → default reasoning effort |
 | Agent preset | `/preset` | `standard` / `ptc` (old 0.1.1 name `code`) / `minimal` / `cordis` / **Liangshen mode `liangshen`**; **can't switch an already-started session** |
-| Theme | `/theme` | `auto` (OSC 11 follows terminal background) / `light` / `dark` / `dark-ansi`; `/theme <名>` direct; `/theme status` for the result |
+| Theme | `/theme` | `auto` (OSC 11 follows terminal background) / `light` / `dark` / `dark-ansi` / `pink-day` / `pink-night` / `pink-ansi`; `/theme <名>` direct; `/theme status` for the result |
 | Custom theme | manual | `~/.dsh-tui/themes/<名>.json`, `{base, colors}` format, hot-swap on select; naming it `auto` gets shadowed by the built-in |
 | Language | `/lang` | `en` / `zh` hot switch; priority `DSH_TUI_LANG` > profile config (legacy: settings.yaml user layer > cordis.yml) > persisted |
 | Status animation | `/activity` | selector or `/activity frames <名>`; default `moon8`, `random` randomizes |

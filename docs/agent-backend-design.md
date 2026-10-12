@@ -215,9 +215,12 @@ SDK `settings` 选项把路由钉回 `https://api.anthropic.com`。CLI 拒绝令
 `claudeText()` 按 `host.locale()` 实时取语言）：后端不再 import 宿主字典，也就不再有
 "这个键还属于 claude 家族"的假从属关系。它只从 `src/agent/`、`src/backends/shared/`、
 自己的目录、node 内建与 manifest 声明的厂商包取值——`verify-adapter-boundary.ts` 把这条
-钉成"后端是孤岛"，`claude` 侧已清零。自己的 prefs / channels / 模型名缓存落在
-`host.dataDir`（`~/.dsh-tui/backends/claude`），跑着的 TUI 版本由 `host.appVersion` 提供，
-`launch.sessionPrefs(host)` 也从同一个 host 取目录。
+钉成"后端是孤岛"，`claude` 侧已清零。**与宿主界面共用的那几条平台文案不再各抄一份**：
+它们住在 `src/backends/shared/platform-text.ts`（单一数据源），宿主字典与两个后端都从它取
+（`shared/` 自身也被边界门禁钉成叶子：不许读宿主字典、投影层或宿主工具）；
+`verify-i18n` 的跨字典段盯着"有没有人又写回一份副本"。自己的 prefs / channels / 模型名缓存
+落在 `host.dataDir`（`~/.dsh-tui/backends/claude`），跑着的 TUI 版本由 `host.appVersion`
+提供，`launch.sessionPrefs(host)` 也从同一个 host 取目录。
 
 ## Codex 后端（`src/backends/codex/`）
 
@@ -225,7 +228,9 @@ SDK `settings` 选项把路由钉回 `https://api.anthropic.com`。CLI 拒绝令
   npm 包。协议类型从 codex-cli 0.160.1 生成并入库，最低 0.144.0；`contract.ts` 与
   `verify:codex-contract` 守住摘要/方法名/版本策略，生成类型不扩大运行时信任边界。
 - **进程与环境**：`rpc/hub.ts` 按运行设置/路由指纹复用子进程和连接，多 thread 路由；
-  退出漏斗关闭全部 hub。保留用户 `CODEX_HOME`、证书与原生 provider 环境，只清除父级
+  退出漏斗关闭全部 hub——manifest 用 `unloadExport: 'closeAllCodexHubs'` 把这个**模块级/
+  进程级**资源池登记给注册表（宿主只对**真的加载过的条目**记账并调用，会话级资源归
+  `session.dispose()`）。保留用户 `CODEX_HOME`、证书与原生 provider 环境，只清除父级
   Codex 会话专用变量；Windows 解析真 `codex.exe`。不写官方 `config.toml`。
 - **凭据与渠道**：激活连接 > 第一方路由允许的 dsh-auth `openai-codex` 外部托管令牌 >
   Codex 自己的登录/API key。配置不可读时禁止托管注入；令牌不进 argv/事件/日志，失败
@@ -243,6 +248,18 @@ SDK `settings` 选项把路由钉回 `https://api.anthropic.com`。CLI 拒绝令
   无退出码时注明 exit unknown。goals 预算来自服务端；sideQuery 用只读临时 fork；
   hooks 生命周期通知与 hookPrompt 注入消息复用既有视图。缺实验方法时按实际能力
   降级，不因协议有名字假称可用。用户操作见[Codex 用户说明](codex-backend.md)。
+- **文案与公开面（B-5 起）**：用户可见的每一条字符串都在 `text.ts`（`codex-*` 169 条、
+  自带的 `elicit-*` 42 条、从共用数据源取的 7 条平台文案，双语，`codexText()` 按 `host.locale`
+  实时取语言），宿主字典里的这两段随之删除。那 7 条平台文案不再是本后端自己的副本，而是
+  `src/backends/shared/platform-text.ts` 的单一数据源（宿主字典同源）。prefs / channels 的
+  目录改由 `host.dataDir` 提供，没有 host 就降级为内存（不落盘、也不猜路径）；`clientVersion`
+  取 `host.appVersion`。`session/commands.ts` 的保留名从**自己的能力面**派生（自有四条 +
+  manifest 声明的 `goals`/`channels`/`permissions` 三个名字）：宿主命令表不是公开面，
+  与本地命令重名的 skill 交给宿主合并时丢弃（"local names win"），claude 与 codex 在这一步
+  同构。manifest 也不再声明 `nativeKey`（没有生产者的预留通道，声明它等于让 manifest
+  说谎），两个内置后端自此同形。`verify-adapter-boundary.ts` 的 `backendEntries` 存量清单
+  清零：孤岛规则对**每个**后端无条件生效。细节见
+  [codex 设计文档](codex-backend-design.md) §5.20。
 - **验证范围**：真实 0.160.1 app-server 的九项无凭据离线检查通过，没有模型回合/
   费用；真实订阅登录、带凭据模型调用、真实 TTY 本轮未运行。假进程/fixture 与
   无头界面回归不能替代它们。门禁与偏离见[施工日志](codex-backend-progress.md)。
@@ -258,11 +275,17 @@ SDK `settings` 选项把路由钉回 `https://api.anthropic.com`。CLI 拒绝令
 ## 接入新后端
 
 `Backend` 是 `tui.dsh/v1alpha1` 的第三个贡献族（继设置区块、全屏场景之后），当前状态是
-**`alpha`、不承诺**：类型面、definition、contract profile 与 conformance 已可用，第三方
-bundle 的真实准入接线（清单 → registry → picker）留到 C 段（W-1）。接入一个后端 = 按公开
-面写一份声明 + 实现 `AgentBackend` 与 `AgentSession`；仓内的 `manifest.ts` 是这份声明的
+**`alpha`、不承诺**：类型面、definition、contract profile、conformance 与**准入链路**
+（清单 → registry → descriptor，W-2 已接线）都可用；还没做的是把已挂载 bundle 的声明读进
+`registerBackend()` / picker 的那一步，它随 Stage C 的装链路落地。接入一个后端 = 按公开
+面写一份声明 + 实现 `AgentBackend` 与 `AgentSession`；**协议不依赖任何单个后端的特殊性**：
+claude（SDK peer + 安装向导）与 codex（系统 CLI + 进程池）必须都能用同一份声明面表达，
+两者的差异只落在 `install?`、`unloadExport?` 这类字段上——conformance 的两个正例
+（`valid-backend-contribution.json` 与 `valid-backend-contribution-cli.json`）与常驻假后端
+夹具钉的就是这条。仓内的 `manifest.ts` 是这份声明的
 **超集**，私有项不投影出去。完整口径见
-[tui-profile 说明 0009](../tui-profile/notes/0009-backend-contribution.md)。
+[tui-profile 说明 0009](../tui-profile/notes/0009-backend-contribution.md)，其中
+「Public surface（α）」一节是**承诺 / 不承诺清单**（导出面只增不删、破坏性变更怎么被发现）。
 
 1. 写 `src/backends/<id>/manifest.ts`——它投影出的**公开声明**（`tui.dsh/v1alpha1#Backend`）
    字段是 `id`、`label`（**只收字面量**，宿主 i18n 键进不来）、`shortLabel`、`product?`、`capabilities`、`grants`、`install?`、
@@ -325,6 +348,12 @@ bundle 的真实准入接线（清单 → registry → picker）留到 C 段（W
     一律明确报错并**非零退出**，不回落、不恢复别的后端的上次会话、不自动新建。
 11. 回归用假 SDK/假进程驱动（参考 `scripts/lib/claude-fake-sdk.ts`），翻译器用脱敏
     fixture 测；登记进 `scripts/run-ci-group.mjs`。
+12. **驱动系统 CLI 的后端**（codex 那种形态）走另一条一等公民路径：**不声明** `install`
+    ——声明了等于长出一个装不出任何东西的按钮——改为在 `detect()` 里报告 `installed` /
+    `version` 与"缺什么、怎么补"的 hint；进程池照旧用 `unloadExport` 登记给注册表。
+    这条形态与 SDK peer 形态（claude）由 conformance 的两个正例对照钉住（见上），宿主侧
+    由 `scripts/fixtures/probe-backend/` 的两种安装面夹具与
+    `scripts/verify-backend-contribution.ts` 的执行体覆盖。
 
 ## 验证
 

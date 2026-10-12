@@ -26,6 +26,48 @@ only for a genuinely new service.
 > When a row is overridden, its `config` block is replaced as a whole. It is
 > not deep-merged, so repeat every key that must remain active.
 
+## Official request metadata and feedback reporting
+
+The TUI bundle inherits reporting configuration from the installed official DSH
+composition; it does not add services absent from that composition. The current
+validated line has these defaults, with profile, home and CLI patches still able
+to override them:
+
+| Setting | Official default | Data and trigger |
+| --- | --- | --- |
+| `plugin-package-inventory-deepseek.enabled` | `true` | `dsh_plugin_packages` on `deepseek-official` requests, containing active plugin package names and versions so TUI usage can be identified |
+| `session-log-deepseek.enabled` | `true` | `dsh_session_log` on `deepseek-official` requests, incrementally carrying canonical Session events that may include the working directory, prompts, conversation content, and tool arguments and results; controlled independently of package inventory |
+| `session-telemetry-otel.mode` | `FEEDBACK_ONLY` | New explicit feedback authorizes OTel upload of the Session-log prefix through that feedback, including context; ordinary chat does not trigger this channel |
+
+The first two fields are request metadata outside model input and add no model
+input tokens. Both go to the adapter's configured `baseURL`, including third-party
+gateways. They accompany the corresponding DeepSeek requests and do not measure
+all TUI usage through the Claude/Codex backends.
+
+Feedback telemetry supports the upstream environment variables:
+
+- `DSH_TELEMETRY_MODE=DISABLED` stops OTel Session-log upload; the default
+  `FEEDBACK_ONLY` authorizes upload only after feedback.
+- Any non-empty `DSH_TELEMETRY_DISABLED` value, including `0` or `false`, disables
+  the `session-telemetry-otel` row at startup. Remove the variable to restore it;
+  it does not control the two API request metadata fields above.
+- `DSH_TELEMETRY_OTLP_URL` overrides the OTel collector address. When unset, the
+  installed official version supplies the endpoint and exporter parameters.
+
+To stop API request metadata, disable either field in the user profile patch:
+
+```yaml
+- id: plugin-package-inventory-deepseek
+  config:
+    enabled: false
+- id: session-log-deepseek
+  config:
+    enabled: false
+```
+
+Restart the TUI after changing its bundle or launch environment. Restoring bundle
+defaults does not remove existing user patches.
+
 ## TUI configuration
 
 The `dsh-tui` section of `/settings` lives in the TUI's own
@@ -314,7 +356,7 @@ for the complete field reference.
 | `DSH_HOME` | Harness home (profiles, sessions, credentials, attachments); falls back to the upstream default `~/.dsh` |
 | `DSH_TUI_PERSONA` | Override the Agent persona injected by the composition |
 | `DSH_TUI_PRESET` | Override the default Agent preset for new sessions |
-| `DSH_TUI_THEME` | Pin a built-in (`auto`/`light`/`dark`/`dark-ansi`), static theme, or registered plugin theme ahead of persisted selection |
+| `DSH_TUI_THEME` | Pin a built-in (`auto`/`light`/`dark`/`dark-ansi`/`pink-day`/`pink-night`/`pink-ansi`), static theme, or registered plugin theme ahead of persisted selection |
 | `DSH_TUI_DISABLE_MOUSE` | Temporarily disable mouse handling in fullscreen mode |
 | `DSH_TUI_DISABLE_TERMINAL_IMAGES` | Set to `1` to force Kitty/Sixel probing, preview reads/decoding, and terminal image rendering off, overriding config and /settings; text metadata remains visible |
 | `DSH_TUI_IMAGE_PROTOCOL` | `auto` (default), `kitty`, `sixel`, or `none`; override protocol selection without bypassing the preview preference, disable switch, non-fullscreen, accessibility or multiplexer guards |

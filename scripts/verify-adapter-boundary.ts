@@ -47,9 +47,18 @@
  *   src/backends/shared/**         backend-neutral helpers (D15 of
  *                                  docs/codex-backend-design.md): no scoped
  *                                  (vendor) package, no concrete backend
- *                                  directory, no src/dsh-adapter/**
+ *                                  directory, no src/dsh-adapter/** — and the
+ *                                  seam is the floor of the backend stack, so
+ *                                  inside src/ it may resolve to src/agent/**
+ *                                  and its own directory only: reading
+ *                                  src/i18n.ts (the host dictionary),
+ *                                  src/channel/** (the host's projection) or
+ *                                  src/utils/** (host tooling) from here would
+ *                                  hand every backend the host's own copy
+ *                                  through a module the island rule never
+ *                                  looks at (D2's transitivity hole — that
+ *                                  rule sees direct specifiers only)
  *   native.dsh    only inside src/dsh-adapter/**
- *   native.codex  only inside src/backends/codex/**
  *
  * The standalone entry's host loading (ADAPTER.md, host contract):
  *
@@ -117,7 +126,6 @@ const EXPECTED_VENDOR_RULES: readonly { readonly label: string; readonly allowed
 ]
 const EXPECTED_NATIVE_RULES: readonly { readonly key: string; readonly allowedIn: string }[] = [
   { key: 'dsh', allowedIn: 'dsh-adapter/' },
-  { key: 'codex', allowedIn: 'backends/codex/' },
 ]
 
 /** The one allowlisted runtime import a manifest may have: claude's SDK pin
@@ -148,6 +156,13 @@ const SHARED_BACKEND_DIR = 'backends/shared/'
 const BACKEND_ALLOWED_DIRS: readonly string[] = ['agent/', SHARED_BACKEND_DIR]
 /** Any scoped package: vendor SDKs and host frameworks alike. */
 const SCOPED_PACKAGE = /^@[^/]+\//u
+/** The one pre-existing edge the seam rule (below) pins as a pure leaf:
+ *  `channel-tokens.ts` reads the credential-store *path* helpers — its header
+ *  explains why a non-DSH backend has no cordis context to ask the host's
+ *  credentials service. A location helper, not a dictionary and not host
+ *  state; deleting this entry is the cleanup, and a second one has to be
+ *  argued here (and in ADAPTER.md) first. */
+const SHARED_PURE_LEAF_EDGES: readonly string[] = ['backends/shared/channel-tokens.ts -> utils/credentials.ts']
 // channel/input-delivery.ts stays outside core because it builds DSH user
 // messages and ids for every backend through createUserMessage.
 const CORE_DIR = 'dsh-adapter/channel/core/'
@@ -337,15 +352,16 @@ function resolveInternal(file: string, specifier: string): string | undefined {
 }
 
 /**
- * The two recorded debts, each an explicit list of file pairs (ADAPTER.md's
- * "only shrinks" convention):
+ * The recorded debts, each an explicit list of file pairs (ADAPTER.md's "only
+ * shrinks" convention):
  *
  *  - \`entries\`: UI value imports from \`src/dsh-adapter/\` that predate the
  *    layer rules;
- *  - \`backendEntries\`: imports a concrete backend still makes into host
- *    internals (B-3 introduced the island rule; claude is clean, codex
- *    follows in B-5). Every pair is listed by hand, so the list cannot grow
- *    by accident.
+ *  - \`backendEntries\`: imports a concrete backend makes into host internals.
+ *    B-3 introduced the island rule with claude, B-5 finished codex, and the
+ *    list is empty now: the rule holds for every backend with no exemption
+ *    left. The shape stays, and so does its warning, so a future debt has to
+ *    be written down by hand instead of appearing silently.
  */
 function readAllowlist(): { readonly ui: readonly AllowlistEntry[]; readonly backend: readonly AllowlistEntry[] } {
   const label = relative(process.cwd(), ALLOWLIST_FILE)
@@ -419,21 +435,38 @@ for (const file of files) {
     }
     const target = resolveInternal(file, ref.specifier)
     if (target === undefined) {
-      // undefined means a bare specifier (node builtins, manifest-declared
-      // vendor packages — not this gate's business) or a relative import that
-      // escapes src/ entirely. The island whitelist is exhaustive, so the
-      // latter is a violation by definition; without this check the continue
-      // below would skip the island rule and let a backend import e.g.
-      // ../../../scripts/… pass unscanned.
-      if ((ref.specifier.startsWith('./') || ref.specifier.startsWith('../'))
-        && under(path, 'backends/') && !under(path, SHARED_BACKEND_DIR)) {
-        const own = path.split('/')[1]
-        violations.push(`${where} imports '${ref.specifier}' (outside src/); src/backends/${own}/ may import only its own directory, src/agent/ and src/backends/shared/ (the backend is an island)`)
+      // undefined means a bare specifier — node builtins, manifest-declared
+      // vendor packages, non-scoped runtime dependencies: not this gate's
+      // business, in either direction — or a relative import that escapes src/
+      // entirely. The island whitelist *and* the seam rule below are
+      // exhaustive, so the latter is a violation by definition; without this
+      // check the continue below would skip both and let a backend — or the
+      // seam itself — import e.g. ../../../scripts/… pass unscanned.
+      if ((ref.specifier.startsWith('./') || ref.specifier.startsWith('../')) && under(path, 'backends/')) {
+        if (under(path, SHARED_BACKEND_DIR)) {
+          violations.push(`${where} imports '${ref.specifier}' (outside src/); src/${SHARED_BACKEND_DIR} may resolve to src/agent/ and its own directory only (the seam sits below every backend)`)
+        } else {
+          const own = path.split('/')[1]
+          violations.push(`${where} imports '${ref.specifier}' (outside src/); src/backends/${own}/ may import only its own directory, src/agent/ and src/backends/shared/ (the backend is an island)`)
+        }
       }
       continue
     }
-    if (under(path, SHARED_BACKEND_DIR) && (under(target, 'dsh-adapter/') || (under(target, 'backends/') && !under(target, SHARED_BACKEND_DIR)))) {
-      violations.push(`${where} imports src/${target}; src/${SHARED_BACKEND_DIR} must not depend on a concrete backend`)
+    // The neutral seam is the floor of the backend stack (D15): inside `src/`,
+    // `src/agent/` (the domain every backend implements) and its own directory
+    // — nothing else. Deliberately an allowlist rather than a deny list, so a
+    // *new* host module does not become reachable from the seam by default: if
+    // the seam could read `src/i18n.ts` (the host dictionary), `src/channel/**`
+    // (the host's projection) or `src/utils/**` (host tooling), every backend
+    // would reach the host's own copy through it — `BACKEND_ALLOWED_DIRS` is
+    // the same pair of directories a concrete backend may read, so the seam can
+    // never be a wider door than its readers. What this rule does *not* cover
+    // is bare specifiers: scoped packages are refused above, the rest (node
+    // builtins, declared vendor packages, non-scoped runtime dependencies such
+    // as `yaml`) are out of its scope and belong to the dependency gates.
+    if (under(path, SHARED_BACKEND_DIR) && !BACKEND_ALLOWED_DIRS.some(dir => under(target, dir))
+      && !SHARED_PURE_LEAF_EDGES.includes(`${path} -> ${target.replace(/\.js$/u, '.ts')}`)) {
+      violations.push(`${where} imports src/${target}; src/${SHARED_BACKEND_DIR} may resolve to src/agent/ and its own directory only inside src/ (the seam sits below every backend, so the host dictionary, src/channel/ and src/utils/ must stay out of reach)`)
     }
     for (const layer of LAYER_RULES) {
       if (!under(path, layer.dir)) continue
@@ -544,7 +577,7 @@ if (allowlistedHits.length > 0) {
   if (VERBOSE) for (const hit of allowlistedHits) console.warn(`  - ${hit}`)
 }
 if (backendAllowlistedHits.length > 0) {
-  console.warn(`adapter boundary warning: ${backendAllowlistedHits.length} allowlisted host-internal imports in src/backends/codex/ (${allowlist.backend.length} file pairs) await the B-5 migration${VERBOSE ? ':' : '; --verbose lists them'}`)
+  console.warn(`adapter boundary warning: ${backendAllowlistedHits.length} allowlisted host-internal imports in src/backends/ (${allowlist.backend.length} file pairs) are grandfathered; the island rule is meant to hold for every backend (B-5)${VERBOSE ? ':' : '; --verbose lists them'}`)
   if (VERBOSE) for (const hit of backendAllowlistedHits) console.warn(`  - ${hit}`)
 }
 console.log(`adapter boundary OK (${files.length} source files, ${importCount} import specifiers scanned)`)

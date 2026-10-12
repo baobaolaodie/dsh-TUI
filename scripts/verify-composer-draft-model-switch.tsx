@@ -34,6 +34,8 @@
  *      `state.continuedFromAgentId` slot is invisible to `Chat.tsx` unless
  *      `CHANNEL_UI_PROPERTIES` -> `createChannelUi` carries it — F1 in
  *      `probe/review-adversarial.md` / L-014)
+ *   G  a parked composer keeps text/caret across a continuation, drops them
+ *      on replacement, and never restores revoked image bindings
  *
  * A/B/D/E/F are RED until the implementation lands; C pins existing behaviour
  * and passes on the pre-fix tree. That split is the point of this file: the RED
@@ -363,8 +365,8 @@ interface Harness {
   unmount: () => void
 }
 
-async function mountChat(options: { launchpad?: boolean; legacyChannel?: boolean } = {}): Promise<Harness> {
-  const cols = options.launchpad === true ? LAUNCHPAD_COLS : COLS
+async function mountChat(options: { launchpad?: boolean; legacyChannel?: boolean; fullscreen?: boolean; columns?: number } = {}): Promise<Harness> {
+  const cols = options.columns ?? (options.launchpad === true ? LAUNCHPAD_COLS : COLS)
   const term = new XTerm({ cols, rows: ROWS, scrollback: 0, allowProposedApi: true })
   class FakeStdout extends Writable {
     columns = cols
@@ -403,10 +405,7 @@ async function mountChat(options: { launchpad?: boolean; legacyChannel?: boolean
   const chatNode = React.createElement(Chat, {
     channel,
     questionStore: questions,
-    // fullscreen: true keeps the launchpad and the conversation on the SAME
-    // plain screen (no alternate-screen wrapper) so both scenarios read one
-    // viewport helper set.
-    fullscreen: true,
+    fullscreen: options.fullscreen ?? true,
     launchpadOnBoot: options.launchpad === true,
   })
   const instance = await render(
@@ -587,6 +586,8 @@ function emitModelSwitch(
   const { state } = channel
   state.continuedFromAgentId = next.continued ? channel.agentId : undefined
   channel.agentId = next.agentId
+  channel.sessionId = next.agentId
+  state.agentBindingGeneration += 1
   channel.model = next.model
   if (next.dropImages === true) {
     // The real transaction revokes every staged capability (`clearStagedImages`)
@@ -1148,6 +1149,58 @@ interface Scenario {
   readonly run: () => Promise<void>
 }
 
+async function scenarioParkedDraft(): Promise<void> {
+  const scenario = 'G'
+  for (const fullscreen of [false, true]) {
+    for (const columns of [100, 48]) {
+      for (const continued of [true, false]) {
+        const app = await mountChat({ fullscreen, columns })
+        const label = `${fullscreen ? 'fullscreen' : 'inline'} ${columns} columns, ${continued ? 'continuation' : 'replacement'}`
+        const dashboardVisible = () => screen(app).some(line => /^\s*─+\s*子代理面板\s*─+\s*$/u.test(line))
+        const park = async () => {
+          app.stdin.write('\x01')
+          await waitFor(scenario, `${label}: composer parked`, () => dashboardVisible() && !composerMounted(app))
+        }
+        const resume = async () => {
+          app.stdin.write('\x1b')
+          await waitFor(scenario, `${label}: composer remounted`, () => !dashboardVisible() && composerMounted(app))
+        }
+        try {
+          await typeChatDraft(scenario, app)
+          pasteText(app, pastedImagePath)
+          await waitFor(scenario, `${label}: image staged`, () => composerHas(app, STAGED_IMAGE_TOKEN))
+          const stageId = [...app.channel.state.staged.keys()].at(-1)!
+          const before = composerState(app)
+          assertTrue(scenario, `${label}: image starts bound`, tokenIsChip(app, STAGED_IMAGE_TOKEN).ok)
+
+          // Positive control: the same screen round trip restores this draft
+          // before an adoption changes its owner and binding generation.
+          await park()
+          await resume()
+          await waitFor(scenario, `${label}: control draft restored`, () => composerHas(app, STAGED_IMAGE_TOKEN))
+          assertSameComposerState(scenario, `${label}: control`, before, composerState(app))
+
+          await park()
+          const anchor = 'PARKED-SWITCH-COMMITTED'
+          emitModelSwitch(app, { agentId: AGENT_AFTER, model: MODEL_AFTER, continued, dropImages: true, anchor })
+          await resume()
+          await waitForSwitchCommit(scenario, app, anchor)
+          assertEqual(scenario, `${label}: old image revoked`, false, app.channel.hasStagedImage(stageId))
+          if (continued) {
+            await waitFor(scenario, `${label}: draft restored`, () => composerHas(app, STAGED_IMAGE_TOKEN))
+            assertSameComposerState(scenario, label, before, composerState(app))
+            assertEqual(scenario, `${label}: revoked image stays plain text`, false, tokenIsChip(app, STAGED_IMAGE_TOKEN).ok)
+          } else {
+            assertTrue(scenario, `${label}: old draft cleared`, !composerHas(app, 'line-one') && !composerHas(app, STAGED_IMAGE_TOKEN))
+          }
+        } finally {
+          app.unmount()
+        }
+      }
+    }
+  }
+}
+
 const RUNNERS: readonly Scenario[] = [
   { id: 'A', name: 'chat draft survives a continuation model switch', run: scenarioChatContinuation },
   { id: 'B', name: 'launchpad draft survives a continuation model switch', run: scenarioLaunchpadContinuation },
@@ -1155,6 +1208,7 @@ const RUNNERS: readonly Scenario[] = [
   { id: 'D', name: 'the switch writes the fact, resetSessionProjection clears it', run: scenarioActionFactSource },
   { id: 'E', name: 'an image token degrades without binding the old capability', run: scenarioImageTokenDegrades },
   { id: 'F', name: 'the real channel facade projects the continuation fact', run: scenarioRealFacadeProjection },
+  { id: 'G', name: 'parked drafts follow continuation ownership in both terminal modes', run: scenarioParkedDraft },
 ]
 
 try {

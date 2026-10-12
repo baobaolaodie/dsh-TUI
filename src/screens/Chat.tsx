@@ -778,33 +778,26 @@ export function Chat({
     setLaunchpadCaret(cursor)
   }
   const launchpadBindingGeneration = resolveBindingGeneration(channel)
-  /** Agent the launchpad draft effect below last reconciled against; a change
-   *  is a switch, the same bookkeeping the composer's `draftSessionRef` keeps. */
-  const launchpadDraftAgentRef = React.useRef(String(channel.agentId))
-  /**
-   * Seed the launchpad draft from the session it is about to start: a
-   * REPLACEMENT of the conversation wipes it, a model switch keeps it. The
-   * switch is the only adoption that declares itself a continuation
-   * (`ChannelUi.continuedFromAgentId`, written in
-   * `dsh-adapter/channel/model-switch.ts` and cleared for every other adoption
-   * by `dsh-adapter/channel/session-reset.ts`), and it counts only when it
-   * names the agent this screen was last rendered against.
-   *
-   * The cleanup stays unconditional either way: the switch revokes the staged
-   * capabilities, so a kept draft shows its `[Image #N]` tokens as plain text.
-   */
+  // Capture the image epoch with each session binding. Automatic startup keeps
+  // it; explicit replacement revokes it before publishing the new binding.
+  const composerImageGeneration = channel.stagedImageGeneration?.() ?? 0
+  const launchpadSessionRef = React.useRef({ id: channel.agentId, imageGeneration: composerImageGeneration })
+  const discardLaunchpadImages = (): void => {
+    for (const stageId of launchpadImagesRef.current.values()) channel.discardStagedImage(stageId)
+    launchpadImagesRef.current.clear()
+  }
+  // Lifetime cleanup is separate from binding changes: startup adoption keeps
+  // the same draft, including the capabilities behind its image tokens.
+  React.useEffect(() => discardLaunchpadImages, [channel])
   React.useEffect(() => {
-    const previousAgentId = launchpadDraftAgentRef.current
-    launchpadDraftAgentRef.current = String(channel.agentId)
-    if (channel.continuedFromAgentId !== previousAgentId) {
+    const previous = launchpadSessionRef.current
+    launchpadSessionRef.current = { id: channel.agentId, imageGeneration: composerImageGeneration }
+    if (previous.id === '' && channel.agentId !== '' && previous.imageGeneration === composerImageGeneration) return
+    if (channel.continuedFromAgentId !== previous.id) {
       setLaunchpadDraft('')
       setLaunchpadCaret(0)
     }
-    const bindings = launchpadImagesRef.current
-    return () => {
-      for (const stageId of bindings.values()) channel.discardStagedImage(stageId)
-      bindings.clear()
-    }
+    discardLaunchpadImages()
   }, [channel, channel.agentId, launchpadBindingGeneration])
   /**
    * 「整屏盖启动页」的显式授权（第七版防御位，用户实测回归：启动页一闪而过
@@ -849,7 +842,7 @@ export function Chat({
    * "点了没反应"，状态还滞留着、等界面关掉才突然弹出来。默认收，白名单只留给覆盖层。
    */
   const overlayCommandNames = React.useMemo(
-    () => new Set(['model', 'effort', 'plan', 'preset', 'permission', 'kernel']),
+    () => new Set(['model', 'effort', 'plan', 'preset', 'permission', 'kernel', 'dsh', 'codex', 'claude']),
     [],
   )
   /**
@@ -879,7 +872,7 @@ export function Chat({
     }).catch(() => undefined)
   }, [launchpadShown])
   const canInstallSdk = onResolveSdkInstall !== undefined
-  const { currentId: kernelCurrentId, options: kernelOptions, open: openKernelPicker, pick: pickKernel, reprobe: reprobeKernels } = useKernelPicker({
+  const { currentId: kernelCurrentId, options: kernelOptions, open: openKernelPicker, pick: pickKernel, pickById: pickKernelById, reprobe: reprobeKernels } = useKernelPicker({
     channel, kernelVersion, kernelEntries, launchpadShown, onProbeKernels, onSwitchBackend, canInstallSdk, dispatchOverlay,
   })
   /** 当前内核那一行：短名给落地页入口、PromptInput 的不可用提示等消费（同源，
@@ -2021,8 +2014,9 @@ export function Chat({
     }
   }, [])
   const draftSessionId = channel.agentId
-  /** Session the effect below last reconciled against; a change is a switch. */
-  const draftSessionRef = React.useRef(draftSessionId)
+  const draftBindingGeneration = resolveBindingGeneration(channel)
+  /** Last reconciled binding; its image epoch distinguishes adoption from replacement. */
+  const draftSessionRef = React.useRef({ id: draftSessionId, generation: draftBindingGeneration, imageGeneration: composerImageGeneration })
   /**
    * The session a fill Chat itself requested belongs to, if one is in flight.
    *
@@ -2054,9 +2048,24 @@ export function Chat({
    * it clears exactly as before — as does a host without the property.
    */
   React.useLayoutEffect(() => {
-    if (draftSessionRef.current === draftSessionId) return
     const previous = draftSessionRef.current
-    draftSessionRef.current = draftSessionId
+    draftSessionRef.current = { id: draftSessionId, generation: draftBindingGeneration, imageGeneration: composerImageGeneration }
+    if (previous.id === draftSessionId) return
+    const startupAdoption = previous.id === '' && previous.imageGeneration === composerImageGeneration
+    const continuation = channel.continuedFromAgentId === previous.id
+    if (startupAdoption || continuation) {
+      // A covered composer parked its draft under the previous binding.
+      // Transfer that ownership before the remounted input checks the slot.
+      const snapshot = promptDraftRef.current.current
+      if (snapshot?.ownerAgentId === String(previous.id) && snapshot.bindingGeneration === previous.generation) {
+        promptDraftRef.current.current = {
+          ...snapshot,
+          ownerAgentId: String(draftSessionId),
+          bindingGeneration: draftBindingGeneration,
+        }
+      }
+      return
+    }
     // A stored draft can only belong to the conversation being replaced: the
     // composer is the one that writes it, and it writes it on the way out.
     promptDraftRef.current.current = null
@@ -2064,11 +2073,8 @@ export function Chat({
       pendingFillRef.current = null
       return
     }
-    // The one exemption: this adoption continued the conversation the composer
-    // was last rendered against, so the draft it holds is still the user's own.
-    if (channel.continuedFromAgentId === previous) return
     promptControllerRef.current?.clear()
-  }, [draftSessionId])
+  }, [draftSessionId, draftBindingGeneration])
   const previewGallery = activePreview === null ? [] : activePreview.peek
     ? promptControllerRef.current?.previewImages?.() ?? [activePreview]
     : overlay.kind === 'image-preview' ? overlay.gallery ?? [activePreview] : []
@@ -3893,13 +3899,18 @@ export function Chat({
         return true
       }
       case 'kernel':
-        // 内核选择器，每个内核下都可用（在对话页里切回 DSH 只有这一条路）。
+        // 内核选择器，每个内核下都可用。
         // 确认后由组合根的 onSwitchBackend 记住选择并以新内核重启。与 /help、
         // 参数行一致：选择器已开着就收起，没开才打开。
         setHelpOpen(false)
         if (overlay.kind === 'kernel') dispatchOverlay({ type: 'close' })
         else openKernelPicker()
         return true
+      case 'dsh':
+      case 'codex':
+      case 'claude':
+        setHelpOpen(false)
+        return pickKernelById(name).then(() => true)
       case 'restart':
         // pi-style reload tail: /reload cannot re-read boot-time-only state
         // (cordis.yml root config, frozen fullscreen layout, newly built

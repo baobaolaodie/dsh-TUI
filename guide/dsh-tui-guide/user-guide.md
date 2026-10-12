@@ -292,7 +292,7 @@ dsh-tui
 
 ## 3. 命令全集
 
-命令菜单 = 内置命令（58 条，含别名） + DSH 注册表命令（`/plan` `/goal` 等） + 技能目录
+命令菜单 = 内置命令（含别名） + DSH 注册表命令（`/plan` `/goal` 等） + 技能目录
 （仅补全，`/help` 菜单隐藏）。`/lang` 可切换中英文界面与命令描述。
 
 ### 3.1 会话
@@ -305,7 +305,8 @@ dsh-tui
 | `/tree` | 无 | 会话分叉树：悬停预览、点击回退 / 分叉 / 切换分支 |
 | `/fork` | 无 | 把当前会话复制成可恢复的副本（原会话不受影响） |
 | `/restart` | 无 | 重启进程并恢复本会话（回合运行中会被拒绝，先 `Ctrl+C`） |
-| `/kernel` | 无 | 内核选择器：在 DSH 与实验性的 Claude 后端之间切换，记住选择并重启进入新会话（回合运行中会被拒绝）；见 [Claude 后端](claude-backend.md) |
+| `/kernel` | 无 | 内核选择器：在 DSH、Codex 与实验性的 Claude 后端之间切换，记住选择并重启进入新会话（回合运行中会被拒绝）；见 [Claude 后端](claude-backend.md) |
+| `/dsh` / `/codex` / `/claude` | 无 | 直接选择对应内核，检查与重启流程同 `/kernel`；选择当前内核不重启，回合运行中不能切换，未安装 Claude 时进入安装向导 |
 | `/rename` | `<新名称>` | 重命名当前会话（无参时显示当前标题与用法） |
 | `/recap` | 无 | 最近活动摘要（一行）+ 建议标题；面板内 `a` 键或点击一键应用标题。设置 `dsh-tui.recapOnOpen`（默认开）开启时，打开/恢复会话自动在底部显示一条分隔线 + `回顾：` 摘要行，悬停可查看操作、点击展开，发送新消息后自动消失 |
 | `/workspace` | `resume` / `rename <名称>` / `open <路径或URI>` | 管理工作区；`open` 支持绝对路径、file URI、插件 scheme |
@@ -516,8 +517,16 @@ dsh-TUI 不预装通用技能；`/skills` 浏览 DSH 发现的技能，可直调
 **Row 1 — 上下文分段进度条**（`/settings → statusBar.contextBar`，默认开）
 
 - 按内容类型分段着色（system / prompt / assistant / thinking / tools）。
-- 分段 token 数是**本地估算**（CJK/全角按 ~1.4 字符/token、ASCII 按 ~4 字符/token、其它脚本按 ~2），
-  只描述这条由什么构成，**不参与占用总量**——占用以 ctx 字段/读数为准（见下）。
+- 分段着色按内容类型（system / prompt / assistant / thinking / tools）。**已用段的长短严格等于读数**
+  （`13k/64k` 里的 13k）：五段只按构成把这个长度切开，估算偏小/偏大都不会再让条画短或画长。
+- 构成分两层：harness 的 `contextBreakdown` 投影（system 提示 / 本次请求信封里的工具 schema /
+  其余可见内容，注入的上下文也在这一项）＋ 本地估算（把 meter 的消息侧再按 prompt / assistant /
+  thinking / 工具结果细分；ASCII ~4 字符/token、CJK ~1.4、其它脚本 ~2）。旧版 meter 不发布该投影时
+  只用本地估算。
+- 悬停图例报的就是条上那批份额（按占用归因），**五段 + free 合起来正好是窗口**（`1.2k` 这类缩写
+  每项最多差半个单位），不再出现「五段加起来只有读数一半」。估算本身**不参与占用总量**——占用以
+  ctx 字段/读数为准（见下）。
+- 构成无法归因到任何类别时，条保持单块已用区域；条和 ctx 字段的悬停明细都报实测 `used`，不列五个零分类。
 - 条上唯一文字是最右缘读数 `13k/64k 19.5%`（窄屏只显示 `19.5%`）。
 - 读数按占用率变色：<80% 灰蓝，**≥80% 琥珀、≥95% 红**。
 - 悬停整条弹出图例：色块 + 名称 + token 数（窄屏自动改用短名）。
@@ -628,7 +637,7 @@ dsh 意外退出时，安全模式给出**只读**的环境诊断、profile 插�
 | 模型 | `/model` | 选择器；**切换 = fork 会话续聊**（历史保留、仅换路由）；持久化 `~/.dsh-tui/model.json`，重启与 `/new` 沿用——它**优先于** cordis.yml/profile 里写的 `provider`/`model`（后者只是首次启动的部署默认值）。从没选过的话，用配置值，再没有才用 Harness 默认（当前为 `deepseek-flash`） |
 | 推理强度 | `/effort` | 滑杆（←/→ 实时）或 `/effort <id>`；`/effort status` 看当前；持久化 `~/.dsh-tui/effort.json` 并被下一次启动沿用（优先于 cordis.yml 的 `effort`），新会话默认档在 /settings → 默认推理强度 |
 | Agent 预设 | `/preset` | `standard` / `ptc`（旧 0.1.1 名 `code`）/ `minimal` / `cordis` / **梁神模式 `liangshen`**；**已开始会话不可切换** |
-| 主题 | `/theme` | `auto`（OSC 11 跟随终端背景）/ `light` / `dark` / `dark-ansi`；`/theme <名>` 直接切；`/theme status` 看解析结果 |
+| 主题 | `/theme` | `auto`（OSC 11 跟随终端背景）/ `light` / `dark` / `dark-ansi` / `pink-day` / `pink-night` / `pink-ansi`；`/theme <名>` 直接切；`/theme status` 看解析结果 |
 | 自定义主题 | 手动 | `~/.dsh-tui/themes/<名>.json`，`{base, colors}` 格式，选中即热切换；命名为 `auto` 会被内置遮蔽 |
 | 语言 | `/lang` | `en` / `zh` 热切换；优先级 `DSH_TUI_LANG` > profile 配置（旧版 settings.yaml 用户层 > cordis.yml）> 持久化 |
 | 状态行动画 | `/activity` | 选择器或 `/activity frames <名>`；默认 `moon8`，`random` 随机 |

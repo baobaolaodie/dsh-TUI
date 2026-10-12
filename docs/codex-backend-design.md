@@ -115,6 +115,7 @@ fixture 名指 `scripts/fixtures/codex/wire/` 下的录制（C0 已脱敏入库�
 | F28 | 官方审批选项文案与决策：命令 `Yes, proceed`(accept) / `Yes, and don't ask again for commands that start with …`(acceptWithExecpolicyAmendment) / `… for this command in this session`(acceptForSession) / `No, continue without running it`(decline) / `No, and tell Codex what to do differently`(cancel)；文件 `Yes, proceed` / `Yes, and don't ask again for these files`(acceptForSession) / `No, and tell Codex what to do differently`(cancel) | [src] tui/bottom_pane/approval_overlay.rs |
 | F29 | 中转请求可能静默卡住（无 error、无重试，90 s 无任何通知）；同一连接上的其他 thread 不受影响 | [live] s1 T1 |
 | F30 | pi-ai 的 `openai-codex` 登录从访问令牌 JWT 的 `https://api.openai.com/auth.chatgpt_account_id` 解出账户 id（`chatgpt_plan_type` 同处） | [src] pi-ai dist/auth/oauth/openai-codex.js |
+| F31 | 0.160.1 的 inline `review/start` 返回的 turn id 用于评审 item 与 `turn/completed`；`turn/started` 另报 lifecycle id，`turn/interrupt` 必须用后者。`enteredReviewMode` 可先于 `turn/started` 到达，评审用户 item 的 `clientId` 为 `null` | [offline probe] 临时 CODEX_HOME + loopback 故障 provider，无真实凭据；`verify-codex-controls` / `verify-codex-input` 固化时序 |
 
 ---
 
@@ -447,6 +448,12 @@ interface CodexSessionState {
 - 只有 `item/started{userMessage}` 带回相同 `clientId` 时才认领 pending（`pending.changed{claimed}`）
   并产出 `user.message`（D8）。`turn/start` 失败 → 移除该 pending 并返回
   `{accepted:false, reason}`。
+- `/review`、`/diff`、`/usage` 与只切换模式的 `/plan` 不走普通消息回显，命令成功后
+  主动认领 pending；拒绝结果由 channel 移除预览并显示原因。评审同时保留完成 id 与
+  lifecycle id（F31），发起 `review/start` 前即占住输入闸门，早到的取消等待后者，
+  启动 RPC 失败则释放等待；完成事件按前者释放队列，投影锚点保留评审 id。正常完成
+  与强制收尾共用关闭记录，迟到的启动回执、`enteredReviewMode` 与 lifecycle 通知
+  都不能重新占住已关闭评审的输入闸门。
 - 每次 `turn/start` 都携带当前的覆盖（`model`、`effort`、`approvalPolicy`、`sandboxPolicy`、
   `collaborationMode`）——只在与 thread 当前设置不同的时候才带，带了即对后续回合生效（协议语义）。
 
@@ -737,7 +744,9 @@ thread 时 `thread/resume` 返回 `-32600`，message `thread <id> already has an
   AGENTS.md 模板生成器，非 DSH 会话会被拒绝），所以 `/init` **不能**作为后端命令——它会被本地名字
   遮住，永远到不了后端。改由 N9 的 `init` 能力承接：Codex 的实现提交官方 `/init` 提示词（从
   `codex-rs/tui` 取原文并注明来源版本）。本地已有的名字见 `src/commands.ts` 的 `LOCAL_COMMANDS`，
-  设计后端命令前先查重；完整对照见 §8.6。
+  设计后端命令前先查重；完整对照见 §8.6。**B-5**：本模块不再读宿主命令表——保留名改为自有的
+  四条加 manifest 声明派生的三个（§5.20），"本地名字优先"仍由宿主在合并后端列表时承担，
+  所以上面这条"先查重"现在只约束**设计**（别指望后端替你挡），不约束实现。
 - `/btw`（`sideQuery`）：`thread/fork{threadId, ephemeral:true}` → `turn/start{input, approvalPolicy:'never', sandboxPolicy: read-only, developerInstructions 附加"只回答，不使用工具"}` →
   收集 agentMessage delta 为 `onText` → 完成后 `thread/unsubscribe`；`signal` 中断 →
   `turn/interrupt`。fork 不带 `deferGoalContinuation`：0.162 起 app-server 拒绝它与 `ephemeral`
@@ -774,6 +783,49 @@ thread 时 `thread/resume` 返回 `-32600`，message `thread <id> already has an
 - 官方 TUI 用 `!` 产生的 `userShell` 回合（F17）出现在历史里时，按终端卡回放
   （标题前缀 `!`，turn origin `user`）。
 
+### 5.20 文案与公开面（B-5）
+
+**自带文案**：用户可见的每一条字符串都在 `text.ts`——218 条，`zh`/`en` 双语，
+`codexText()` 按当前语言取值。其中 169 条 `codex-*`、42 条 `elicit-*`（MCP elicitation →
+问卷的表单文案，表单机本身在 `backends/shared/elicitation.ts`，是后端无关的纯函数）、
+7 条与平台共用（`capability-failed`、`doctor-unknown`、`effort-invalid`、
+`status-rate-limit-{five-hour,seven-day}`、`tool-name-{bash,edit}`）——**这 7 条自 C-2 起不再
+是本后端自己的一份副本**：它们住在 `src/backends/shared/platform-text.ts`，是宿主与内置后端
+共用的**单一数据源**（宿主字典展开同一份），本后端用 `pickPlatformText()` 取自己渲染的那几条，
+`verify-i18n` 的跨字典段盯着"有没有人又写回一份副本"。键名逐字沿用宿主
+字典的旧键名，所以 B-5 那次搬迁在 diff 里可以逐条核对；宿主字典里的两段（`codex-*`、
+`elicit-*`）同时删除，`kernel-label-codex` 除外——那是 manifest 的 `label` 键，走 inTree
+特权通道，不归字典迁移管。两条规则（`{{name}}` 占位、`count` 复数）的**机制**在
+`src/backends/shared/localized-text.ts`；codex 没有任何一条文案带复数形（实测没有一处
+`t()`/`codexText()` 传 `count`），所以它不带 claude 那套复数选择器。语言从 `host.locale`
+活读（`/lang` 切换对下一条字符串即生效），由 `detect()`、`open()` 与会话打开处安装；
+在这三者之前没有 host 可问，兜底 `zh`——与 `src/i18n.ts` 自己文档化的最后兜底同源。
+
+**自己的路径**：prefs（`~/.dsh-tui/backends/codex/prefs.json`）与 channels 的目录改为
+**必填**，由 `host.dataDir` 提供（真源与旧公式同源：`<DATA_DIR>/backends/<id>`）；没有
+host 时降级为内存（`memoryCodexPrefs` / `memoryCodexChannels`），既不落盘也不猜路径
+（D2/D3）。`catalogPrefs` 因此是惰性的：模块加载时求值会在任何 host 出现之前定下目录。
+catalog 的 `snapshotKey` 走 codex 自己的家目录（`codexHomeDir()` + `CODEX_SQLITE_HOME`），
+不经 `DATA_DIR`，路径语义未变；`clientVersion` 由 `host.appVersion` 提供。
+
+**不读宿主命令表**：`session/commands.ts` 的保留名来自**自己的能力声明**——自己的四条
+（`review`/`diff`/`plan`/`usage`），加上 manifest `capabilities` 里声明的
+`goals`/`channels`/`permissions` 对应的三个名字。与宿主 local 命令重名的 skill 不再在这里
+过滤：上报列表会带上这些名字，宿主合并后端列表时丢弃（"local names win"，
+`dsh-adapter/channel/core/session-controls.ts`），用户可见列表不变；`submit` 也不再拿宿主
+命令表做防御——Chat 层在分发前已把 local 名分流。claude 本来就是零过滤，两个内置后端
+自此同构。
+
+**不做的事**：不声明 `nativeKey`（B-5 定夺：这个后端不读 `native.<key>` 通道，它的会话写
+`native: {}`；从一个没有生产者的声明里派生规则只会放宽边界门禁）；`vendorPackages: []`
+与缺席的 `install` 同样是在陈述事实，而不是留白。
+
+**门禁**：`src/backends/<id>/**` 的孤岛规则（只许 import 自己目录、`src/agent/`、
+`src/backends/shared/`、node 内建与 manifest 声明的厂商包；`import type` 也算）自此对
+**全部后端无条件生效**——`scripts/adapter-boundary.allowlist.json` 的 `backendEntries`
+存量违例清单从 33 对清零。回归脚本的期望文案改读各自后端的副本（`codexText` / `claudeText`），
+宿主字典不再是后端文案的 oracle。
+
 ---
 
 ## 6. 中立层改动（N1–N7）
@@ -782,7 +834,7 @@ thread 时 `thread/resume` 返回 `-32600`，message `thread <id> already has an
 
 | # | 改动 | 文件 | 形状 | 期 |
 | --- | --- | --- | --- | --- |
-| N1 | 后端共享件目录 + 边界规则 | 新 `src/backends/shared/{atomic-file,channel-tokens}.ts`（从 `claude/` 移来，Claude 改 import）；`scripts/verify-adapter-boundary.ts`、`ADAPTER.md` 规则表 | `shared/` 不得 import `@*/` 厂商包与 `backends/<任何具体后端>/`；`backends/<a>/` 不得 import `backends/<b>/`（`shared/` 除外）；新增 `native.codex` 规则（`allowedIn: 'backends/codex/'`）。`ClaudeChannelTokens` → `ChannelTokenStore`（类型别名保留一期以减小 diff） | C0 |
+| N1 | 后端共享件目录 + 边界规则 | 新 `src/backends/shared/{atomic-file,channel-tokens}.ts`（从 `claude/` 移来，Claude 改 import）；`scripts/verify-adapter-boundary.ts`、`ADAPTER.md` 规则表 | `shared/` 不得 import `@*/` 厂商包与 `backends/<任何具体后端>/`；`backends/<a>/` 不得 import `backends/<b>/`（`shared/` 除外）；新增 `native.codex` 规则（`allowedIn: 'backends/codex/'`）——**B-5 删除**：该后端不读 `native` 通道，声明它只是没有生产者的预留（§5.20）。`ClaudeChannelTokens` → `ChannelTokenStore`（类型别名保留一期以减小 diff） | C0 |
 | N2 | MCP elicitation ↔ 问卷的纯函数 | 新 `src/backends/shared/elicitation.ts`（从 `claude/dialogs.ts` 抽出 form schema → `QuestionItemView[]`、答案 → `content`、校验与重问、URL 模式问题；B-3 落地时从 `src/channel/` 移入接缝，文案改为调用方提供） | 输入为 MCP 规范形状（`requestedSchema`、`mode`、`url`），无厂商类型；Claude 改为调用它（`verify-claude-dialogs` 不变绿） | C2 |
 | N3 | 问卷保密输入 | `src/agent/events.ts` `QuestionItemView.secret?: true`；`AskUserQuestionPanel` 自定义输入以 `•` 掩码显示；答案记录行显示 `••••` | 缺省行为不变 | C2 |
 | N4 | 运行中工具的实时输出 | `events.ts` 新事件 `{ type:'tool.output'; callId; text; time; parentCallId? }`（追加片段）；共享投影器给工具行维护 `liveOutput`（有界尾部：最后 200 行 / 16 KiB，超出记 `liveOutputDropped` 计数）；`tool.result` 到达时清除；终端卡运行中渲染最后 5 行（dim，宽度按显示单元截断，超出时首行 `… N 行省略`），全屏模式 8 行 | DSH/Claude 翻译器不发此事件（`verify:agent-domain` 穷举里登记为"可选未用"）；投影器对未知 callId 忽略 | C2 |
@@ -926,8 +978,9 @@ thread 时 `thread/resume` 返回 `-32600`，message `thread <id> already has an
 ## 8. 显示规格（体验第一）
 
 对照基准：官方 TUI 的快照测试（`codex-rs/tui/src/**/snapshots/*.snap`，调研材料里有）。
-目标是**信息对等**，呈现用 dsh-TUI 现有组件与主题。所有文案 zh/en 双语进 `src/i18n.ts`
-（键名前缀 `codex-`），按显示单元宽度截断（仓库宽度辅助函数），不按字符串长度。
+目标是**信息对等**，呈现用 dsh-TUI 现有组件与主题。所有文案 zh/en 双语，B-5 起**自带**在
+`src/backends/codex/text.ts`（键名沿用宿主字典的旧键名；平台共用的那几条在宿主字典里另有
+副本，见 §5.20），按显示单元宽度截断（仓库宽度辅助函数），不按字符串长度。
 
 ### 8.1 命令（`commandExecution`）
 
