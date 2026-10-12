@@ -33,14 +33,16 @@ You need:
   ```
 
 - A Claude credential; see "Signing in" below.
-- The `claude` command is optional: dsh-TUI probes `CLAUDE_CODE_EXECUTABLE`
-  (used as set, with no version check) → a `claude` on `PATH` → the native
-  installer's directory under your home (`%USERPROFILE%\.local\bin\claude.exe` on
-  Windows, `~/.local/bin/claude` on POSIX), and a `PATH` hit still wins; every
-  candidate has to launch and report a version before it is adopted (same version
-  and session store as the CLI you already use), and only when none does is the
-  SDK's bundled binary used. When the SDK is missing but a local Claude Code
-  exists, the install wizard's confirmation pane reports the CLI it found.
+- The `claude` command is optional: dsh-TUI probes an **explicitly specified
+  executable path** (an environment variable, used as set, with no version check;
+  the variable name is in [Agent backends](agent-backend-design.md) (Chinese)) → a
+  `claude` on `PATH` → the native installer's directory under your home
+  (`%USERPROFILE%\.local\bin\claude.exe` on Windows, `~/.local/bin/claude` on
+  POSIX), and a `PATH` hit still wins; every candidate has to launch and report a
+  version before it is adopted (same version and session store as the CLI you
+  already use), and only when none does is the SDK's bundled binary used. When the
+  SDK is missing but a local Claude Code exists, the install wizard's confirmation
+  pane reports the CLI it found.
 
 To pick the backend, use any of:
 

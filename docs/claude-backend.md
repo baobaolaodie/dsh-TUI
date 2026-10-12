@@ -26,11 +26,11 @@ dsh-TUI 可以把会话跑在 Claude Agent 后端上，而不是 DeepSeek Harnes
   ```
 
 - 一份 Claude 凭据，见下面的「登录」。
-- `claude` 命令不是必需的：按 `CLAUDE_CODE_EXECUTABLE`（设置后原样采用，不做版本校验）→
-  `PATH` 上的 `claude` → 用户主目录下的 `.local/bin`（Windows
-  `%USERPROFILE%\.local\bin\claude.exe`、POSIX `~/.local/bin/claude`）的顺序探测，
-  `PATH` 命中的那份仍然优先；每个候选都要能启动并报出版本才会被采用（与你平时用的 CLI
-  同版本、同一个会话库），全部落空才交给 SDK 自带的二进制。SDK 没装但本机已有 Claude Code
+- `claude` 命令不是必需的：按**显式指定的可执行路径**（环境变量，设置后原样采用，不做版本校验；
+  变量名见[多后端架构](agent-backend-design.md)）→ `PATH` 上的 `claude` → 用户主目录下的
+  `.local/bin`（Windows `%USERPROFILE%\.local\bin\claude.exe`、POSIX `~/.local/bin/claude`）
+  的顺序探测，`PATH` 命中的那份仍然优先；每个候选都要能启动并报出版本才会被采用（与你平时用的
+  CLI 同版本、同一个会话库），全部落空才交给 SDK 自带的二进制。SDK 没装但本机已有 Claude Code
   时，安装向导的确认面板也会把发现的那个 CLI（版本与路径）报出来。
 
 选择后端，任选一种：
