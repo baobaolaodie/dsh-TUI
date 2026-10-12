@@ -5,7 +5,7 @@
  */
 import assert from 'node:assert/strict'
 import type { AgentEvent, QuestionRequestView } from '../src/agent/events.js'
-import { setLang, t } from '../src/i18n.js'
+import { getLang, setLang, t } from '../src/i18n.js'
 import { memoryCodexPrefs } from '../src/backends/codex/prefs.js'
 import { CLIENT, NOTIFY, SERVER_REQUEST } from '../src/backends/codex/protocol/index.js'
 import { resolve } from 'node:path'
@@ -21,6 +21,9 @@ const { createCodexHub } = await import(pathToFileURL(resolve(runtimeRoot, 'src/
 const { openCodexSession } = await import(pathToFileURL(resolve(runtimeRoot, 'src/backends/codex/session/session.js')).href) as typeof import('../src/backends/codex/session/session.js')
 type Rec = Record<string, unknown>
 const runtimeI18n = await import(pathToFileURL(resolve(runtimeRoot, 'src/i18n.js')).href) as typeof import('../src/i18n.js')
+// The same tree renders the panel and answers it: the label the answer must
+// carry comes from that tree's own copy, not this one's (B-5).
+const runtimeText = await import(pathToFileURL(resolve(runtimeRoot, 'src/backends/codex/text.js')).href) as typeof import('../src/backends/codex/text.js')
 runtimeI18n.setLang('en')
 let passed = 0
 const failed: string[] = []
@@ -45,7 +48,7 @@ async function fixture() {
   let turns = 0
   fake.on(CLIENT.turnStart, () => ({ turn: { id: 'turn-' + ++turns, status: 'inProgress', items: [] } }))
   const events: AgentEvent[] = []
-  const session = await openCodexSession({ hub, release: hub.retain(), target: { kind: 'create', cwd: CWD }, cwd: CWD, prefs: memoryCodexPrefs({}), executable: { path: '/fake/codex', source: 'env', version: '0.160.1' }, host: { debug: () => {} }, clock })
+  const session = await openCodexSession({ hub, release: hub.retain(), target: { kind: 'create', cwd: CWD }, cwd: CWD, prefs: memoryCodexPrefs({}), executable: { path: '/fake/codex', source: 'env', version: '0.160.1' }, host: { debug: () => {}, locale: getLang }, clock })
   session.subscribe(batch => events.push(...batch))
   await settle()
   const sent = (method: string): Rec[] => fake.requests.filter(request => request.method === method).map(request => request.params)
@@ -80,12 +83,12 @@ await scenario('Plan ask, stay and implementation', async () => {
     check('plan prompt sent through normal turn input', JSON.stringify(f.last(CLIENT.turnStart).input).includes('outline the task'))
     check('Plan review carries full markdown', ask.questions[0]?.detail?.includes('Keep all constraints.'))
     check('Plan review intent owns implementation labels', ask.questions[0]?.intent?.kind, 'plan-review')
-    f.session.capabilities.questions!.respond(ask.requestId, { answers: [{ selected: [t('codex-plan-stay')] }] })
+    f.session.capabilities.questions!.respond(ask.requestId, { answers: [{ selected: [runtimeText.codexText('codex-plan-stay')] }] })
     await settle()
     check('stay settles review without starting a turn', f.sent(CLIENT.turnStart).length, 1)
     check('stay keeps Plan selected', f.session.capabilities.modes!.current(), 'plan')
     const implement = await f.offer()
-    f.session.capabilities.questions!.respond(implement.requestId, { answers: [{ selected: [t('codex-plan-yes')] }] })
+    f.session.capabilities.questions!.respond(implement.requestId, { answers: [{ selected: [runtimeText.codexText('codex-plan-yes')] }] })
     await f.fake.waitForRequest(CLIENT.turnStart, { after: f.fake.requests.length - 1 })
     await settle()
     check('implementation switches collaboration back to Default', f.session.capabilities.modes!.current(), 'auto')
@@ -94,11 +97,36 @@ await scenario('Plan ask, stay and implementation', async () => {
   } finally { await f.close() }
 })
 
+await scenario('Plan command grammar: `on`/`off` are the switches, anything else is the prompt', async () => {
+  const f = await fixture()
+  try {
+    // `/plan on` is the TUI catalog's own on token (the `/plan` completion
+    // child): it must mean the BARE switch, or the word "on" is submitted as
+    // the prompt.
+    const accepted = await f.session.submit({ text: '/plan on', clientMessageId: 'plan-grammar-on' }, 'followup')
+    await settle()
+    check('`/plan on` is accepted', accepted.accepted, true)
+    check('`/plan on` still selects Plan', f.session.capabilities.modes!.current(), 'plan')
+    check('`/plan on` starts no turn (no "on" prompt)', f.sent(CLIENT.turnStart).length, 0)
+    // `/plan <message>` keeps upstream codex semantics: enter plan mode and
+    // submit the message as the turn's prompt.
+    await f.session.submit({ text: '/plan outline the task', clientMessageId: 'plan-grammar-message' }, 'followup')
+    await settle()
+    check('message argument starts a turn with that prompt', JSON.stringify(f.last(CLIENT.turnStart).input).includes('outline the task'))
+    // `/plan off` is the catalog's off token (its other completion child): it
+    // must LEAVE Plan, and never submit the word "off" as a prompt.
+    await f.session.submit({ text: '/plan off', clientMessageId: 'plan-grammar-off' }, 'followup')
+    await settle()
+    check('`/plan off` leaves Plan', f.session.capabilities.modes!.current() !== 'plan')
+    check('`/plan off` starts no turn (no "off" prompt)', f.sent(CLIENT.turnStart).length, 1)
+  } finally { await f.close() }
+})
+
 await scenario('Plan clear context rebinds thread and preserves tool output', async () => {
   const f = await fixture()
   try {
     const ask = await f.offer()
-    f.session.capabilities.questions!.respond(ask.requestId, { answers: [{ selected: [t('codex-plan-clear')] }] })
+    f.session.capabilities.questions!.respond(ask.requestId, { answers: [{ selected: [runtimeText.codexText('codex-plan-clear')] }] })
     await f.fake.waitForRequest(CLIENT.threadStart, { after: f.fake.requests.length - 1 })
     await f.fake.waitForRequest(CLIENT.turnStart, { after: f.fake.requests.length - 1 })
     await settle()
@@ -122,7 +150,7 @@ await scenario('form elicitation validates and reasks only invalid fields', asyn
     await settle()
     const first = f.ask()
     check('elicitation schema plus send consent reaches production questions', first.questions.length, 3)
-    f.session.capabilities.questions!.respond(first.requestId, { answers: [{ selected: [], custom: '0' }, { selected: [], custom: 'kept' }, { selected: [t('elicit-send')] }] })
+    f.session.capabilities.questions!.respond(first.requestId, { answers: [{ selected: [], custom: '0' }, { selected: [], custom: 'kept' }, { selected: [runtimeText.codexText('elicit-send')] }] })
     await settle()
     const retry = f.ask()
     check('elicitation invalid integer creates fresh ask id', retry.requestId !== first.requestId)
