@@ -145,7 +145,7 @@ const cmdWrapper = (entry: string): string => [
   '  SET PATHEXT=%PATHEXT:;.JS;=;%',
   ')',
   '',
-  `endLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & "%_prog%"  "%dp0%\\${entry}" %*`,
+  `endLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & "%_prog%"  "%dp0%${win ? '\\' : '/'}${entry}" %*`,
   '',
 ].join('\r\n')
 
