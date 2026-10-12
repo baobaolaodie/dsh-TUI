@@ -534,7 +534,7 @@ An empty session shows the whale logo area at the top (scrolls away with the con
 
 - **Intro animation** (~3.4 s, three picked each launch, `/deepseek` egg re-rolls): classic / heart / sleep.
 - **Welcome idle animation** (`whaleIdle`, default on): fin, blink, tail wag, sleeps with Z after 10 s idle; **click to show a heart and wake it**.
-- **Maid portrait** (`whaleGirl`, default off): under the DeepSeek brand, enable it with Companion skin set to `whale` to show the author-drawn maid — a **real raster** through Kitty/Sixel when available, with character-art fallback. **Click her** to show the happy portrait for a few seconds; the first agent task freezes her reactions. The `deepy` and `whaleGirl` skins take the slot instead; Claude/Codex brands keep their own portraits. See the [precedence table](configuration.en.md).
+- **Maid portrait** (`whaleGirl`, default off): under the DeepSeek brand, enable it with Companion skin set to `whale` to show the author-drawn maid — a **real raster** through Kitty/Sixel when available, with character-art fallback. **When the raster portrait is displayed, click her** to show the happy portrait for a few seconds; the first agent task freezes her reactions. Character-art fallback stays static. The `deepy` and `whaleGirl` skins take the slot instead; Claude/Codex brands keep their own portraits. See the [precedence table](configuration.en.md).
 - After the first agent task, it freezes to a static frame (`/new` re-enters the welcome period).
 - Text column right of the whale: `✦ dsh-TUI v版本号` →
   `DEEPSEEK / HARNESS` big text (bold glyphs, both rows the same width, one blank row between) →

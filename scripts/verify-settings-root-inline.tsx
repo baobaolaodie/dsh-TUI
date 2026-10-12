@@ -194,6 +194,11 @@ for (const lang of ['en', 'zh'] as const) {
         const field = hintSection.fields.find(field => field.path.join('.') === key)!
         const expected = lang === 'zh' ? field.hintDescriptions?.zh ?? field.hint : field.hint
         const visible = seen.hint.replace(/…$/, '')
+        const expectedWidth = Math.min(budget, stringWidth(expected ?? ''))
+        const actualWidth = stringWidth(seen.hint)
+        // A wide character can leave one unused column before the ellipsis.
+        assert(actualWidth >= expectedWidth - 1 && actualWidth <= expectedWidth,
+          `${lang} ${columns}col: ${key} hint fills its available display width`, ui.screen())
         assert(visible.length > 0, `${lang} ${columns}col: ${key} help bar shows a non-empty hint head`, ui.screen())
         assert(expected?.startsWith(visible) === true,
           `${lang} ${columns}col: ${key} visible text starts with the focused field's hint`, ui.screen())
