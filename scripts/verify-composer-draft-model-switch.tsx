@@ -1190,6 +1190,9 @@ async function scenarioParkedDraft(): Promise<void> {
             await waitFor(scenario, `${label}: draft restored`, () => composerHas(app, STAGED_IMAGE_TOKEN))
             assertSameComposerState(scenario, label, before, composerState(app))
             assertEqual(scenario, `${label}: revoked image stays plain text`, false, tokenIsChip(app, STAGED_IMAGE_TOKEN).ok)
+            if (fullscreen && columns === 48) {
+              console.log(`Parked draft after continuation (${label}):\n${composerBlock(app)?.join('\n')}`)
+            }
           } else {
             assertTrue(scenario, `${label}: old draft cleared`, !composerHas(app, 'line-one') && !composerHas(app, STAGED_IMAGE_TOKEN))
           }
