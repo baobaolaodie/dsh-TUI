@@ -191,12 +191,14 @@ async function chatCase(fullscreen: boolean, columns: number, parked: boolean) {
     if (parked) await dashboard(app, false)
     await fence(app, 'POST-NEW-FRAME')
     assert.notEqual(app.ui.agentId, identity[0])
-    await wait('replacement clears the draft', () => composer(app) !== null && app.controller.current?.text?.() === '')
+    await wait('replacement clears the draft', () => composer(app) !== null
+      && app.controller.current?.text?.() === '' && !hasDraft(app, TOKEN))
     assert.equal(app.ui.hasStagedImage(stageId), false, 'new conversation revokes old images')
   } finally { app.unmount() }
 }
 function launchpadDraft(app: Harness) {
-  const row = viewportLines(app.term).find(line => line.includes('❯')) ?? ''
+  const row = viewportLines(app.term).find(line => line.includes('❯'))
+  if (row === undefined) return null
   const text = row.slice(row.indexOf('❯') + 1).replace(/│\s*$/u, '').trim()
   return text.startsWith(t('launchpad-placeholder')) ? '' : text
 }
@@ -215,6 +217,7 @@ async function launchpadCase(fullscreen: boolean, columns: number) {
     assert.equal(app.fixture.created, 0)
     assert.equal(await app.ui.newSession(), true)
     await fence(app, 'LAUNCHPAD-NEW-FRAME')
+    await wait('replacement keeps launchpad input mounted', () => launchpadDraft(app) !== null)
     await wait('replacement clears launchpad draft', () => launchpadDraft(app) === '')
     assert.equal(composer(app), null, 'launchpad stays open')
   } finally { app.unmount() }
