@@ -310,8 +310,7 @@ try {
     const nativePath = spawnableClaude(join(nativeDir(home), nativeName))
     withPath(dir('nothing-on-path'))
     const resolved = await resolveClaudeExecutable(envFor(home))
-    check('AC-1 a native install outside PATH is adopted', resolved.path === nativePath, resolved)
-    check('AC-1 the native install is not reported as the SDK bundle', resolved.source === 'path', resolved)
+    check('AC-1 a native install outside PATH is adopted, and not the SDK bundle', resolved.path === nativePath && resolved.source === 'path', resolved)
   }
 
   // ── AC-2: PATH still wins over the native install directory ────────────
@@ -322,8 +321,7 @@ try {
     const pathPath = spawnableClaude(join(pathDir, nativeName))
     withPath(pathDir)
     const resolved = await resolveClaudeExecutable(envFor(home))
-    check('AC-2 a PATH hit wins over the native install directory', resolved.path === pathPath, resolved)
-    check('AC-2 the shadowed native install is not the one adopted', resolved.path !== nativePath, resolved)
+    check('AC-2 a PATH hit wins: the shadowed native install is not adopted', resolved.path === pathPath && resolved.path !== nativePath, resolved)
   }
 
   // ── AC-3: a native install that cannot answer is not adopted ───────────
@@ -332,12 +330,14 @@ try {
     deadClaude(join(nativeDir(deadHome), nativeName))
     withPath(dir('nothing-else'))
     const dead = await resolveClaudeExecutable(envFor(deadHome))
-    check('AC-3 a native install that cannot be spawned is not adopted', dead.source === 'bundled' && dead.path === undefined, dead)
 
     const muteHome = dir('home-native-mute')
     versionlessClaude(join(nativeDir(muteHome), nativeName))
     const mute = await resolveClaudeExecutable(envFor(muteHome))
-    check('AC-3 a native install that reports no version is not adopted', mute.source === 'bundled' && mute.path === undefined, mute)
+    // One behavior, two fixtures: unspawnable and versionless both have to lose.
+    check('AC-3 a native install that cannot answer is not adopted',
+      dead.source === 'bundled' && dead.path === undefined && mute.source === 'bundled' && mute.path === undefined,
+      { dead, mute })
   }
 
   // ── a file both PATH and the native directory name is probed once ──────
@@ -360,13 +360,18 @@ try {
     // `node` has to be findable for the entry to run at all.
     withPath(dir('nothing-dedupe'), nodeDir)
     const alone = await resolveClaudeExecutable(envFor(home))
-    check('a counting fixture is reached once through the native fallback alone', probeCalls(log).length === 1, { calls: probeCalls(log), resolved: alone })
+    const aloneCalls = probeCalls(log).length
     writeFileSync(log, '')
     // The same directory on PATH as well: the lookup tool and the native
     // fallback now name the same file, and one probe is what it may cost.
     withPath(bin, nodeDir)
     const overlapped = await resolveClaudeExecutable(envFor(home))
-    check('a file both PATH and the native directory name is probed once', probeCalls(log).length === 1, { calls: probeCalls(log), resolved: overlapped })
+    // Both halves in one check: reached exactly once through the fallback
+    // alone (the control that the fixture can be reached at all), and naming
+    // the same file twice costs one probe — not two.
+    check('a file both PATH and the native directory name is probed once',
+      aloneCalls === 1 && probeCalls(log).length === 1,
+      { aloneCalls, overlappedCalls: probeCalls(log).length, alone, overlapped })
     delete process.env[COUNT_LOG_ENV]
   }
 
@@ -375,12 +380,11 @@ try {
     const install = npmInstall('npm-real', { script: true })
     withPath(install.prefix, nodeDir)
     const resolved = await resolveClaudeExecutable(envFor(dir('home-no-native-1')))
-    check('AC-4 an npm-installed claude is not the SDK bundle', resolved.source === 'path' && resolved.path !== undefined, resolved)
     // Windows cannot spawn either wrapper, so resolution follows one to the
     // package entry the SDK starts as `node <entry>`; POSIX spawns the `sh`
     // wrapper itself, which then execs that same entry.
     const expected = win ? install.entry : install.wrapper
-    check('AC-4 the npm install resolves to the entry it runs', resolved.path === expected, resolved)
+    check('AC-4 the npm install resolves to the entry it runs, not the SDK bundle', resolved.source === 'path' && resolved.path === expected, resolved)
     const version = resolved.path === undefined ? undefined : await readClaudeVersion(resolved.path)
     check('AC-4 the resolved npm entry reports a version through the probe', version === '2.1.287', version)
   }
@@ -398,8 +402,8 @@ try {
     const decoy = npmInstall('npm-decoy-only', { script: false, runtime: true, wrapper: 'cmd' })
     withPath(decoy.prefix, nodeDir)
     const resolved = await resolveClaudeExecutable(envFor(dir('home-no-native-3')))
-    check('a wrapper naming only its runtime never yields that runtime', decoy.runtimePath !== undefined && resolved.path !== decoy.runtimePath, resolved)
-    check('a wrapper with nothing but its runtime falls back to the bundle', resolved.source === 'bundled', resolved)
+    check('a wrapper naming only its runtime never yields it and falls back to the bundle',
+      decoy.runtimePath !== undefined && resolved.path !== decoy.runtimePath && resolved.source === 'bundled', resolved)
 
     const both = npmInstall('npm-decoy-script', { script: true, runtime: true, wrapper: 'cmd' })
     withPath(both.prefix, nodeDir)
