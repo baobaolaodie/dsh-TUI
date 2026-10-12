@@ -24,8 +24,10 @@
 
 ## 接缝稳定性参考
 
-按当前实现成熟度给出的**非正式**分级，帮助插件作者评估投入；正式
-状态与兼容性协定以[准入与开发指南](../tui-profile/docs/plugin-admission-and-development.md)为准：
+按当前实现成熟度给出的分级，帮助插件作者评估投入；正式
+状态与兼容性协定以[准入与开发指南](../tui-profile/docs/plugin-admission-and-development.md)为准。
+**「稳定候选」那一档已随第一版 apiVersion（`tui.dsh/v1alpha1`）纳入冻结的公开面承诺**
+（四条承诺见 `tui-profile/CHANGELOG.md` 的冻结条目）；其余两档仍是**成熟度参考**，不构成承诺：
 
 | 分级 | 接缝 |
 | --- | --- |
@@ -46,10 +48,11 @@
   `@deepseek-harness-tui/dsh-tui/panels` 与 `./api`。
 - `@deepseek-harness-tui/dsh-tui/test-utils` 子路径与
   `ctx.tuiPluginHost.grants.corrupt` 已随 adapter 分层重构（#705）移除。
-- **后端贡献族（`tui.dsh/v1alpha1` `Backend`，接缝十四）为 `alpha`，不承诺**：类型面
+- **后端贡献族（`tui.dsh/v1alpha1` `Backend`，接缝十四）的公开面已随第一版 apiVersion 冻结**：类型面
   （`BackendSpec`、`validateBackendSpec`、`backendAdmission`）与 conformance
-  （`TUI-BACKEND-001`）已可用，但真实准入接线（bundle → registry → picker）是 C 段的
-  工作，第三方后端今天还过不了准入（W-1）。
+  （`TUI-BACKEND-001`）已可用，**准入链路（清单 → registry → descriptor）已接线**；
+  仍未做的是把已挂载 bundle 的声明接进注册表与 kernel picker（装链路），所以
+  「装一个第三方后端、重启后出现在 picker 里」这条端到端流程尚未成立。
 - `grants` 收窄为 `HostGrantFacade`，迁移细节见该 PR。
 - `TuiSceneProps.channel`（`ChannelUi`）上的 `minimal` / `setMinimal()` 已更名为
   `minimalUi` / `setMinimalUi()`；旧名保留为 **deprecated 别名**，读写同一个

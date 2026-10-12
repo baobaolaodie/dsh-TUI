@@ -38,6 +38,8 @@ export interface CodexRuntime {
   readonly config?: Rec
   readonly auth: CodexAuthRuntime
   readonly channels: CodexChannelsRuntime
+  /** Store identity captured from this child, not later process env changes. */
+  readonly catalogSource?: string
   readonly startNotices?: readonly string[]
   /** Rejoin an idle native thread retained by the local daemon, if available. */
   readonly rejoinNativeDaemon?: () => Promise<CodexRuntime | undefined>
@@ -187,7 +189,7 @@ export async function prepareCodexRuntime(target: OpenTarget, host: BackendHost,
         }
       }
     }
-    return { hub, release, cwd, executable, config, auth, channels, ...(startNotices === undefined ? {} : { startNotices }), ...(rejoinNativeDaemon === undefined ? {} : { rejoinNativeDaemon }) }
+    return { hub, release, cwd, executable, config, auth, channels, catalogSource: catalogSource(settings.env, hub.info?.codexHome), ...(startNotices === undefined ? {} : { startNotices }), ...(rejoinNativeDaemon === undefined ? {} : { rejoinNativeDaemon }) }
   } catch (error) {
     release()
     host.debug(`codex: app-server start failed (${errorText(error)})`)
@@ -196,6 +198,19 @@ export async function prepareCodexRuntime(target: OpenTarget, host: BackendHost,
 }
 
 let catalogHost: BackendHost | undefined
+let catalogRuntime: { readonly source: string; readonly host: BackendHost; readonly hub: CodexHub } | undefined
+
+function catalogSource(env: NodeJS.ProcessEnv = process.env, actualHome?: string): string | undefined {
+  const home = actualHome ?? codexHomeDir(env)
+  const sqlite = env.CODEX_SQLITE_HOME
+  if (!isAbsolute(home) || (sqlite !== undefined && sqlite !== '' && !isAbsolute(sqlite))) return undefined
+  return JSON.stringify(['codex', normalize(home), sqlite ? normalize(sqlite) : null])
+}
+
+function rememberCatalogRuntime(runtime: CodexRuntime, host: BackendHost): void {
+  const source = runtime.catalogSource
+  if (source !== undefined) catalogRuntime = { source, host, hub: runtime.hub }
+}
 
 /** The prefs store of the captured host, or undefined when no host has been
  *  seen yet (see {@link catalogHost}). Built lazily: a module-level call would
@@ -225,8 +240,11 @@ export async function openCodexBackendSession(target: OpenTarget, host: BackendH
     host: { debug: host.debug, locale: host.locale },
     doctor: { get bubblewrapMissing() { return active.hub.bubblewrapMissing } },
   })
-  try { return await open(runtime) }
-  catch (error) {
+  try {
+    const session = await open(runtime)
+    if (options.env === undefined && options.executable === undefined) rememberCatalogRuntime(runtime, host)
+    return session
+  } catch (error) {
     const cause = error instanceof Error ? error.cause : undefined
     if (rpcCode(cause) !== RPC_ERROR.invalidRequest || !/already has an active writer/iu.test(errorText(cause))) throw error
     const daemon = await runtime.rejoinNativeDaemon?.()
@@ -242,24 +260,25 @@ export const codexBackend: AgentBackend = {
   detect: (host: BackendHost) => { rememberHost(host); return detectCodex(host) },
 
   catalog: createCodexCatalog({
-    acquire: cwd => {
-      // The fallback host covers the unreachable case where the catalog is
-      // used before any detect ran (the boot probe detects every registered
-      // backend first). `locale` answers this backend's installed language
-      // source (the host's, once detect/open ran) rather than an invented
-      // default; `dataDir` stays absent on purpose, so every codex store built
-      // from it keeps nothing rather than guess a path (D2).
+    acquire: async cwd => {
+      // Before detect/open supplies a host, keep stores in memory and use
+      // this backend's locale without guessing a host data directory.
       const host = catalogHost ?? { cwd: process.cwd(), debug: () => undefined, warn: () => undefined, locale: codexLocale }
-      return prepareCodexRuntime({ kind: 'create', cwd: cwd ?? host.cwd }, host)
+      catalogHost = host
+      const source = catalogSource()
+      const known = catalogRuntime
+      // Metadata listing needs the native store, not another executable probe,
+      // config read or auth startup. Borrow the already-running session hub.
+      if (known !== undefined && known.source === source && known.host === host && known.hub.state !== 'closed' && known.hub.state !== 'failed') {
+        return { hub: known.hub, release: known.hub.retain() }
+      }
+      const runtime = await prepareCodexRuntime({ kind: 'create', cwd: cwd ?? host.cwd }, host)
+      rememberCatalogRuntime(runtime, host)
+      return runtime
     },
     cwd: () => catalogHost?.cwd ?? process.cwd(),
     lastUsed: () => catalogPrefs()?.read().lastUsed ?? {},
-    snapshotKey: () => {
-      const home = codexHomeDir()
-      const sqlite = process.env.CODEX_SQLITE_HOME
-      if (!isAbsolute(home) || (sqlite !== undefined && sqlite !== '' && !isAbsolute(sqlite))) return undefined
-      return JSON.stringify(['codex', normalize(home), sqlite ? normalize(sqlite) : null])
-    },
+    snapshotKey: catalogSource,
   }),
 
   launch: {

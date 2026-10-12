@@ -64,10 +64,13 @@ side panel (`Ctrl+B`/`Alt+Z`), subagent dashboard, show-all, and todo fold are r
 - Plugins may also contribute one text line above the prompt, or a compact rich status view of up to three rows when the host exposes `tuiStatus.registerView`.
 - Rich views receive only host `Box`, `Text`, `Image`, and terminal size. Click/hover/drag work in fullscreen, and the view never owns the keyboard.
 - `Image` takes decoded RGBA pixels plus a same-size cell fallback.
-- After a successful Kitty probe, the host centers the image at its natural aspect ratio
-  using terminal-reported cell geometry (or a conservative default), adding transparent
-  letterboxing and downsampling when needed. Otherwise it renders the fallback (including
+- After a successful Kitty probe, the host enlarges or downsamples the image to the
+  reserved cell box's physical pixels, preserving its aspect ratio with centered transparent
+  letterboxing. It uses terminal-reported cell geometry (or a conservative default) and
+  downsamples boxes that exceed the pixel budget. Otherwise it renders the fallback (including
   inline, accessibility, and multiplexer sessions).
+- The 16 MiB frame budget bounds both decoded sources and fitted rasters;
+  images over the budget keep their text fallback.
 - Plugins provide the keyboard path for the same action through a slash command or `tuiShortcuts`.
 - A refused rich registration returns `undefined`; an admitted one returns a disposer that removes both the view and its Cordis effect.
 
@@ -813,7 +816,7 @@ The command menu merges local commands with the DSH command registry. Type `/` t
 - `/update`, `/vim` — vim editing mode toggle, see "Editing keys".
 - `/terminal-setup`, `/connect`, `/help`, `/exit` — aliases `/quit`, `/q`.
 - `/kernel` — opens the kernel picker (the current kernel is ticked; every row
-  carries a version and a one-line explanation), on DSH and Claude sessions alike.
+  carries a version and a one-line explanation), on DSH, Codex and Claude sessions alike.
   Picking the other kernel remembers it and restarts into it with a new session;
   the old session stays in `/resume`, and if the new session fails to start you
   are back on the old one. A running turn blocks the switch. The launchpad's
@@ -822,6 +825,11 @@ The command menu merges local commands with the DSH command registry. Type `/` t
   a later direct launch follows the flag. A fresh launch lands on the launchpad
   whichever kernel is remembered; a launch with a resume target goes straight
   into the session.
+- `/dsh`, `/codex`, `/claude` — directly choose the named kernel through the same
+  checks and restart flow as `/kernel`. Choosing the current kernel only reports
+  that it is already current; a running turn blocks switching. Missing Claude
+  opens the install wizard; missing or outdated Codex shows install/upgrade guidance.
+  These shortcuts also work before startup is ready.
 
 **Registry**
 

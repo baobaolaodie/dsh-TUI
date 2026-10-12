@@ -70,6 +70,8 @@ const GROUPS = {
 // 内核选择器组件：标题、行标签与副标题（版本、不可选原因）、当前项勾选、
 // 不可选行变暗但焦点指针仍显示、pinned 提示行、鼠标点行、未接 onPick 时无 hover。
     ['verify-kernel-picker', ['node', '--import', 'tsx/esm', 'scripts/verify-kernel-picker.tsx']],
+// 内核快捷命令：真实 Chat 的直达切换、探测等待、回合门禁、首屏与安装提示。
+    ['verify-kernel-commands', ['node', '--import', 'tsx/esm', 'scripts/verify-kernel-commands.tsx']],
 // SDK 安装向导（内核选择器「未安装」行进入）：各步骤态的正文与提示行、
 // 手动兜底命令、窄终端截断、en 态文案。
     ['verify-sdk-install-wizard', ['node', '--import', 'tsx/esm', 'scripts/verify-sdk-install-wizard.tsx']],
@@ -462,14 +464,17 @@ const GROUPS = {
 // 照 verify-backend-registry 的手法）。boot 侧的两条拒绝分支由 verify-startup-argv 从编译
 // 产物里切出来真跑，本脚本不重复。
     ["verify-resume-target", ['node', '--import', 'tsx/esm', 'scripts/verify-resume-target.ts']],
-// 后端贡献族（B-2，W-1）：三个内置 manifest 的投影必须过族内验证器、不漏 in-tree 私有键、
-// 投影是纯的；能力词表与 `SessionCapabilities` 成员双向一致（TS AST 提取）、保留字 id 表与
-// 注册表 built-in 双向一致；准入四种判定各一条（含 waiting_authorization 的拒绝形状）；
-// scripts/fixtures/probe-backend 钉资源不变量（未加载即不 import / 不关池、只关加载过的、
-// 幂等）、两种安装面形态、声明覆盖运行期能力；坏声明逐条必拒；关键判据各配一条坏基线
-// （注入 mutated 输入后必须红）；末尾是 W-1 的范围守卫——`Backend` 不在宿主 supported
-// contracts 里、`registryEntries()` 仍不读 registry 的 extensions 段、src 里没有生产代码
-// 注册这些贡献定义。**这几条是故意钉住"尚未接线"的状态**：C 段真去接 W-2 时就该来改它们。
+// 后端贡献族（B-2；W-1 → W-2 已接线）：三个内置 manifest 的投影必须过族内验证器、不漏
+// in-tree 私有键、投影是纯的；能力词表与 `SessionCapabilities` 成员双向一致（TS AST 提取）、
+// 保留字 id 表与注册表 built-in 双向一致；准入四种判定各一条（含 waiting_authorization 的
+// 拒绝形状）；scripts/fixtures/probe-backend 钉资源不变量（未加载即不 import / 不关池、
+// 只关加载过的、幂等）、两种安装面形态、声明覆盖运行期能力；坏声明逐条必拒；关键判据各配
+// 一条坏基线（注入 mutated 输入后必须红）；**末节是 W-2 的接线正断言**（它们取代了 B 段故意
+// 留下的四条 W-1 范围守卫）：宿主 supported contracts 含 `Backend`、`registryEntries()` 读
+// registry 的 extensions 段、`tui.backend` 条目把 contract profile 钉在 sha256 上、唯一注册
+// 贡献定义的生产模块就是规范准入 catalog 的装配点；以及 descriptor 的**双向**发布证据——
+// 探针应答才发布（用 pin 住的 profileHash），探针缺席/答"不可准入"就不发布并报出丢弃原因。
+// 两条新坏基线（删条目 / 漂移 profileHash）就地证明这几条不是装饰。
     ["verify-backend-contribution", ['node', '--import', 'tsx/esm', 'scripts/verify-backend-contribution.ts']],
 // 后端注册表回归（P0 Stage A + B-1）：注册闸门（重复 id / 保留 id / 非 inTree 用宿主
 // 词表 / native 越权 / 安装配方缺字段）、**安装面按声明不按 id**（非 inTree 条目声明

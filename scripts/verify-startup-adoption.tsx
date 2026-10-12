@@ -36,6 +36,7 @@ import type { AgentEvent, AgentEventMeta } from '../src/agent/events.js'
 import type { AgentInput, AgentSession, SubmitPlacement } from '../src/agent/session.js'
 import type { SessionCapabilities } from '../src/agent/capabilities.js'
 import type { ChannelLaunchOptions } from '../src/dsh-adapter/channel.js'
+import type { SessionSummary } from '../src/adapter/ports/channel-session.js'
 import type { PromptController } from '../src/components/PromptInput.js'
 
 setLang('en')
@@ -430,5 +431,79 @@ await screenCase('launchpad', '88888888-8888-4888-8888-888888888888', true, 42, 
 await screenCase('composer', '77777777-7777-4777-8777-777777777777', false, 100, false, 'new')
 await screenCase('composer', '77777777-7777-4777-8777-777777777777', true, 42, true, 'new')
 await screenCase('launchpad-failed', '99999999-9999-4999-8999-999999999999')
+// A browser opened while startup is pending follows the first adoption.
+for (const fullscreen of [false, true]) {
+  for (const changedCwd of [false, true]) {
+    const open = deferred()
+    const cwd = process.cwd()
+    const recorded = changedCwd ? `${cwd}/recorded` : cwd
+    const summary = (id: string, directory: string, title: string): SessionSummary => ({
+      id, cwd: directory, backendId: 'claude', kind: { kind: 'root' },
+      title: { text: title, source: 'prompt' }, createdAt: 1, updatedAt: 2,
+      bytes: undefined, hasPrompt: true, childCount: 0, agentPreset: undefined,
+    })
+    const initial = summary('launch-history', cwd, 'launch list')
+    const fresh = summary('recorded-history', recorded, 'recorded list')
+    let finishLocal!: (rows: readonly SessionSummary[]) => void
+    const local = new Promise<readonly SessionSummary[]>(resolve => { finishLocal = resolve })
+    let reads = 0
+    const channel = createChannel(ctx, createStartingSession('claude', cwd), {
+      ...launch(open.promise), cwd,
+      sessionCatalog: {
+        list: async (scope, onPartial) => {
+          reads++
+          if (scope?.cwd === cwd && (!channel.ready || !changedCwd)) {
+            onPartial?.([initial])
+            return local
+          }
+          return [fresh]
+        },
+      },
+    })
+    const list = channel.listSessions.bind(channel)
+    const browserTasks: ReturnType<typeof list>[] = []
+    channel.listSessions = (onEnriched, onPartial) => {
+      const task = list(onEnriched, onPartial)
+      if (onPartial !== undefined) browserTasks.push(task)
+      return task
+    }
+    const term = new XTerm({ cols: 100, rows: 32, scrollback: 200, allowProposedApi: true })
+    class FakeStdout extends Writable {
+      columns = 100
+      rows = 32
+      isTTY = true
+      _write(chunk: unknown, _encoding: BufferEncoding, callback: () => void): void { term.write(String(chunk), callback) }
+    }
+    const stdin = new FakeStdin()
+    const stdout = new FakeStdout()
+    const screen = (): string => viewportLines(term, 32).join('\n')
+    const child = React.createElement(Chat, { channel: channel as never, questionStore: new QuestionStore(), approvalStore: new ApprovalStore(), onExit: () => undefined, fullscreen, trajectorySeen: true })
+    const instance = await ui.render(fullscreen ? React.createElement(ui.AlternateScreen, {}, child) : child, {
+      stdout: stdout as never, stdin: stdin as never, stderr: stdout as never, exitOnCtrlC: false, patchConsole: false,
+    })
+    const label = `${fullscreen ? 'fullscreen' : 'inline'} ${changedCwd ? 'changed cwd' : 'same cwd'}`
+    try {
+      check(`${label}: startup preload starts before /resume`, await settled(() => reads === 1))
+      stdin.write('/resume')
+      await settled(() => screen().includes('/resume'))
+      stdin.write('\r')
+      check(`${label}: /resume paints preload progress before readiness`, await settled(() => screen().includes('launch list')), screen())
+      open.resolve({ session: fakeSession('adopted-real', recorded), history: [] })
+      check(`${label}: the open browser rechecks its scope after adoption`, await settled(() => channel.ready && browserTasks.length >= 2))
+      if (changedCwd) {
+        check(`${label}: the browser follows the recorded workspace`, await settled(() => screen().includes('recorded list') && !screen().includes('launch list')), screen())
+      }
+      finishLocal([initial])
+      await browserTasks[0]
+      check(`${label}: an old completion cannot empty the browser`, await settled(() => screen().includes(changedCwd ? 'recorded list' : 'launch list')), screen())
+      if (!changedCwd) check(`${label}: readiness reuses the pending preload`, reads === 2, String(reads))
+    } finally {
+      finishLocal([initial])
+      instance.unmount()
+      channel.releaseContributions()
+    }
+  }
+}
+
 console.log(`\nverify-startup-adoption: ${passed} checks passed`)
 process.exit(0)
