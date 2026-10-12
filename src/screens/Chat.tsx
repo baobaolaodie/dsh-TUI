@@ -2041,11 +2041,8 @@ export function Chat({
    * old conversation's text. Which DRAFT the slot keeps is a separate question,
    * answered by the snapshot's owner fields.
    *
-   * A model switch does not replace the conversation, and the channel declares
-   * that through `ChannelUi.continuedFromAgentId` (see `model-switch.ts` and
-   * `session-reset.ts`): naming the agent this screen was last rendered against
-   * is the one case that keeps the draft. A replacement carries `undefined`, so
-   * it clears exactly as before — as does a host without the property.
+   * A model switch preserves the draft only when its continuation fact names
+   * the previous binding; replacements and older hosts still clear it.
    */
   React.useLayoutEffect(() => {
     const previous = draftSessionRef.current

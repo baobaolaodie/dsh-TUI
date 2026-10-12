@@ -1,1287 +1,392 @@
 #!/usr/bin/env node
 /**
- * verify-composer-draft-model-switch — a MODEL SWITCH keeps the unsent draft.
- *
- * `/model` FORKS the conversation, so the channel adopts a new agent and
- * `channel.agentId` changes. Both draft clear points in `Chat.tsx` fire on that
- * change — the composer's session-swap layout effect (`draftSessionRef`) and the
- * launchpad's `[channel, agentId, bindingGeneration]` effect — and neither can
- * tell "this adoption continued the conversation" from "this adoption replaced
- * it". Switching a model therefore throws the half-written prompt away exactly
- * like `/new` does (issue #1455).
- *
- * The behaviour under test is the fix's ONE read-only UI fact:
- * `channel.continuedFromAgentId` — "which agent id this binding continued from",
- * written only by the model-switch adoption and reset by every other adoption
- * through the shared `resetSessionProjection`. Each clear point skips its wipe
- * when that fact names the agent the screen was last rendered against; a real
- * replacement carries `undefined` and clears exactly as it does today.
- *
- * Scenarios (env `VERIFY_DRAFT_SWITCH_SCENARIOS=A,B`; unset runs all):
- *   A  chat page — text + caret survive a continuation switch verbatim
- *   B  launchpad — the draft survives AND the parameter row shows the new model
- *   C  replacement — a bare `agentId` change still clears (both screens, plus a
- *      stub that lacks the property entirely) = today's behaviour
- *   D  action layer — `createModelSwitchAction` writes the fact for the agent
- *      the binding came FROM, and `resetSessionProjection` clears it again
- *   E  images — a visible `[Image #N]` stays as text while its old capability
- *      stops being bound (`hasStagedImage` false); the colour probe is
- *      positively controlled before the switch
- *   F  the real facade — a REAL `createChannel` under the production
- *      `mountChannelUi` projects the fact a REAL `switchModel` writes, and a
- *      REAL `/new` leaves it empty (A~E all drive the stub channel, so none of
- *      them would notice the production projection losing the fact; the live
- *      `state.continuedFromAgentId` slot is invisible to `Chat.tsx` unless
- *      `CHANNEL_UI_PROPERTIES` -> `createChannelUi` carries it — F1 in
- *      `probe/review-adversarial.md` / L-014)
- *   G  a parked composer keeps text/caret across a continuation, drops them
- *      on replacement, and never restores revoked image bindings
- *
- * A/B/D/E/F are RED until the implementation lands; C pins existing behaviour
- * and passes on the pre-fix tree. That split is the point of this file: the RED
- * run is the evidence that the new assertions have discriminating power.
- *
- * Drives the REAL `Chat` (+ `PromptInput` / `Launchpad`) through fake stdin and a
- * headless xterm, like `verify-composer-draft-screen-switch.tsx`. Waits go
- * through `scripts/lib/term-test.mjs` (`settled`), and every switch is observed
- * through a transcript/parameter-row anchor so an assertion can never pass
- * before the commit that carried the switch.
- *
- * Run from the checkout root:
- *   node --import tsx/esm scripts/verify-composer-draft-model-switch.tsx
+ * Model-switch draft regression: mounted/parked composer, launchpad, images,
+ * replacement/legacy channels, and the real channel-to-UI projection.
+ * Run: node --import tsx/esm scripts/verify-composer-draft-model-switch.tsx
+ * Optional subset: VERIFY_DRAFT_SWITCH_SCENARIOS=A,B,E,F,G
  */
+import assert from 'node:assert/strict'
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { PassThrough, Writable } from 'node:stream'
+import { settled, viewportLines, screenHas } from './lib/term-test.mjs'
+
 process.env.FORCE_COLOR = '3'
 process.env.DSH_TUI_THEME = 'dark'
 process.env.DSH_TUI_LANG = 'zh'
-
-const { existsSync, mkdtempSync, rmSync, writeFileSync } = await import('node:fs')
-const { tmpdir } = await import('node:os')
-const { join } = await import('node:path')
-// L-055: i18n, the preference files and the session ledger resolve their data
-// dir at import time, so the throwaway home must exist BEFORE any `src/` import.
-const home = mkdtempSync(join(tmpdir(), 'dsh-tui-draft-model-switch-'))
-process.env.HOME = home
-process.env.USERPROFILE = home
-process.env.DSH_HOME = join(home, 'dsh')
-// The composer's staged-image chip colour is part of scenario E; the
-// terminal-image renderer itself is irrelevant here (and wants a real TTY).
 process.env.DSH_TUI_DISABLE_TERMINAL_IMAGES = '1'
-/** A real on-disk 1x1 PNG: `parsePastedImagePath` stats the path, the channel
- *  stub stages the bytes; nothing decodes the pixels. */
-const pastedImagePath = join(home, 'draft-probe.png')
-writeFileSync(
-  pastedImagePath,
-  Buffer.from(
-    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
-    'base64',
-  ),
-)
+// Preferences resolve HOME at module evaluation, before the first channel opens.
+const home = mkdtempSync(join(tmpdir(), 'dsh-tui-draft-model-switch-'))
+process.env.HOME = process.env.USERPROFILE = home
+process.env.DSH_HOME = join(home, 'dsh')
+const imagePath = join(home, 'draft.png')
+writeFileSync(imagePath, Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==', 'base64'))
 
-const [
-  { PassThrough, Writable },
-  { default: React },
-  { Terminal: XTerm },
-  { render },
-  { Chat },
-  { QuestionStore },
-  { LOCAL_COMMANDS, completeCommands },
-  { settled, viewportLines },
-  { createModelSwitchAction },
-  { resetSessionProjection },
-  { setLang, t },
-  { Context },
-  { createChannel },
-  { mountChannelUi },
-  { registerTuiChannel },
-] = await Promise.all([
-  import('node:stream'),
+const [React, { Terminal: XTerm }, { render }, { Chat }, { QuestionStore }, { LOCAL_COMMANDS, completeCommands }, { t }, { Context }, { createChannel }, { mountChannelUi }, { registerTuiChannel }] = await Promise.all([
   import('react'),
   import('@xterm/headless'),
   import('../src/ui.js'),
   import('../src/screens/Chat.js'),
   import('../src/dsh-adapter/questions.js'),
   import('../src/commands.js'),
-  import('./lib/term-test.mjs'),
-  import('../src/dsh-adapter/channel/model-switch.js'),
-  import('../src/dsh-adapter/channel/session-reset.js'),
   import('../src/i18n.js'),
-  // Scenario F only: the real cordis context, the real channel and the
-  // production UI-facade assembly (all `src/` modules, no live DSH services).
   import('@deepseek-ai/cordis'),
   import('../src/dsh-adapter/channel.js'),
   import('../src/dsh-adapter/channel-ui.js'),
   import('../src/adapter/channel/host-registry.js'),
 ])
-// The script runs in zh (see `DSH_TUI_LANG` above). Set it explicitly rather
-// than trusting the import-time detection: the one dictionary string read below
-// decides whether the launchpad input is empty.
-setLang('zh')
 
-const COLS = 100
+const EMPTY: readonly never[] = Object.freeze([])
 const ROWS = 36
-/** The launchpad needs the room its own regression gives it (the parameter row
- *  and the entry chips share one screen). */
-const LAUNCHPAD_COLS = 120
-const BRACKET_PASTE_START = '\x1b[200~'
-const BRACKET_PASTE_END = '\x1b[201~'
-const ARROW_LEFT = '\x1b[D'
-/** The draft the chat-page scenarios type: two lines (< FOLD_MIN_LINES, so it
- *  stays inline) and a caret that can sit in the middle of the second one. */
-const DRAFT_TEXT = 'line-one\nline-two'
-const STAGED_IMAGE_TOKEN = '[Image #1]'
-/** Short model names keep the launchpad parameter row in its FIT tier — a
- *  truncated `…` would make the "row shows the new model" anchor ambiguous. */
+const TOKEN = '[Image #1]'
 const MODEL_BEFORE = 'probe-model-a'
 const MODEL_AFTER = 'probe-model-b'
-const AGENT_BEFORE = 'probe-agent'
-const AGENT_AFTER = 'probe-agent-continued'
-const LAUNCHPAD_PLACEHOLDER = t('launchpad-placeholder')
-/** Ceiling for a mount, a first paint or a whole switch round trip. Generous so
- *  a loaded shared runner cannot make a correct build look broken. */
-const RENDER_TIMEOUT_MS = 8000
-/** Ceiling for a state a commit is expected to reach right away. */
-const SETTLE_TIMEOUT_MS = 4000
-/**
- * Renderer errors (`logError` -> `process.stderr` with a `[dsh-tui]` prefix) are
- * collected instead of swallowed: an error inside a scenario must fail the run
- * even when the screen happens to recover. React's own dev warnings are
- * forwarded but not triaged — the assertions here never depend on them.
- */
+const DRAFT = 'line-one\nline-two'
+const placeholder = t('launchpad-placeholder')
+const noop = () => {}
+const subscribeNone = () => noop
 const runtimeErrors: string[] = []
-const realStderrWrite = process.stderr.write.bind(process.stderr)
-;(process.stderr as { write: (...args: unknown[]) => unknown }).write = ((
-  chunk: unknown,
-  ...rest: unknown[]
-) => {
-  const text = typeof chunk === 'string' ? chunk : String(chunk)
-  if (text.includes('[dsh-tui]')) runtimeErrors.push(text.trim())
-  return (realStderrWrite as (...args: unknown[]) => unknown)(chunk, ...rest)
-}) as typeof process.stderr.write
-
-class VerifyFailure extends Error {
-  readonly scenario: string
-  readonly detail: string
-  readonly expected: unknown
-  readonly actual: unknown
-
-  constructor(scenario: string, detail: string, expected: unknown, actual: unknown) {
-    super(`${scenario}: ${detail}`)
-    this.name = 'VerifyFailure'
-    this.scenario = scenario
-    this.detail = detail
-    this.expected = expected
-    this.actual = actual
-  }
+const stderrWrite = process.stderr.write.bind(process.stderr)
+;(process.stderr as { write: (...args: unknown[]) => unknown }).write = (chunk: unknown, ...args: unknown[]) => {
+  if (String(chunk).includes('[dsh-tui]')) runtimeErrors.push(String(chunk))
+  return (stderrWrite as (...args: unknown[]) => unknown)(chunk, ...args)
 }
 
-function assertTrue(scenario: string, detail: string, actual: unknown): void {
-  if (actual !== true) throw new VerifyFailure(scenario, detail, true, actual)
+async function wait(label: string, predicate: () => boolean): Promise<void> {
+  assert.equal(await settled(predicate, { timeoutMs: 8000 }), true, label)
 }
 
-function assertEqual(scenario: string, detail: string, expected: unknown, actual: unknown): void {
-  if (JSON.stringify(expected) !== JSON.stringify(actual)) {
-    throw new VerifyFailure(scenario, detail, expected, actual)
-  }
-}
-
-/** Wait for a predicate that must eventually hold; timeout = hard failure. */
-async function waitFor(
-  scenario: string,
-  what: string,
-  pred: () => boolean,
-  timeoutMs?: number,
-): Promise<void> {
-  const ok = await settled(pred, timeoutMs === undefined ? {} : { timeoutMs })
-  if (!ok) throw new VerifyFailure(scenario, `timeout waiting for ${what}`, true, false)
-}
-
-interface StubStagedImage {
-  readonly id: string
-  readonly path: string
-}
-
-interface StubRow {
-  readonly id: number
-  readonly kind: 'user'
-  readonly text: string
-}
-
-/** Stable references: a fresh `[]`/callback per render would make Chat's
- *  `useSyncExternalStore` loop on unchanged snapshots. */
-const EMPTY_LIST: readonly never[] = Object.freeze([])
-const noopUnsubscribe = (): (() => void) => () => {}
-
-/**
- * Stub channel: the seams the Chat tree needs plus the session identity the
- * model switch moves. Mutable slices are getters over `state` so a scenario can
- * mutate them and `bump()` exactly like the real channel's adoption transaction.
- *
- * `continuedFromAgentId` is mirrored here the way the fix declares it in
- * `ChannelUi`: a FLAT field on the channel view itself (present, `undefined` by
- * default) and NOT only a slice of the internal `state` bag — `Chat.tsx` reads
- * `channel.continuedFromAgentId` at both clear points, so a stub that keeps the
- * fact one level down leaves the exemption permanently undefined and makes the
- * assertions below fail for a reason that has nothing to do with the fix (T01
- * rework, L-044/L-052). `makeChannel({ legacy: true })` deletes it again to
- * model a stub / older host that never heard of the property (AC-6).
- */
-function makeChannel(options: { legacy?: boolean } = {}) {
+function makeChannel(legacy: boolean) {
   const listeners = new Set<() => void>()
   const state = {
-    agentBindingGeneration: 0,
-    /** Staged-image session epoch, mirroring the real channel: it advances
-     *  whenever the capability map is cleared (`composer-images.ts:131-155`). */
-    stagedImageEpoch: 0,
-    staged: new Map<string, StubStagedImage>(),
-    discarded: [] as string[],
-    nextStage: 1,
-    nextRow: 2,
-    rows: [{ id: 1, kind: 'user' as const, text: 'probe transcript row' }] as StubRow[],
-    submitted: [] as Array<{ text: string; images: readonly unknown[] }>,
-    clearCalls: 0,
-    notifyLog: [] as string[],
-    subagents: EMPTY_LIST,
-    /** The fact under test: which agent id this binding continued from. */
+    generation: 0,
+    imageGeneration: 0,
+    nextImage: 1,
     continuedFromAgentId: undefined as string | undefined,
+    staged: new Map<string, { id: string; path: string }>(),
+    rows: [{ id: 1, kind: 'user' as const, text: 'probe transcript row' }],
   }
   const channel = {
-    whaleIdle: false,
     version: 0,
-    status: 'idle' as const,
-    sessionTitle: 'probe',
-    agentId: AGENT_BEFORE,
+    agentId: 'probe-agent',
     sessionId: 'probe-session',
     model: MODEL_BEFORE,
-    modelDisplay: undefined as string | undefined,
     provider: 'deepseek',
+    status: 'idle',
+    sessionTitle: 'probe',
+    whaleIdle: false,
     reasoningEffort: 'max',
-    effortLevels: [] as string[],
+    effortLevels: EMPTY,
     tokens: { input: 0, output: 0 },
-    cwd: '/tmp/demo',
-    displayCwd: '/tmp/demo',
+    cwd: '/tmp/probe',
+    displayCwd: '/tmp/probe',
     gitBranch: 'main',
     working: false,
     spinnerMode: 'requesting',
     responseChars: 0,
     activeToolCount: 0,
     turnStart: 0,
-    pending: [] as unknown[],
+    pending: EMPTY,
     commandList: LOCAL_COMMANDS,
-    notifications: [] as unknown[],
+    notifications: EMPTY,
     mode: { plan: false, sandbox: undefined },
     activityFrames: 'moon8',
-    agentPreset: undefined,
     lastUserText: '',
     scrollGutter: 'timeline',
-    state,
-    get rows() {
-      return state.rows
-    },
-    get agentBindingGeneration() {
-      return state.agentBindingGeneration
-    },
-    get subagents() {
-      return state.subagents
-    },
-    get backgroundJobs() {
-      return EMPTY_LIST
-    },
-    /** The fact under test, on the SAME flat surface the real view exposes it on
-     *  (`ChannelUi.continuedFromAgentId` -> `Chat.tsx:791` / `Chat.tsx:2032`).
-     *  Every `state.continuedFromAgentId` write below is therefore readable by
-     *  the UI, and the `legacy` delete really removes a property that existed. */
-    get continuedFromAgentId(): string | undefined {
-      return state.continuedFromAgentId
-    },
-    subscribe(cb: () => void) {
-      listeners.add(cb)
-      return () => listeners.delete(cb)
+    subagents: EMPTY,
+    backgroundJobs: EMPTY,
+    get rows() { return state.rows },
+    get agentBindingGeneration() { return state.generation },
+    get continuedFromAgentId() { return state.continuedFromAgentId },
+    subscribe(listener: () => void) {
+      listeners.add(listener)
+      return () => listeners.delete(listener)
     },
     bump() {
       channel.version += 1
-      for (const cb of listeners) cb()
+      for (const listener of listeners) listener()
     },
-    submit(text: string, images: readonly unknown[] = []) {
-      state.submitted.push({ text, images })
-    },
-    cancel: () => {},
-    clear() {
-      state.clearCalls += 1
-    },
-    notify: (message: string) => {
-      state.notifyLog.push(String(message))
-    },
-    listModels: () => Promise.resolve([]),
-    listSessions: () => Promise.resolve([]),
-    deleteSession: () => Promise.resolve(true),
-    renameSessionTo: () => Promise.resolve(true),
-    setResumeTarget: () => {},
-    loadOlder: () => {},
-    mcpStatus: () => EMPTY_LIST,
-    pushLocal: () => {},
+    submit: noop,
+    cancel: noop,
+    clear: noop,
+    notify: noop,
+    listModels: async () => [],
+    listSessions: async () => [],
+    deleteSession: async () => true,
+    renameSessionTo: async () => true,
+    setResumeTarget: noop,
+    loadOlder: noop,
+    mcpStatus: () => EMPTY,
+    pushLocal: noop,
     commandCompletions: (input: string) => completeCommands(input),
-    stagedImageGeneration: () => state.stagedImageEpoch,
-    stagedImage: (stageId: string) => state.staged.get(stageId),
-    hasStagedImage: (stageId: string) => state.staged.has(stageId),
-    discardStagedImage: (stageId: string) => {
-      state.discarded.push(stageId)
-      state.staged.delete(stageId)
-    },
-    stagedImageLimits: () => ({
-      maxImageBytes: 1_000_000,
-      maxImagesPerMessage: 8,
-      maxImageDimension: 8192,
-      maxImagePixels: 64_000_000,
-    }),
+    stagedImageGeneration: () => state.imageGeneration,
+    stagedImage: (id: string) => state.staged.get(id),
+    hasStagedImage: (id: string) => state.staged.has(id),
+    discardStagedImage: (id: string) => { state.staged.delete(id) },
+    stagedImageLimits: () => ({ maxImageBytes: 1_000_000, maxImagesPerMessage: 8, maxImageDimension: 8192, maxImagePixels: 64_000_000 }),
     stageComposerImage: async () => {
-      const stageId = `stage-${state.nextStage++}`
-      state.staged.set(stageId, { id: stageId, path: pastedImagePath })
+      const stageId = `stage-${state.nextImage++}`
+      state.staged.set(stageId, { id: stageId, path: imagePath })
       return { stageId }
     },
-    previewImages: () => EMPTY_LIST,
-    subagentControl: { interrupt: () => {} },
+    previewImages: () => EMPTY,
+    subagentControl: { interrupt: noop },
     backgroundCurrent: async () => ({ ok: true, backgroundedSessionId: 'probe' }),
-    agentViewRows: () => EMPTY_LIST,
-    subscribeAgentView: noopUnsubscribe,
+    agentViewRows: () => EMPTY,
+    subscribeAgentView: subscribeNone,
     settingsHost: () => undefined,
-    settingsSections: () => EMPTY_LIST,
-    subscribeSettingsSections: noopUnsubscribe,
+    settingsSections: () => EMPTY,
+    subscribeSettingsSections: subscribeNone,
     buildSessionTree: () => new Promise<null>(() => {}),
-    // The launchpad reads these two: the preset roster names the parameter row's
-    // preset segment, the permission snapshot its permission segment. An empty
-    // roster / unavailable roster keeps the row to `model  ·  Max`, which is
-    // exactly the anchor scenario B waits on.
-    listPresets: () => Promise.resolve([]),
+    listPresets: async () => [],
     permissionPresets: () => ({ availability: 'unavailable' as const, current: undefined }),
   }
-  if (options.legacy === true) delete (channel as unknown as Record<string, unknown>)['continuedFromAgentId']
-  return channel
+  if (legacy) delete (channel as Partial<typeof channel>).continuedFromAgentId
+  return { channel, state }
 }
 
-interface Harness {
-  term: InstanceType<typeof XTerm>
-  stdin: InstanceType<typeof PassThrough>
-  channel: ReturnType<typeof makeChannel>
-  unmount: () => void
+class Stdin extends PassThrough {
+  isTTY = true
+  setRawMode() { return this }
+  ref() { return this }
+  unref() { return this }
 }
 
-async function mountChat(options: { launchpad?: boolean; legacyChannel?: boolean; fullscreen?: boolean; columns?: number } = {}): Promise<Harness> {
-  const cols = options.columns ?? (options.launchpad === true ? LAUNCHPAD_COLS : COLS)
+async function mount(options: { launchpad?: boolean; legacy?: boolean; fullscreen?: boolean; columns?: number } = {}) {
+  const cols = options.columns ?? (options.launchpad ? 120 : 100)
   const term = new XTerm({ cols, rows: ROWS, scrollback: 0, allowProposedApi: true })
-  class FakeStdout extends Writable {
-    columns = cols
-    rows = ROWS
-    isTTY = true
-    _write(chunk: unknown, _encoding: BufferEncoding, callback: () => void) {
-      // L-034: xterm's write() queues asynchronously — the buffer only reflects
-      // the frame once this callback fires, which is why every read below goes
-      // through a polling predicate instead of a bare synchronous read.
-      term.write(String(chunk), callback)
-    }
-  }
-  class FakeStderr extends Writable {
-    isTTY = true
-    _write(_chunk: unknown, _encoding: BufferEncoding, callback: () => void) {
-      callback()
-    }
-  }
-  class FakeStdin extends PassThrough {
-    isTTY = true
-    setRawMode() {
-      return this
-    }
-    ref() {
-      return this
-    }
-    unref() {
-      return this
-    }
-  }
-  const stdin = new FakeStdin()
-  const stdout = new FakeStdout()
-  const stderr = new FakeStderr()
-  const questions = new QuestionStore()
-  const channel = makeChannel({ legacy: options.legacyChannel === true })
-  const chatNode = React.createElement(Chat, {
-    channel,
-    questionStore: questions,
+  const stdout = Object.assign(new Writable({
+    write(chunk, _encoding, done) { term.write(String(chunk), done) },
+  }), { columns: cols, rows: ROWS, isTTY: true })
+  const stderr = Object.assign(new Writable({ write(_chunk, _encoding, done) { done() } }), { isTTY: true })
+  const stdin = new Stdin()
+  const fixture = makeChannel(options.legacy === true)
+  const app = await render(React.createElement(Chat, {
+    channel: fixture.channel as never,
+    questionStore: new QuestionStore(),
     fullscreen: options.fullscreen ?? true,
     launchpadOnBoot: options.launchpad === true,
-  })
-  const instance = await render(
-    chatNode,
-    {
-      stdout: stdout as unknown as NodeJS.WriteStream,
-      stdin: stdin as unknown as NodeJS.ReadStream,
-      stderr: stderr as unknown as NodeJS.WriteStream,
-      exitOnCtrlC: false,
-      patchConsole: false,
-    },
-  )
-  let unmounted = false
-  return {
-    term,
-    stdin,
-    channel,
-    unmount: () => {
-      if (unmounted) return
-      unmounted = true
-      instance.unmount()
-    },
-  }
+  }), { stdout: stdout as never, stdin: stdin as never, stderr: stderr as never, exitOnCtrlC: false, patchConsole: false })
+  return { ...fixture, term, stdin, unmount: () => app.unmount() }
+}
+type Harness = Awaited<ReturnType<typeof mount>>
+
+function composer(app: Harness) {
+  const rows = viewportLines(app.term)
+  const bottom = rows.findLastIndex(row => row.includes('╰'))
+  let top = bottom - 1
+  while (top >= 0 && !rows[top]!.includes('╭')) top -= 1
+  const block = rows.slice(top, bottom + 1).map(row => row.trimEnd())
+  if (top < 0 || !block.some(row => row.includes('❯')) || !block.some(row => row.includes('⛶'))) return null
+  // Transcript changes can move the whole box; only the caret within it matters.
+  return { block, caret: { x: app.term.buffer.active.cursorX, row: app.term.buffer.active.cursorY - top } }
+}
+const hasDraft = (app: Harness, text: string) => composer(app)?.block.join('\n').includes(text) ?? false
+const paste = (app: Harness, text: string) => app.stdin.write(`\x1b[200~${text}\x1b[201~`)
+function anchor(app: Harness, text: string) {
+  app.state.rows.push({ id: app.state.rows.length + 1, kind: 'user', text })
+  app.channel.bump()
+}
+function adopt(app: Harness, continued: boolean) {
+  app.state.continuedFromAgentId = continued ? app.channel.agentId : undefined
+  app.channel.agentId = app.channel.sessionId = 'next-agent'
+  app.channel.model = MODEL_AFTER
+  app.state.generation += 1
+  app.state.imageGeneration += 1
+  app.state.staged.clear()
+  anchor(app, 'SWITCH-COMMITTED')
 }
 
-const screen = (app: Harness): string[] => viewportLines(app.term, ROWS)
-const screenHas = (app: Harness, text: string): boolean => screen(app).some(line => line.includes(text))
-
-function inputRange(app: Harness): { top: number; bottom: number } | null {
-  const rows = screen(app)
-  let bottom = -1
-  for (let i = rows.length - 1; i >= 0; i -= 1) {
-    if (rows[i].includes('╰')) {
-      bottom = i
-      break
-    }
-  }
-  if (bottom < 0) return null
-  for (let i = bottom - 1; i >= 0; i -= 1) {
-    if (rows[i].includes('╭')) return { top: i, bottom }
-  }
-  return null
-}
-
-/** The composer box: top border, content row(s), bottom border. Comparing this
- *  slice before/after a switch is the text + newline-structure assertion; the
- *  transcript outside it is not part of the draft. Trailing cell padding is
- *  stripped (a renderer frame artifact), the borders stay full width. */
-function inputBlock(app: Harness): string[] | null {
-  const range = inputRange(app)
-  if (range === null) return null
-  return screen(app).slice(range.top, range.bottom + 1).map(row => row.trimEnd())
-}
-
-/** True only for the MAIN composer box: the `❯` prompt glyph and the `⛶`
- *  affordance both have to be inside the same `╭ ╰` box (the launchpad draws a
- *  round box of its own, but has no `⛶`). */
-function composerMounted(app: Harness): boolean {
-  const block = inputBlock(app)
-  return block !== null
-    && block.some(line => line.includes('❯'))
-    && block.some(line => line.includes('⛶'))
-}
-
-function composerBlock(app: Harness): string[] | null {
-  return composerMounted(app) ? inputBlock(app) : null
-}
-
-function composerHas(app: Harness, text: string): boolean {
-  return composerBlock(app)?.join('\n').includes(text) ?? false
-}
-
-function cursorPos(app: Harness): { x: number; y: number } {
-  const buffer = app.term.buffer.active
-  return { x: buffer.cursorX, y: buffer.cursorY }
-}
-
-interface ScreenState {
-  block: string[] | null
-  /**
-   * The caret, measured RELATIVE to the composer block's top border. A
-   * transcript row landing above the composer shifts the whole box down the
-   * screen, and that shift says nothing about the draft; the offset inside the
-   * box is what "the caret did not move" means.
-   */
-  caret: { x: number; row: number } | null
-}
-
-function composerState(app: Harness): ScreenState {
-  const range = inputRange(app)
-  if (range === null || !composerMounted(app)) return { block: null, caret: null }
-  const cursor = cursorPos(app)
-  return {
-    block: screen(app).slice(range.top, range.bottom + 1).map(row => row.trimEnd()),
-    caret: { x: cursor.x, row: cursor.y - range.top },
-  }
-}
-
-function assertSameComposerState(
-  scenario: string,
-  label: string,
-  before: ScreenState,
-  after: ScreenState,
-): void {
-  assertEqual(scenario, `${label}: composer block`, before.block, after.block)
-  assertEqual(scenario, `${label}: caret`, before.caret, after.caret)
-}
-
-/** A staged token is a capability-backed chip (theme accent), not plain text —
- *  scenario E uses it to show the OLD capability stopped being bound. Mirrors
- *  `verify-composer-image-tokens`' colour probe. */
-function tokenIsChip(app: Harness, token: string): { ok: boolean; detail: string } {
+function tokenIsChip(app: Harness): boolean {
   const buffer = app.term.buffer.active
   for (let row = 0; row < ROWS; row += 1) {
-    const line = buffer.getLine(buffer.baseY + row)?.translateToString(true) ?? ''
-    const col = line.indexOf(token)
+    const line = buffer.getLine(buffer.baseY + row)
+    const col = line?.translateToString(true).indexOf(TOKEN) ?? -1
     if (col < 0) continue
-    const cell = buffer.getLine(buffer.baseY + row)?.getCell(col)
-    const plain = buffer.getLine(buffer.baseY + row)?.getCell(Math.max(0, col - 2))
-    const ok = cell !== undefined && plain !== undefined
-      && !cell.isFgDefault() && cell.getFgColor() !== plain.getFgColor()
-    return { ok, detail: `row=${row} col=${col} tokenFg=${String(cell?.getFgColor())} plainFg=${String(plain?.getFgColor())}` }
+    const token = line?.getCell(col)
+    const plain = line?.getCell(Math.max(0, col - 2))
+    return token !== undefined && plain !== undefined && !token.isFgDefault() && token.getFgColor() !== plain.getFgColor()
   }
-  return { ok: false, detail: 'token not visible' }
+  return false
 }
 
-/** The launchpad's input row: its card is the only `❯` on screen (the entry
- *  chips carry no pointer glyph, and the main composer is not rendered). */
-function launchpadInputRow(app: Harness): string {
-  return screen(app).find(line => line.includes('❯')) ?? ''
-}
-
-/** What the user typed in the launchpad input: the cells between the `❯` prompt
- *  and the card's right border, with the placeholder read as "empty" (the
- *  placeholder is chrome, not a draft). */
-function launchpadDraftText(app: Harness): string {
-  const row = launchpadInputRow(app)
-  const at = row.indexOf('❯')
-  if (at < 0) return ''
-  const rest = row.slice(at + 1)
-  const border = rest.lastIndexOf('│')
-  const text = (border < 0 ? rest : rest.slice(0, border)).trim()
-  return text.startsWith(LAUNCHPAD_PLACEHOLDER) ? '' : text
-}
-
-/** The launchpad parameter row (`模型  ·  思考深度  ·  preset  ·  权限`): the
- *  LAST `·`-separated row, because a picker overlay stacked above it may use the
- *  same separator. */
-function launchpadParamRow(app: Harness): string {
-  const rows = screen(app)
-  for (let i = rows.length - 1; i >= 0; i -= 1) {
-    if (rows[i].includes('  ·  ')) return rows[i]
-  }
-  return ''
-}
-
-/** Bracketed paste: commits a whole string — newlines included — as ONE key
- *  event, which is the deterministic way to seed a multi-line draft. */
-function pasteText(app: Harness, text: string): void {
-  app.stdin.write(`${BRACKET_PASTE_START}${text}${BRACKET_PASTE_END}`)
-}
-
-/**
- * A model switch as the production channel emits it: the continuation fact is
- * written BEFORE the new identity (the adoption tail resets the projection,
- * writes the fact, then swaps `agentId`/`sessionId`/`model`, then emits once).
- *
- * `anchor` is a transcript change that lands in the SAME mutation. Every
- * scenario waits for that anchor, because "the draft is still there" is also
- * true BEFORE the commit — an assertion that ran early would pass on a broken
- * build.
- */
-function emitModelSwitch(
-  app: Harness,
-  next: { agentId: string; model: string; continued: boolean; dropImages?: boolean; anchor: string },
-): void {
-  const { channel } = app
-  const { state } = channel
-  state.continuedFromAgentId = next.continued ? channel.agentId : undefined
-  channel.agentId = next.agentId
-  channel.sessionId = next.agentId
-  state.agentBindingGeneration += 1
-  channel.model = next.model
-  if (next.dropImages === true) {
-    // The real transaction revokes every staged capability (`clearStagedImages`)
-    // and advances the epoch the composer fences its bindings against.
-    state.staged.clear()
-    state.stagedImageEpoch += 1
-  }
-  emitRenderAnchor(app, next.anchor)
-}
-
-/** Wait until a later render proves the switch commit landed. */
-async function waitForSwitchCommit(scenario: string, app: Harness, anchor: string): Promise<void> {
-  await waitFor(scenario, `the render that carried the switch (anchor ${JSON.stringify(anchor)})`,
-    () => screenHas(app, anchor))
-}
-
-/**
- * Land `anchor` in the transcript as the observable that a new render committed.
- *
- * The composer is compared by its BLOCK plus the caret's position RELATIVE to
- * that block (see {@link composerState}), so the one thing this anchor must not
- * do is touch the draft itself — a transcript row above it may shift the whole
- * box down without that being a draft change.
- */
-function emitRenderAnchor(app: Harness, anchor: string): void {
-  const { channel } = app
-  channel.state.rows.push({ id: channel.state.nextRow++, kind: 'user', text: anchor })
-  channel.bump()
-}
-
-/** Type one chat draft and park the caret three cells into its second line. */
-async function typeChatDraft(scenario: string, app: Harness): Promise<ScreenState> {
-  await waitFor(scenario, 'composer to mount', () => composerMounted(app), RENDER_TIMEOUT_MS)
-  pasteText(app, DRAFT_TEXT)
-  await waitFor(
-    scenario,
-    'both draft lines inside the composer box',
-    () => composerHas(app, 'line-one') && composerHas(app, 'line-two'),
-    RENDER_TIMEOUT_MS,
-  )
-  const endCaret = cursorPos(app)
+async function typeDraft(app: Harness) {
+  await wait('composer mounted', () => composer(app) !== null)
+  paste(app, DRAFT)
+  await wait('multiline draft painted', () => hasDraft(app, 'line-one') && hasDraft(app, 'line-two'))
+  const end = app.term.buffer.active.cursorX
   for (let step = 1; step <= 3; step += 1) {
-    app.stdin.write(ARROW_LEFT)
-    const want = endCaret.x - step
-    await waitFor(scenario, `the caret to move left (${step}/3)`, () => cursorPos(app).x === want)
-  }
-  return composerState(app)
-}
-
-/** ── A · chat page: a continuation switch keeps text + caret verbatim ────── */
-async function scenarioChatContinuation(): Promise<void> {
-  const scenario = 'A'
-  const app = await mountChat()
-  try {
-    const before = await typeChatDraft(scenario, app)
-    // Positive control: the comparison below is evidence only if it HOLDS across
-    // a re-render that changes no identity — otherwise a failure after the
-    // switch could as well be the comparison itself (L-044/L-048).
-    emitRenderAnchor(app, 'CONTROL-ANCHOR-A')
-    await waitForSwitchCommit(scenario, app, 'CONTROL-ANCHOR-A')
-    assertSameComposerState(scenario, 'control: a neutral re-render', before, composerState(app))
-    emitModelSwitch(app, {
-      agentId: AGENT_AFTER,
-      model: MODEL_AFTER,
-      continued: true,
-      anchor: 'SWITCH-ANCHOR-A',
-    })
-    await waitForSwitchCommit(scenario, app, 'SWITCH-ANCHOR-A')
-    assertTrue(
-      scenario,
-      'a continuation model switch must keep the draft (today the composer clear point wipes it)',
-      composerHas(app, 'line-two'),
-    )
-    assertSameComposerState(scenario, 'continuation model switch', before, composerState(app))
-  } finally {
-    app.unmount()
+    app.stdin.write('\x1b[D')
+    await wait('caret moved left', () => app.term.buffer.active.cursorX === end - step)
   }
 }
 
-/** ── B · launchpad: a continuation switch keeps the draft, row updates ───── */
-async function scenarioLaunchpadContinuation(): Promise<void> {
-  const scenario = 'B'
-  const app = await mountChat({ launchpad: true })
+async function chatCase(options: { continued: boolean; legacy?: boolean; image?: boolean }) {
+  const app = await mount(options)
   try {
-    await waitFor(scenario, 'launchpad to paint', () => screenHas(app, LAUNCHPAD_PLACEHOLDER), RENDER_TIMEOUT_MS)
-    const draft = 'launch-draft-keep'
-    let typed = ''
-    for (const character of draft) {
-      app.stdin.write(character)
-      typed += character
-      const want = typed
-      await waitFor(scenario, `launchpad input to show ${JSON.stringify(want)}`,
-        () => launchpadDraftText(app) === want)
+    if (options.legacy) assert.equal('continuedFromAgentId' in app.channel, false)
+    await typeDraft(app)
+    if (options.image) {
+      paste(app, imagePath)
+      await wait('image token painted', () => hasDraft(app, TOKEN))
+      assert.equal(tokenIsChip(app), true, 'chip probe sees the live image before revocation')
     }
-    assertTrue(scenario, 'parameter row shows the boot model', launchpadParamRow(app).includes(MODEL_BEFORE))
+    const before = composer(app)
+    anchor(app, 'CONTROL-COMMITTED')
+    await wait('neutral render committed', () => screenHas(app.term, 'CONTROL-COMMITTED'))
+    assert.deepEqual(composer(app), before, 'neutral render preserves text and caret')
+    adopt(app, options.continued)
+    await wait('switch committed', () => screenHas(app.term, 'SWITCH-COMMITTED'))
+    if (options.continued) assert.deepEqual(composer(app), before, 'continuation preserves text and caret')
+    else await wait('replacement clears the draft', () => !hasDraft(app, 'line-one'))
+    if (options.image) {
+      assert.equal(app.state.staged.size, 0)
+      assert.equal(tokenIsChip(app), false, 'revoked capability becomes plain text')
+    }
+  } finally { app.unmount() }
+}
 
-    emitModelSwitch(app, {
-      agentId: AGENT_AFTER,
-      model: MODEL_AFTER,
-      continued: true,
-      anchor: 'SWITCH-ANCHOR-B',
-    })
-    // The launchpad's clear point is a PASSIVE effect, so the frame that carried
-    // the switch does not prove it ran. Force one more render (same agentId, so
-    // the effect cannot re-run) and wait for THAT frame: React flushes a pending
-    // passive effect before the next commit, so the draft's fate is sealed by
-    // the time this returns — an assertion before it would be vacuous.
-    await waitFor(scenario, 'the parameter row to show the new model',
-      () => launchpadParamRow(app).includes(MODEL_AFTER), RENDER_TIMEOUT_MS)
+function launchpadDraft(app: Harness) {
+  const row = viewportLines(app.term).find(line => line.includes('❯')) ?? ''
+  const text = row.slice(row.indexOf('❯') + 1).replace(/│\s*$/u, '').trim()
+  return text.startsWith(placeholder) ? '' : text
+}
+const modelRow = (app: Harness) => viewportLines(app.term).findLast(row => row.includes('  ·  ')) ?? ''
+async function launchpadCase(continued: boolean) {
+  const app = await mount({ launchpad: true })
+  try {
+    await wait('launchpad mounted', () => screenHas(app.term, placeholder))
+    paste(app, 'launch-draft-keep')
+    await wait('launchpad draft painted', () => launchpadDraft(app) === 'launch-draft-keep')
+    assert.ok(modelRow(app).includes(MODEL_BEFORE))
+    adopt(app, continued)
+    await wait('new model painted', () => modelRow(app).includes(MODEL_AFTER))
+    // A second frame fences the launchpad's passive clear effect.
     app.channel.model = `${MODEL_AFTER}-tick`
     app.channel.bump()
-    await waitFor(scenario, 'a later frame after the switch',
-      () => launchpadParamRow(app).includes(`${MODEL_AFTER}-tick`), RENDER_TIMEOUT_MS)
-
-    assertTrue(
-      scenario,
-      'a continuation model switch must keep the launchpad draft (today its effect clears it)',
-      launchpadDraftText(app) === draft,
-    )
-    // "The launchpad is still up" cannot be anchored on LAUNCHPAD_PLACEHOLDER:
-    // the placeholder is drawn only while the input is EMPTY, so that assertion
-    // held exactly when the draft was wiped — the opposite of this scenario's
-    // point (T01 rework, L-044). The input row is the anchor that survives a
-    // non-empty draft, but on its own it would merely restate a sub-expression
-    // of the draft assertion above (`launchpadDraftText` returns `''` when there
-    // is no `❯` row, so a non-empty draft already proves the row is there). The
-    // second conjunct is what "still up" adds: the switch did not fall back to
-    // the conversation view, whose composer is the only other `⛶`-bearing box
-    // (`⛶` lives only in `PromptInput.tsx`).
-    assertTrue(
-      scenario,
-      'the launchpad is still up after the switch (the conversation composer did not take over)',
-      launchpadInputRow(app).includes('❯') && !composerMounted(app),
-    )
-  } finally {
-    app.unmount()
-  }
+    await wait('passive effect flushed', () => modelRow(app).includes(`${MODEL_AFTER}-tick`))
+    assert.equal(launchpadDraft(app), continued ? 'launch-draft-keep' : '')
+    assert.equal(composer(app), null, 'launchpad stays open')
+  } finally { app.unmount() }
 }
 
-/** ── C · replacement: a bare agentId change clears, exactly as today ─────── */
-async function scenarioReplacementClears(): Promise<void> {
-  const scenario = 'C'
-  // C1 — chat page, the field present but undefined.
-  {
-    const app = await mountChat()
-    try {
-      await typeChatDraft(scenario, app)
-      emitModelSwitch(app, {
-        agentId: 'other-agent',
-        model: MODEL_AFTER,
-        continued: false,
-        anchor: 'SWITCH-ANCHOR-C1',
-      })
-      await waitForSwitchCommit(scenario, app, 'SWITCH-ANCHOR-C1')
-      const cleared = await settled(() => !composerHas(app, 'line-two'), { timeoutMs: SETTLE_TIMEOUT_MS })
-      assertTrue(scenario, 'a replaced conversation must drop its draft (chat page)', cleared)
-    } finally {
-      app.unmount()
-    }
-  }
-  // C2 — launchpad, the field present but undefined.
-  {
-    const app = await mountChat({ launchpad: true })
-    try {
-      await waitFor(scenario, 'launchpad to paint', () => screenHas(app, LAUNCHPAD_PLACEHOLDER), RENDER_TIMEOUT_MS)
-      pasteText(app, 'launchpad-draft')
-      await waitFor(scenario, 'launchpad draft committed', () => launchpadDraftText(app) === 'launchpad-draft')
-      emitModelSwitch(app, {
-        agentId: 'other-agent',
-        model: MODEL_AFTER,
-        continued: false,
-        anchor: 'SWITCH-ANCHOR-C2',
-      })
-      await waitFor(scenario, 'the parameter row to show the new model',
-        () => launchpadParamRow(app).includes(MODEL_AFTER), RENDER_TIMEOUT_MS)
-      // Same passive-effect fence as scenario B.
-      app.channel.model = `${MODEL_AFTER}-tick`
-      app.channel.bump()
-      await waitFor(scenario, 'a later frame after the switch',
-        () => launchpadParamRow(app).includes(`${MODEL_AFTER}-tick`), RENDER_TIMEOUT_MS)
-      const cleared = await settled(() => launchpadDraftText(app) === '', { timeoutMs: SETTLE_TIMEOUT_MS })
-      assertTrue(scenario, 'a replaced conversation must drop its draft (launchpad)', cleared)
-    } finally {
-      app.unmount()
-    }
-  }
-  // C3 — a stub that never heard of the property at all (AC-6): behaviour must
-  // be identical, and the stub is asserted to really lack it.
-  {
-    const app = await mountChat({ legacyChannel: true })
-    try {
-      assertEqual(scenario, 'the legacy stub really lacks the property', false,
-        'continuedFromAgentId' in (app.channel as unknown as Record<string, unknown>))
-      await typeChatDraft(scenario, app)
-      emitModelSwitch(app, {
-        agentId: 'other-agent',
-        model: MODEL_AFTER,
-        continued: false,
-        anchor: 'SWITCH-ANCHOR-C3',
-      })
-      await waitForSwitchCommit(scenario, app, 'SWITCH-ANCHOR-C3')
-      const cleared = await settled(() => !composerHas(app, 'line-two'), { timeoutMs: SETTLE_TIMEOUT_MS })
-      assertTrue(scenario, 'a channel without the property must still clear the draft', cleared)
-    } finally {
-      app.unmount()
-    }
-  }
-}
-
-/** ── D · action layer: the fact is written by the switch, cleared by reset ─ */
-async function scenarioActionFactSource(): Promise<void> {
-  const scenario = 'D'
-  const OLD_AGENT_ID = 'old-agent-id'
-  const NEW_AGENT_ID = 'new-agent-id'
-  const oldSessionStub = { seq: 0, events: [], header: {} }
-  const handle = {
-    agent: {
-      id: NEW_AGENT_ID,
-      session: { id: 'new-session-id', seq: 0, events: [], header: {} },
-      status: 'idle' as const,
-    },
-    dispose: async () => {},
-  }
-  const replayLog: unknown[] = []
-  const notifications: string[] = []
-  const state = {
-    rows: [] as unknown[],
-    todos: [] as unknown[],
-    pending: [] as unknown[],
-    goal: undefined as unknown,
-    sessionTitle: '',
-    sessionColor: '',
-    tokens: {
-      input: 0, output: 0, cacheRead: 0, cacheWrite: 0,
-      peak: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-      idle: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-    },
-    mainCost: {} as Record<string, unknown>,
-    subagentCost: [] as unknown[],
-    responseChars: 0,
-    activeToolCount: 0,
-    lastUserText: '',
-    working: false,
-    compaction: undefined as unknown,
-    cancelPending: false,
-    spinnerMode: 'requesting',
-    tps: undefined as unknown,
-    tpsSamples: [] as unknown[],
-    lastUsage: undefined as unknown,
-    turnUsage: undefined as unknown,
-    contextSegments: { system: 0, prompt: 0, assistant: 0, thinking: 0, tools: 0 },
-    costReport: undefined as unknown,
-    attachedContexts: [] as unknown[],
-    // SwitchState extras
-    cwd: '/tmp/probe',
-    status: 'idle' as const,
-    agentId: OLD_AGENT_ID,
-    sessionId: 'old-session-id',
-    agentPreset: undefined as string | undefined,
-    provider: 'deepseek',
-    model: MODEL_BEFORE,
-    contextWindow: undefined as number | undefined,
-    effortLevels: undefined as string[] | undefined,
-    reasoningEffort: undefined as string | undefined,
-    emit: () => { emits += 1 },
-    // The fact under test. Declared here (as `ChannelUi` will declare it) so the
-    // assertion reads a real property instead of inventing one.
-    continuedFromAgentId: undefined as string | undefined,
-  }
-  let emits = 0
-  const capture = { agent: { session: oldSessionStub }, generation: 0 }
-  const binding = {
-    agent: { id: OLD_AGENT_ID, session: oldSessionStub },
-    session: oldSessionStub,
-    capture: () => capture,
-    prepare: async (_capture: unknown, factory: () => Promise<unknown>) => await factory(),
-    isCurrent: () => true,
-    abandon: async () => {},
-    adopt: <T,>(
-      _candidate: unknown,
-      _capture: unknown,
-      tail: (previous: unknown, dispose: (next: string) => void) => T,
-    ): T => {
-      // The transaction hands the tail the binding it is REPLACING — the agent
-      // the continuation fact must name (see DESIGN D2).
-      const previous = { session: oldSessionStub, agent: binding.agent, handle: undefined, generation: 0 }
-      return tail(previous, () => {})
-    },
-  }
-  const ctx = {
-    get: (name: string) => name === 'agents' ? { create: async () => handle } : undefined,
-    on: () => () => {},
-    logger: { warn: () => {} },
-  }
-  const rowIds = { value: 0 }
-  const switchModel = createModelSwitchAction(
-    ctx as never,
-    state as never,
-    {
-      owner: { current: () => true },
-      binding: binding as never,
-      rowIds,
-      settleCompaction: async () => {},
-      resetProjector: () => {},
-      resetSubagents: () => {},
-      resetJobs: () => {},
-      replay: (events: readonly unknown[]) => { replayLog.push(events) },
-      settleReplay: () => {},
-      bindAgent: () => {},
-      refreshCommands: () => {},
-      refreshLoadedContext: async () => {},
-      refreshSkillCommands: async () => {},
-      clearStagedImages: () => {},
-      dropModelCompletion: () => {},
-      notify: (text: string) => { notifications.push(text) },
-    } as never,
-  )
-
-  const committed = await switchModel('deepseek', MODEL_AFTER)
-  assertEqual(scenario, 'the model switch reports success', true, committed)
-  assertEqual(scenario, 'the switch adopted the new agent', NEW_AGENT_ID, state.agentId)
-  assertEqual(
-    scenario,
-    'a successful model switch records the agent the binding continued from '
-      + '(today the fact does not exist, so this is undefined)',
-    OLD_AGENT_ID,
-    state.continuedFromAgentId,
-  )
-  // The message promises ONCE, so the predicate has to be `=== 1` too: `> 0`
-  // would also accept a switch that double-emits. `model-switch.ts:122` is the
-  // adoption transaction's only `state.emit()` and `resetSessionProjection`
-  // emits nothing, so exactly one is the fact.
-  assertEqual(scenario, 'the switch emitted exactly once', 1, emits)
-  // L-049 / L-055: `DATA_DIR` is a module-level constant resolved at import
-  // time, so "this run was isolated" has to be EVIDENCED, not assumed — the
-  // transaction's own side effects (`touchSession`, `writeModelPref`) must have
-  // landed in the throwaway home. A cold pair here would mean the real
-  // `~/.dsh-tui` was written instead.
-  assertTrue(
-    scenario,
-    'the switch wrote its preferences into the throwaway home (isolation evidenced)',
-    existsSync(join(home, '.dsh-tui', 'last-used.json')) && existsSync(join(home, '.dsh-tui', 'model.json')),
-  )
-
-  resetSessionProjection(
-    state as never,
-    rowIds,
-    () => {},
-    () => {},
-    () => {},
-  )
-  assertEqual(
-    scenario,
-    'resetSessionProjection (the shared adoption reset) clears the continuation fact',
-    undefined,
-    state.continuedFromAgentId,
-  )
-}
-
-/** ── E · images: the visible token stays, the old capability is not bound ── */
-async function scenarioImageTokenDegrades(): Promise<void> {
-  const scenario = 'E'
-  const app = await mountChat()
-  try {
-    await waitFor(scenario, 'composer to mount', () => composerMounted(app), RENDER_TIMEOUT_MS)
-    app.stdin.write('caption ')
-    await waitFor(scenario, 'caption text before the paste', () => composerHas(app, 'caption'))
-    pasteText(app, pastedImagePath)
-    await waitFor(scenario, 'the staged image token', () => composerHas(app, STAGED_IMAGE_TOKEN), RENDER_TIMEOUT_MS)
-    const stageId = [...app.channel.state.staged.keys()].at(-1)!
-    assertTrue(scenario, 'the capability is live before the switch', app.channel.hasStagedImage(stageId))
-    // Positive control for the degrade assertion below (L-044 / probe F4): that
-    // assertion only says something if THIS probe can see a chip at all — a
-    // probe stuck at `ok === false` (token invisible, colour read failed, cell
-    // lookup broken) would satisfy it for a reason unrelated to the switch.
-    const chipBefore = tokenIsChip(app, STAGED_IMAGE_TOKEN)
-    assertTrue(
-      scenario,
-      `the token must be a bound chip before the switch (${chipBefore.detail})`,
-      chipBefore.ok,
-    )
-
-    emitModelSwitch(app, {
-      agentId: AGENT_AFTER,
-      model: MODEL_AFTER,
-      continued: true,
-      dropImages: true,
-      anchor: 'SWITCH-ANCHOR-E',
-    })
-    await waitForSwitchCommit(scenario, app, 'SWITCH-ANCHOR-E')
-
-    assertTrue(
-      scenario,
-      'a continuation model switch must keep the draft text including its image token '
-        + '(today the composer clear point wipes the whole draft)',
-      composerHas(app, STAGED_IMAGE_TOKEN),
-    )
-    assertEqual(
-      scenario,
-      'the old capability must not stay bound to the draft',
-      false,
-      app.channel.hasStagedImage(stageId),
-    )
-    const chip = tokenIsChip(app, STAGED_IMAGE_TOKEN)
-    assertTrue(
-      scenario,
-      `the token must degrade to plain text, not stay a bound chip (${chip.detail})`,
-      chip.ok === false,
-    )
-  } finally {
-    app.unmount()
-  }
-}
-
-/**
- * One fake DSH agent, shaped like `verify-session-reset-hygiene.tsx`'s fixture:
- * the real adoption transactions only need an id, a session log and an idle
- * status to run offline (no credentials).
- */
-function makeFacadeAgent(agentId: string, sessionId: string) {
-  return {
-    id: agentId,
-    status: 'idle',
-    options: {},
-    ctx: { on: () => () => {} },
-    session: { id: sessionId, seq: 0, events: [], header: {} },
-    followup() {},
-    steer() {},
-    inbox: { remove: () => true },
-    cancel() {},
-    whenIdle: () => Promise.resolve(),
-  }
-}
-
-/**
- * Mount the production UI facade over a REAL channel (scenario F): a real
- * cordis `Context`, a real `createChannel`, then `mountChannelUi` — the
- * assembly `Chat.tsx` receives its channel from. With no plugin host the mount
- * binds its guarded local capability, which is the real `createChannelUi`
- * projection over the real channel, the same factory the kernel path uses.
- *
- * `roster` feeds `agents.create` one agent per adoption, in call order: the
- * switch and the `/new` after it each take the next entry.
- */
-function mountRealFacade(options: {
-  boot: { agentId: string; sessionId: string }
-  roster: Array<{ agentId: string; sessionId: string }>
-  provider: string
-}) {
-  const ctx = new Context()
-  const provide = (ctx as unknown as { provide(name: string, value: unknown): void }).provide.bind(ctx)
-  provide('agents', {
-    get: () => undefined,
-    create: () => {
-      const next = options.roster.shift()
-      if (next === undefined) throw new Error('scenario F: unexpected extra agent creation')
-      return Promise.resolve({
-        agent: makeFacadeAgent(next.agentId, next.sessionId),
-        dispose: () => Promise.resolve(),
-      })
-    },
-  })
-  provide('sessions', { fork: () => ({ events: [] }) })
-  const raw = createChannel(ctx as never, makeFacadeAgent(options.boot.agentId, options.boot.sessionId) as never, {
-    model: MODEL_BEFORE,
-    cwd: '/tmp/probe',
-    provider: options.provider,
-    activity: false,
-  })
-  const unregister = registerTuiChannel(ctx, raw)
-  const mounted = mountChannelUi(ctx, raw, undefined, 'new')
-  return {
-    raw,
-    ui: mounted.channel,
-    dispose: () => {
-      mounted.dispose()
-      unregister()
-      raw.releaseContributions()
-    },
-  }
-}
-
-/**
- * ── F · the REAL facade: the fact survives the production projection ──────
- *
- * A~E all drive the stub channel, so every one of them would stay green if the
- * production UI projection stopped carrying the fact — a key dropped from
- * `CHANNEL_UI_PROPERTIES`, or the facade reading a JSON snapshot instead of the
- * live state, leaves `Chat.tsx` reading `undefined` and wiping the draft again
- * (`review-adversarial.md` §1 / F1, L-014).
- *
- * The composition is the minimal one the F1 probe used; what this scenario adds
- * is a REAL `switchModel` and a REAL `/new` through that facade — the exact
- * surface `Chat.tsx` consumes. Honest bound: the DSH `agents` / `sessions`
- * services are fakes (a regression has no live credentials), so the chain is
- * real from the channel state up through the facade, not a live-DSH run.
- */
-async function scenarioRealFacadeProjection(): Promise<void> {
-  const scenario = 'F'
-  const PROVIDER = 'probe-provider'
-  const BOOT = { agentId: 'facade-agent-boot', sessionId: 'facade-session-boot' }
-  const SWITCHED = { agentId: 'facade-agent-switched', sessionId: 'facade-session-switched' }
-  const REPLACED = { agentId: 'facade-agent-replaced', sessionId: 'facade-session-replaced' }
-  const facade = mountRealFacade({ boot: BOOT, roster: [SWITCHED, REPLACED], provider: PROVIDER })
-  const { raw, ui } = facade
-  try {
-    const bootAgentId = ui.agentId
-    assertEqual(scenario, 'the facade starts on the boot agent', BOOT.agentId, bootAgentId)
-    assertEqual(scenario, 'the fact starts empty (no adoption yet)', undefined, ui.continuedFromAgentId)
-    // The other half of F1's failure mode: a key missing from
-    // `CHANNEL_UI_PROPERTIES` never lands on the facade at all, so the
-    // `Chat.tsx` read would silently be `undefined` forever.
-    assertEqual(
-      scenario,
-      'the production facade carries the fact at all (CHANNEL_UI_PROPERTIES)',
-      true,
-      'continuedFromAgentId' in (ui as unknown as Record<string, unknown>),
-    )
-
-    // A REAL switch through the facade — the same wire `Chat.tsx` uses.
-    assertEqual(scenario, 'the real model switch reports success', true, await ui.switchModel(PROVIDER, MODEL_AFTER))
-    assertEqual(scenario, 'the switch really adopted another agent', SWITCHED.agentId, ui.agentId)
-    assertEqual(
-      scenario,
-      'the production UI projection must expose the continuation fact as the agent the binding came from '
-        + '(the value `Chat.tsx` compares against its last-rendered agentId to keep the draft)',
-      bootAgentId,
-      ui.continuedFromAgentId,
-    )
-    // ...and it must be the LIVE slot, not a detached copy: `Chat.tsx` reads it
-    // in the same render pass that observes the adoption transaction.
-    assertEqual(
-      scenario,
-      'the facade reading is the live state slot, not a copy',
-      (raw as unknown as Record<string, unknown>)['continuedFromAgentId'],
-      ui.continuedFromAgentId,
-    )
-
-    // A REAL replacement adoption through the same facade: `/new` runs the
-    // shared `resetSessionProjection`, so the fact must be empty again — this
-    // is what stops a replacement from inheriting the previous continuation's
-    // exemption.
-    assertEqual(scenario, 'the real /new reports success', true, await ui.newSession())
-    assertEqual(scenario, '/new really adopted another agent', REPLACED.agentId, ui.agentId)
-    assertEqual(
-      scenario,
-      'a replacement adoption must leave no continuation fact on the facade',
-      undefined,
-      ui.continuedFromAgentId,
-    )
-  } finally {
-    facade.dispose()
-  }
-}
-
-interface Scenario {
-  readonly id: string
-  readonly name: string
-  readonly run: () => Promise<void>
-}
-
-async function scenarioParkedDraft(): Promise<void> {
-  const scenario = 'G'
+async function parkedCase() {
   for (const fullscreen of [false, true]) {
     for (const columns of [100, 48]) {
       for (const continued of [true, false]) {
-        const app = await mountChat({ fullscreen, columns })
-        const label = `${fullscreen ? 'fullscreen' : 'inline'} ${columns} columns, ${continued ? 'continuation' : 'replacement'}`
-        const dashboardVisible = () => screen(app).some(line => /^\s*─+\s*子代理面板\s*─+\s*$/u.test(line))
+        const app = await mount({ fullscreen, columns })
+        const label = `${fullscreen ? 'fullscreen' : 'inline'} ${columns}, ${continued ? 'continuation' : 'replacement'}`
+        const dashboard = () => viewportLines(app.term).some(line => /^\s*─+\s*子代理面板\s*─+\s*$/u.test(line))
         const park = async () => {
           app.stdin.write('\x01')
-          await waitFor(scenario, `${label}: composer parked`, () => dashboardVisible() && !composerMounted(app))
+          await wait(`${label}: parked`, () => dashboard() && composer(app) === null)
         }
         const resume = async () => {
           app.stdin.write('\x1b')
-          await waitFor(scenario, `${label}: composer remounted`, () => !dashboardVisible() && composerMounted(app))
+          await wait(`${label}: remounted`, () => !dashboard() && composer(app) !== null)
         }
         try {
-          await typeChatDraft(scenario, app)
-          pasteText(app, pastedImagePath)
-          await waitFor(scenario, `${label}: image staged`, () => composerHas(app, STAGED_IMAGE_TOKEN))
-          const stageId = [...app.channel.state.staged.keys()].at(-1)!
-          const before = composerState(app)
-          assertTrue(scenario, `${label}: image starts bound`, tokenIsChip(app, STAGED_IMAGE_TOKEN).ok)
-
-          // Positive control: the same screen round trip restores this draft
-          // before an adoption changes its owner and binding generation.
+          await typeDraft(app)
+          paste(app, imagePath)
+          await wait('image staged', () => hasDraft(app, TOKEN))
+          assert.equal(tokenIsChip(app), true)
+          const before = composer(app)
           await park()
           await resume()
-          await waitFor(scenario, `${label}: control draft restored`, () => composerHas(app, STAGED_IMAGE_TOKEN))
-          assertSameComposerState(scenario, `${label}: control`, before, composerState(app))
-
+          await wait('control draft restored', () => hasDraft(app, TOKEN))
+          assert.deepEqual(composer(app), before, `${label}: control round trip`)
           await park()
-          const anchor = 'PARKED-SWITCH-COMMITTED'
-          emitModelSwitch(app, { agentId: AGENT_AFTER, model: MODEL_AFTER, continued, dropImages: true, anchor })
+          adopt(app, continued)
           await resume()
-          await waitForSwitchCommit(scenario, app, anchor)
-          assertEqual(scenario, `${label}: old image revoked`, false, app.channel.hasStagedImage(stageId))
+          await wait('switch committed', () => screenHas(app.term, 'SWITCH-COMMITTED'))
+          assert.equal(app.state.staged.size, 0)
           if (continued) {
-            await waitFor(scenario, `${label}: draft restored`, () => composerHas(app, STAGED_IMAGE_TOKEN))
-            assertSameComposerState(scenario, label, before, composerState(app))
-            assertEqual(scenario, `${label}: revoked image stays plain text`, false, tokenIsChip(app, STAGED_IMAGE_TOKEN).ok)
-            if (fullscreen && columns === 48) {
-              console.log(`Parked draft after continuation (${label}):\n${composerBlock(app)?.join('\n')}`)
-            }
+            await wait('parked draft restored', () => hasDraft(app, TOKEN))
+            assert.deepEqual(composer(app), before, label)
+            assert.equal(tokenIsChip(app), false, 'revoked image stays plain text')
+            if (fullscreen && columns === 48) console.log(composer(app)?.block.join('\n'))
           } else {
-            assertTrue(scenario, `${label}: old draft cleared`, !composerHas(app, 'line-one') && !composerHas(app, STAGED_IMAGE_TOKEN))
+            assert.equal(hasDraft(app, 'line-one') || hasDraft(app, TOKEN), false, label)
           }
-        } finally {
-          app.unmount()
-        }
+        } finally { app.unmount() }
       }
     }
   }
 }
 
-const RUNNERS: readonly Scenario[] = [
-  { id: 'A', name: 'chat draft survives a continuation model switch', run: scenarioChatContinuation },
-  { id: 'B', name: 'launchpad draft survives a continuation model switch', run: scenarioLaunchpadContinuation },
-  { id: 'C', name: 'a replaced conversation still clears its draft', run: scenarioReplacementClears },
-  { id: 'D', name: 'the switch writes the fact, resetSessionProjection clears it', run: scenarioActionFactSource },
-  { id: 'E', name: 'an image token degrades without binding the old capability', run: scenarioImageTokenDegrades },
-  { id: 'F', name: 'the real channel facade projects the continuation fact', run: scenarioRealFacadeProjection },
-  { id: 'G', name: 'parked drafts follow continuation ownership in both terminal modes', run: scenarioParkedDraft },
+async function facadeCase() {
+  const agent = (id: string) => ({
+    id, status: 'idle', options: {}, ctx: { on: subscribeNone },
+    session: { id: `session-${id}`, seq: 0, events: [], header: {} },
+    followup: noop, steer: noop, inbox: { remove: () => true }, cancel: noop,
+    whenIdle: async () => {},
+  })
+  const ctx = new Context()
+  const provide = (ctx as unknown as { provide(name: string, value: unknown): void }).provide.bind(ctx)
+  const roster = ['switched-agent', 'replaced-agent']
+  provide('agents', {
+    get: () => undefined,
+    create: async () => {
+      const id = roster.shift()
+      assert.ok(id, 'unexpected extra agent creation')
+      return { agent: agent(id), dispose: async () => {} }
+    },
+  })
+  provide('sessions', { fork: () => ({ events: [] }) })
+  const raw = createChannel(ctx as never, agent('boot-agent') as never, { model: MODEL_BEFORE, cwd: '/tmp/probe', provider: 'deepseek', activity: false })
+  const unregister = registerTuiChannel(ctx, raw)
+  const mounted = mountChannelUi(ctx, raw, undefined, 'new')
+  const ui = mounted.channel
+  try {
+    assert.equal('continuedFromAgentId' in ui, true, 'production projection carries the property')
+    assert.equal(ui.continuedFromAgentId, undefined)
+    assert.equal(await ui.switchModel('deepseek', MODEL_AFTER), true)
+    assert.equal(ui.agentId, 'switched-agent')
+    assert.equal(ui.sessionId, 'session-switched-agent')
+    assert.equal(ui.continuedFromAgentId, 'boot-agent', 'real model-switch action records the source')
+    assert.equal(ui.continuedFromAgentId, raw.continuedFromAgentId, 'facade reads live state')
+    assert.ok(existsSync(join(home, '.dsh-tui', 'last-used.json')) && existsSync(join(home, '.dsh-tui', 'model.json')), 'action preferences stay in the isolated home')
+    assert.equal(await ui.newSession(), true)
+    assert.equal(ui.agentId, 'replaced-agent')
+    assert.equal(ui.continuedFromAgentId, undefined, 'replacement resets the fact')
+  } finally {
+    mounted.dispose()
+    unregister()
+    raw.releaseContributions()
+  }
+}
+
+const scenarios = [
+  { id: 'A', name: 'mounted draft text and caret', run: () => chatCase({ continued: true }) },
+  { id: 'B', name: 'launchpad continuation', run: () => launchpadCase(true) },
+  { id: 'C', name: 'replacement and legacy channels', run: async () => {
+    await chatCase({ continued: false })
+    await chatCase({ continued: false, legacy: true })
+    await launchpadCase(false)
+  } },
+  { id: 'E', name: 'mounted image revocation', run: () => chatCase({ continued: true, image: true }) },
+  { id: 'F', name: 'real action and facade projection', run: facadeCase },
+  { id: 'G', name: 'parked drafts in both terminal modes and widths', run: parkedCase },
 ]
-
 try {
-  const selected = (process.env.VERIFY_DRAFT_SWITCH_SCENARIOS ?? '')
-    .split(',')
-    .map(name => name.trim().toUpperCase())
-    .filter(name => name !== '')
-  const known = new Set(RUNNERS.map(entry => entry.id))
-  const unknown = selected.filter(id => !known.has(id))
-  if (unknown.length > 0) {
-    throw new VerifyFailure(
-      'harness',
-      'unknown VERIFY_DRAFT_SWITCH_SCENARIOS entries (expected a subset of the scenario ids)',
-      [...known],
-      unknown,
-    )
-  }
-  const picked = RUNNERS.filter(entry => selected.length === 0 || selected.includes(entry.id))
-  if (picked.length === 0) {
-    throw new VerifyFailure('harness', 'VERIFY_DRAFT_SWITCH_SCENARIOS selected no scenario', RUNNERS.length, 0)
-  }
-
-  const failures: string[] = []
-  for (const entry of picked) {
+  const selected = (process.env.VERIFY_DRAFT_SWITCH_SCENARIOS ?? '').split(',').map(id => id.trim().toUpperCase()).filter(Boolean)
+  assert.ok(selected.every(id => scenarios.some(test => test.id === id)), 'unknown scenario selection')
+  for (const test of scenarios.filter(test => selected.length === 0 || selected.includes(test.id))) {
     try {
-      await entry.run()
-      console.log(`PASS  ${entry.id}  ${entry.name}`)
+      await test.run()
+      console.log(`PASS ${test.id}: ${test.name}`)
     } catch (error) {
-      const detail = error instanceof VerifyFailure
-        ? `${error.detail}\n        expected: ${JSON.stringify(error.expected)}\n        actual:   ${JSON.stringify(error.actual)}`
-        : error instanceof Error ? error.stack ?? error.message : String(error)
-      failures.push(entry.id)
-      console.log(`FAIL  ${entry.id}  ${entry.name}\n        ${detail}`)
+      console.error(`FAIL ${test.id}: ${test.name}`, error)
+      process.exitCode = 1
     }
   }
-
-  let harnessFailed = false
-  if (runtimeErrors.length > 0) {
-    harnessFailed = true
-    console.log(`FAIL  harness  renderer errors\n        ${runtimeErrors.join('\n        ')}`)
-  }
-
-  const passed = picked.filter(entry => !failures.includes(entry.id)).length
-  console.log('')
-  console.log(`verify-composer-draft-model-switch: ${passed}/${picked.length} scenarios passed`)
-  for (const entry of picked) {
-    console.log(`  ${failures.includes(entry.id) ? 'FAIL' : 'PASS'}  ${entry.id}  ${entry.name}`)
-  }
-  if (failures.length > 0 || harnessFailed) {
-    if (failures.length > 0) console.log(`  failed: ${failures.join(', ')}`)
-    if (harnessFailed) console.log('  failed: harness (renderer errors)')
-    process.exitCode = 1
-  }
+  assert.deepEqual(runtimeErrors, [], 'renderer errors')
 } catch (error) {
-  if (error instanceof VerifyFailure) {
-    console.log(`FAIL [${error.scenario}] ${error.detail}`)
-    console.log(`  expected: ${JSON.stringify(error.expected)}`)
-    console.log(`  actual:   ${JSON.stringify(error.actual)}`)
-  } else {
-    console.log(`FAIL [harness] ${error instanceof Error ? error.stack ?? error.message : String(error)}`)
-  }
+  console.error(error)
   process.exitCode = 1
 } finally {
-  process.stderr.write = realStderrWrite as typeof process.stderr.write
+  process.stderr.write = stderrWrite as typeof process.stderr.write
   rmSync(home, { recursive: true, force: true })
 }
-
-if (process.exitCode === 1) {
-  console.log('verify-composer-draft-model-switch FAILED')
-  process.exit(1)
-}
-console.log('verify-composer-draft-model-switch OK')
-process.exit(0)
+process.exit(process.exitCode ?? 0)

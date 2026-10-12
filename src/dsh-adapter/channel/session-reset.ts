@@ -29,10 +29,6 @@ export type SessionResetState = Pick<
    *  an adopted session must never carry the previous conversation's chips
    *  (or hand its model a panel context the user staged elsewhere). */
   | 'attachedContexts'
-  /** The continuation fact is an adoption-scoped fact, not a durable session
-   *  one: resetting it here is what makes "this adoption replaced the
-   *  conversation" the DEFAULT for every path. Only the model switch writes it
-   *  back, and only after this function returned (see the port's doc comment). */
   | 'continuedFromAgentId'
 >
 
@@ -88,10 +84,7 @@ export function resetSessionProjection(
   // A backend-reported cost belongs to the session that reported it.
   state.costReport = undefined
   state.attachedContexts = []
-  // Every adoption that reaches this reset is a replacement until the model
-  // switch says otherwise AFTER this call (model-switch.ts): leaving the
-  // continuation fact at "none" here is what keeps a later adoption path
-  // conservative by default instead of silently outliving its conversation.
+  // Adoption defaults to replacement; a continuation caller overwrites this.
   state.continuedFromAgentId = undefined
   state.contextSegments = {
     system: 0,
