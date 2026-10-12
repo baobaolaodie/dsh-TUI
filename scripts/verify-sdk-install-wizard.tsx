@@ -75,15 +75,11 @@ const SPECIFIER = '@anthropic-ai/claude-agent-sdk@0.3.287'
 const VERSION = '0.3.287'
 const TAIL = ['Progress: resolved 9, reused 77', 'ERR_PNPM_LINKING_FAILED cannot overwrite directory']
 
-/** 检测在 SDK 缺失时合成的 hint（D6）：**真**门面 `claudeText` 取值，不手抄
- *  一字（L-061）。第 1 行是安装指引——未找到 CLI 时它就是整条 hint，也是面板
- *  必须与今天逐字一致的那一态；第 2 行起才是本机 CLI 注记。两行如何拼成一条
- *  hint 由生产者 `detect()` 决定，其回归是 `scripts/verify-claude-detect.ts`
- *  （本脚本只吃它的产物形态：本文件里 `\n` 拼的那一下是复刻，不是口径源）。 */
+/** 检测载荷形状：安装指引 + 可选的本机 CLI 注记；生产者另由 detect 回归覆盖。 */
 const GUIDANCE = claudeText('claude-sdk-missing', { version: VERSION })
 const CLI_VERSION = '2.0.30'
 const CLI_PATH = 'C:\\Users\\test\\.local\\bin\\claude.exe'
-/** 读到版本 / 读不到版本（只有路径）两种注记，T02 各有一条 key。 */
+/** 版本与路径、仅路径两种注记。 */
 const FOUND_NOTE = claudeText('claude-sdk-missing-found-cli', { version: CLI_VERSION, path: CLI_PATH })
 const FOUND_NOTE_PATH_ONLY = claudeText('claude-sdk-missing-found-cli-path', { path: CLI_PATH })
 
@@ -211,9 +207,7 @@ async function run(): Promise<void> {
     }
   }
   setLang('zh')
-  // 10. AC-5 显示面：检测报了本机 CLI（hint 第 2 行起）时确认面板多一行注记。
-  //     面板**只**渲染注记：第 1 行是检测载荷里的安装指引，不属于面板文案，
-  //     重复渲染它就是把「无 CLI 时逐字一致」这条结构性保证拆掉。
+  // 10. 确认面板只画 hint 的注记，不重复安装指引；无 CLI 时保持原样。
   {
     const confirm = { kind: 'confirm', dir: DIR, version: VERSION, specifier: SPECIFIER } as const
     const mountConfirm = async (foundCli?: string) => {
@@ -230,8 +224,7 @@ async function run(): Promise<void> {
     const withPathOnly = await mountConfirm(`${GUIDANCE}\n${FOUND_NOTE_PATH_ONLY}`)
     check('10c 读不到版本时面板给路径', flatten(withPathOnly).includes(flatten(FOUND_NOTE_PATH_ONLY)), withPathOnly)
 
-    // 不带字段（旧调用方 / stub）与单行 hint（真「无 CLI」形态，T02 不拼就不出现）
-    // 都必须与今天逐字一致：两态都画不出注记那一行。
+    // 缺字段与无 CLI 的单行 hint 都不应出现注记。
     const withoutField = await mountConfirm()
     check('10d 缺字段时不出现该行', !flatten(withoutField).includes(flatten(FOUND_NOTE)), withoutField)
     const noCli = await mountConfirm(GUIDANCE)

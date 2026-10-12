@@ -1,34 +1,9 @@
 /**
- * The Claude backend's kernel detection (what the picker's row says):
- *
- *  - an installed row always offers in-session login (`loginInSession`): a
- *    missing credential keeps the row selectable — switching kernels is
- *    never blocked on auth, `/login` (and `/channel`) work once the session
- *    is open;
- *  - the credential probe itself is unchanged and still passes through: an
- *    ambient env token reads ok, nothing reads missing (or unknown on
- *    darwin, whose login lives in the keychain).
- *
- *  - the SDK-missing branch (installed: false) reports what it can about a
- *    `claude` this machine already has: the CLI's version, or its path when
- *    the version cannot be read, appended under the unchanged install
- *    guidance — and nothing at all when there is no CLI, where the hint is
- *    word for word the sentence it was before.
- *
- *  - that found CLI is a counting fixture: its entry appends one line to a log
- *    per `--version` run, so the branch's cost is pinned at exactly the one
- *    probe the resolution already spends — never that probe plus a second one
- *    for a version the resolution had in hand (REVIEW F-2 ②).
- *
- * Both scenarios run in one isolated child (temp HOME/USERPROFILE/
- * CLAUDE_CONFIG_DIR/DSH_HOME, every ambient ANTHROPIC_ and CLAUDE_CODE_
- * variable scrubbed before the first import); the SDK peer resolves from
- * the checkout and the "CLI" is node itself, so no network and no spend.
- *
- * The SDK-missing branch needs a second child, because the peer resolves from
- * the importing module's own directory upwards: it is imported out of a copy
- * of `src/` in the temp root, so the branch is really reached (see the block
- * below for what the copy does and does not carry).
+ * Offline kernel detection: installed rows offer in-session login; an SDK
+ * miss preserves install guidance and optionally reports a local CLI.
+ * Children use isolated homes and synthetic credentials. A copy of src/
+ * without the SDK reaches the missing-peer branch; a counting CLI proves
+ * resolution's version is reused rather than probed twice.
  *
  * Run: node --import tsx/esm scripts/verify-claude-detect.ts
  */
@@ -41,9 +16,6 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import { setLang } from '../src/i18n.js'
 import { VALIDATED_SDK_VERSION } from '../src/backends/claude/contract.js'
 import { claudeText, installClaudeLocale } from '../src/backends/claude/text.js'
-// The counting-CLI fixture is shared with verify-claude-executable: one
-// definition, not two (2026-10-12 — duplicate verification is what upstream
-// asked us to stop).
 import { COUNT_LOG_ENV, PACKAGE_ENTRY, countingEntry, probeCalls } from './lib/claude-counting-cli.mjs'
 
 setLang('en')
@@ -143,14 +115,8 @@ const COUNTED_CLI_VERSION = '2.1.287'
 
 // ── the SDK-missing branch: a copy of src/ has no SDK to resolve ────────────
 {
-  // `loadClaudeSdk()` resolves the optional peer from the importing module's
-  // own directory upwards, so a child importing this checkout always finds it
-  // (the block above). The copy is how the failure branch is really reached:
-  // ESM resolution never consults the working directory, so this child still
-  // runs from the checkout while importing the copy, and of the one package
-  // the copied graph needs beside node's builtins (`yaml`, through
-  // channel-tokens.ts) only that package is linked back — linking the whole
-  // node_modules would make the SDK resolvable again and test nothing.
+  // Resolve from the copy, linking only yaml for channel-tokens.ts. Linking
+  // the checkout's whole node_modules would make the SDK available again.
   const checkout = fileURLToPath(new URL('..', import.meta.url))
   const root = realpathSync.native(mkdtempSync(join(tmpdir(), 'dshtui-claude-nosdk-')))
   const win = process.platform === 'win32'
@@ -160,27 +126,16 @@ const COUNTED_CLI_VERSION = '2.1.287'
   const bareHome = join(root, 'home-no-cli')
   const configDir = join(root, '.claude')
   const dshHome = join(root, '.dsh')
-  // The CLI the official installer drops outside PATH (`~/.local/bin`), as a
-  // counting fixture: the wrapper is a shape nothing here can spawn (npm's
-  // `.cmd` forwarding line — the text whose parse verify-claude-executable.ts
-  // pins), so every pass costs exactly one run of the entry beside it, which
-  // appends a line and reports `2.1.287`. That count is what tells a
-  // resolution which kept the version it read from one that reads it again.
+  // A native-directory wrapper forces one counting-entry run per probe.
   const cliPath = join(home, '.local', 'bin', win ? 'claude.exe' : 'claude')
   const cliEntry = countingEntry(join(home, '.local', 'bin'), COUNTED_CLI_VERSION)
   const cliLog = join(root, 'cli-probe-calls.log')
   mkdirSync(bareHome, { recursive: true })
   mkdirSync(configDir, { recursive: true })
   mkdirSync(dshHome, { recursive: true })
-  // The wrapper names its entry with this platform's separators (`join`), the
-  // way the wrapper npm ships here spells it: `%dp0%` expands to the shim's
-  // directory plus this platform's separator, so a relative path spelled for
-  // another platform names nothing and this fixture would never be reached.
+  // Keep separators native so POSIX can reach the same parser fixture.
   writeFileSync(cliPath, `"%dp0%${join(...PACKAGE_ENTRY)}" %*\n`)
-  // A CLI-shaped file that exists and cannot report a version, the fixture
-  // shape verify-claude-executable.ts uses too: `where` answers nothing for
-  // `--version`, the POSIX script echoes a sentence. Pointed at explicitly, it
-  // is the "path without a version" half of AC-5.
+  // An explicit, versionless CLI must still be reported by its path.
   const versionlessPath = join(root, win ? 'claude-versionless.exe' : 'claude-versionless')
   if (win) copyFileSync(join(systemRoot, 'System32', 'where.exe'), versionlessPath)
   else {
@@ -201,14 +156,8 @@ const COUNTED_CLI_VERSION = '2.1.287'
     "process.env.USERPROFILE = home",
     "process.env.CLAUDE_CONFIG_DIR = configDir",
     "process.env.DSH_HOME = dshHome",
-    // The counting CLI's entry reads the log path from here: the probe's child
-    // environment is built from this process's, so this is how the count
-    // crosses the two process hops (probe → entry → log file).
     `process.env.${COUNT_LOG_ENV} = cliLog`,
-    // PATH reaches the lookup tool, the runtime the probe starts a JS entry
-    // with (`node <entry>`) and nothing else, and the explicit-variable escape
-    // hatch goes with the rest of CLAUDE_CODE_* below: only the fixture home's
-    // own ~/.local/bin copy is left for the probe to find.
+    // Allow the lookup tool and node, but fence out the machine's own CLI.
     "process.env.PATH = [home, path.dirname(process.execPath), systemPath].join(path.delimiter)",
     "for (const key of Object.keys(process.env)) {",
     "  const upper = key.toUpperCase()",
@@ -234,8 +183,6 @@ const COUNTED_CLI_VERSION = '2.1.287'
     "  process.env.HOME = bareHome",
     "  process.env.USERPROFILE = bareHome",
     "  const withoutCli = await detect(claudeBackend)",
-    // An explicit path the user set themselves, which exists and answers no
-    // version: the payload falls back to the path (DESIGN D5's degradation).
     "  process.env.CLAUDE_CODE_EXECUTABLE = versionlessCli",
     "  const pathOnly = await detect(claudeBackend)",
     "  report({ withCli, withoutCli, pathOnly, debug })",
@@ -247,8 +194,6 @@ const COUNTED_CLI_VERSION = '2.1.287'
   writeFileSync(probe, child)
   type Row = { readonly installed?: boolean; readonly hint?: string; readonly crashed?: string }
   type Outcome = { readonly withCli?: Row; readonly withoutCli?: Row; readonly pathOnly?: Row; readonly debug?: readonly string[]; readonly crashed?: string }
-  // The word-for-word expectation for the no-CLI case is read off the live
-  // dictionary rather than copied: a copy change must not need this file too.
   const expected = claudeText('claude-sdk-missing', { version: VALIDATED_SDK_VERSION })
   try {
     const ran = await new Promise<{ code: number | null; stdout: string; stderr: string }>(resolve => {
@@ -267,35 +212,24 @@ const COUNTED_CLI_VERSION = '2.1.287'
     const pathOnly = parsed?.pathOnly
     const hint = withCli?.hint ?? ''
     const lines = hint.split('\n')
-    // Every scenario must be the SDK-missing branch that produced a hint, not
-    // a crash the child turned into a row.
     const detected = (row: Row | undefined): boolean => row?.crashed === undefined && row?.installed === false
     check('detect-backend: the copied child resolves no SDK and still detects every CLI shape',
       parsed !== undefined && parsed.crashed === undefined && ran.code === 0
         && detected(withCli) && detected(withoutCli) && detected(pathOnly),
       { code: ran.code, stderr: ran.stderr.slice(0, 300), stdout: ran.stdout.slice(0, 300) })
-    // `installed: false` is only the SDK-missing branch's shape; the debug line
-    // names the import that failed, so the branch is proven, not assumed.
+    // Verify the SDK import failed, rather than an unrelated child error.
     check('detect-backend: loadClaudeSdk() is the import that failed in that child',
       (parsed?.debug ?? []).some(message => message.includes('SDK import failed') && message.includes('claude-agent-sdk')),
       parsed?.debug)
-    // AC-5 (the detection payload): the CLI is there, the SDK is not. The
-    // counting fixture answers a version, so this is the exact line the
-    // payload must carry — which also proves the fixture was really reached
-    // (the "or path" half is the explicit-path check below).
     check('AC-5 a CLI found without the SDK travels in the detection payload (version or path)',
       hint === `${expected}\n${claudeText('claude-sdk-missing-found-cli', { version: COUNTED_CLI_VERSION, path: cliEntry })}`, hint)
     check('AC-5 the install guidance stays word for word, the found CLI on a line of its own',
       lines.length === 2 && lines[0] === expected && (lines[1] ?? '').trim() !== '', lines)
     check('AC-5 a CLI that answers no version is still reported, by its path',
       (pathOnly?.hint ?? '').startsWith(`${expected}\n`) && (pathOnly?.hint ?? '').includes(versionlessPath), pathOnly?.hint)
-    // AC-6 (this script's half): nothing found reads exactly as it did before.
     check('AC-6 without any CLI the hint is the plain SDK-missing sentence, word for word',
       withoutCli?.hint === expected, { got: withoutCli?.hint, expected })
-    // F-2 (②): the resolution read this CLI's version to adopt it, so the
-    // branch must not spawn it a second time for a version it already had —
-    // the entry appended exactly one line. It is zero only if the fixture was
-    // never reached, which the payload check above rules out.
+    // The payload proves the fixture ran; the log distinguishes one probe from two.
     check('F-2 the SDK-missing branch that found a CLI probes it once, not twice',
       probeCalls(cliLog).length === 1, { calls: probeCalls(cliLog), hint })
   } finally {

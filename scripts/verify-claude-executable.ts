@@ -1,38 +1,8 @@
 /**
- * `claude` executable resolution: which hit this backend may hand to the SDK.
- * Offline: no CLI, no network.
- *
- *  - the order is fixed: `CLAUDE_CODE_EXECUTABLE` (verbatim, never validated —
- *    a typo the user made should fail loudly, not silently change binaries),
- *    the first PATH hit that really launches, the native install directory
- *    (`~/.local/bin`, which the official installer does not put on PATH on
- *    Windows: claude-code#86999), then no path at all — which is how the SDK
- *    is told to use its own bundled binary (the documented last resort);
- *  - a PATH hit always beats the native install directory: a copy the user put
- *    on PATH is the one they chose, and this fallback must not invert it;
- *  - a candidate only wins when this process can spawn it (`--version`
- *    through the same execFile path the SDK uses). An npm install publishes
- *    the package bin as wrappers (an extensionless POSIX `sh` script first,
- *    a `.cmd` second), neither of which Windows can run without a shell —
- *    so "the file exists" is not enough, and handing one to the SDK fails
- *    the whole start with its own misleading "native binary … failed to
- *    launch";
- *  - a wrapper that merely forwards to the real entry is followed instead
- *    of skipped, so a Windows npm install still runs the user's own CLI
- *    (its version and session store) rather than silently switching to the
- *    SDK's bundled copy. The entry may be the package's `cli.js`: the SDK
- *    starts a `.js`/`.mjs`/`.tsx`/`.ts`/`.jsx` path as `node <entry>`, so the
- *    probe runs it the same way instead of discarding the one path the SDK
- *    would have started for reporting no version;
- *  - the runtime a wrapper names to run that script (`%dp0%\node.exe`) is
- *    never the CLI, even when it exists beside the wrapper;
- *  - a candidate that spawns but reports no version loses too, and one that
- *    hangs is skipped after the probe's bounded timeout (POSIX fixture;
- *    Windows has no spawnable hang without a compiler) — never waited for;
- *  - a file the lookup tool and the native directory both name is probed
- *    once: `~/.local/bin` is often on PATH too, and a repeated candidate
- *    would spend the probe's bounded timeout again (the counting fixture
- *    below appends one line per `--version` run and pins the count).
+ * Offline executable resolution: env path → PATH → ~/.local/bin → SDK bundle.
+ * Env paths are adopted verbatim; other candidates must report a version.
+ * Covers dead, versionless and hung candidates, npm binary/script forwarding,
+ * runtime decoys, PATH priority and one probe for overlapping native installs.
  *
  * Run: node --import tsx/esm scripts/verify-claude-executable.ts
  */
@@ -41,8 +11,6 @@ import { chmodSync, copyFileSync, mkdirSync, mkdtempSync, readFileSync, realpath
 import { tmpdir } from 'node:os'
 import { delimiter, dirname, join } from 'node:path'
 import { readClaudeVersion, resolveClaudeExecutable } from '../src/backends/claude/process.js'
-// The counting-CLI fixture is shared with verify-claude-detect: one definition,
-// not two (2026-10-12 — duplicate verification is what upstream asked us to stop).
 import { COUNT_LOG_ENV, PACKAGE_ENTRY, countingEntry, probeCalls } from './lib/claude-counting-cli.mjs'
 
 let passed = 0
@@ -53,10 +21,7 @@ const check = (label: string, ok: boolean, detail?: unknown): void => {
 }
 
 const win = process.platform === 'win32'
-// `os.tmpdir()` can answer with the 8.3 short form (`C:\Users\LONGYI~1\…`)
-// while the lookup tools report the long one; both spell the same directory,
-// so the fixture root is canonicalized once and every compared path has a
-// single spelling.
+// Windows lookup tools may expand os.tmpdir()'s 8.3 short path.
 const root = realpathSync.native(mkdtempSync(join(tmpdir(), 'dsh-tui-claude-exe-')))
 const originalPath = process.env.PATH
 // The lookup tool itself has to stay reachable; everything else is fenced
@@ -71,12 +36,7 @@ const dir = (name: string): string => {
 }
 const withPath = (...entries: string[]): void => { process.env.PATH = [...entries, systemPath].join(delimiter) }
 
-/**
- * The environment one resolution call gets. PATH is fenced above, but the
- * home directory — where the native install fallback looks — is read off this
- * argument, so it has to be pinned too: otherwise this machine's own
- * `~/.local/bin/claude` would decide the outcome of every check.
- */
+/** Fence the native fallback as well as PATH from this machine's own CLI. */
 const envFor = (home: string, extra: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv => ({ HOME: home, USERPROFILE: home, ...extra })
 
 /** `<home>/.local/bin`, where the official native installer drops the CLI. */
@@ -122,12 +82,7 @@ const versionlessClaude = (target: string): string => {
 const shWrapper = (entry: string): string =>
   `#!/bin/sh\nbasedir=$(dirname "$0")\nexec node "$basedir/${entry}" "$@"\n`
 
-/**
- * The npm `.cmd` wrapper Windows runs, down to its real trailing line: the
- * runtime comes first (a `node.exe` beside the wrapper beats the `node` on
- * PATH) and the package's script is what it actually runs. The separators are
- * this platform's, so the text names a file that really exists here too.
- */
+/** npm's .cmd shape, using platform separators so POSIX can test its parser. */
 const cmdWrapper = (entry: string): string => [
   '@ECHO off',
   'GOTO start',
@@ -150,18 +105,8 @@ const cmdWrapper = (entry: string): string => [
 ].join('\r\n')
 
 /**
- * A real npm global install as the lookup tools see it: the extensionless
- * wrapper, the `.cmd` Windows runs, and the package `cli.js` they forward to.
- *
- *  - `script: false` leaves the package bin out, so only the runtime named by
- *    the wrapper (`node.exe`) is left to grab — the decoy that must never be
- *    mistaken for the CLI (DESIGN risk R2);
- *  - `runtime: true` drops a spawnable `node.exe` beside the wrappers;
- *  - `wrapper: 'sh'` is the runnable `sh` wrapper npm publishes (POSIX runs
- *    it, Windows cannot spawn it); `wrapper: 'cmd'` is the `.cmd` text under a
- *    dead shebang, which no platform can spawn — that check is about the
- *    parse, and it is the only way to reach the `.cmd` shape on POSIX, where
- *    `which` reports just this one file.
+ * npm-shaped sh/.cmd wrappers with an optional script and node.exe decoy.
+ * A dead shebang before cmd text forces the parser path on POSIX too.
  */
 const npmInstall = (name: string, options: { script?: boolean; runtime?: boolean; wrapper?: 'sh' | 'cmd' } = {}): {
   readonly prefix: string
@@ -184,17 +129,7 @@ const npmInstall = (name: string, options: { script?: boolean; runtime?: boolean
   return { prefix, entry, runtimePath, wrapper }
 }
 
-/**
- * The wrapper shape no platform can spawn, forwarding to the entry: one probe
- * of the candidate then costs exactly one entry run, on either platform (a
- * spawnable `sh` wrapper would run the entry itself and be followed to it
- * after the probe failed, logging twice per pass — the count has to be about
- * the candidate, not about how the wrapper failed). The entry it names keeps
- * this platform's separators (`join`), the way the wrapper npm ships here
- * spells it: `%dp0%` expands to the shim's directory plus this platform's
- * separator, so a relative path spelled for another platform names nothing and
- * no entry would ever run.
- */
+/** Unspawnable wrapper: each parser pass runs the counting entry only once. */
 const deadForwarder = (target: string): string => deadClaude(target, cmdWrapper(join(...PACKAGE_ENTRY)))
 
 try {
@@ -297,7 +232,6 @@ try {
     const muteHome = dir('home-native-mute')
     versionlessClaude(join(nativeDir(muteHome), nativeName))
     const mute = await resolveClaudeExecutable(envFor(muteHome))
-    // One behavior, two fixtures: unspawnable and versionless both have to lose.
     check('AC-3 a native install that cannot answer is not adopted',
       dead.source === 'bundled' && dead.path === undefined && mute.source === 'bundled' && mute.path === undefined,
       { dead, mute })
@@ -308,30 +242,18 @@ try {
     const home = dir('home-dedupe')
     const bin = nativeDir(home)
     const log = join(dir('dedupe-log'), 'calls.log')
-    // A counting CLI under the native install's own file name: it cannot
-    // answer, so the loop walks past it — which is exactly when a duplicate
-    // candidate costs the probe's timeout a second time. The worst case is
-    // not hypothetical: `~/.local/bin` is often on PATH too, and a hung copy
-    // there is what makes the old chain pay twenty seconds instead of ten.
+    // A versionless CLI makes the loop reach any duplicate candidate.
     countingEntry(bin, undefined)
     deadForwarder(join(bin, nativeName))
     process.env[COUNT_LOG_ENV] = log
-    // The control: through the native fallback alone the fixture is reached
-    // exactly once, so the check below is about the duplicate candidate and
-    // not about a fixture that never started. `nodeDir` is on PATH because
-    // the probe starts a JS entry the way the SDK does, `node <entry>`, and
-    // `node` has to be findable for the entry to run at all.
+    // Control: prove the counting entry is reached through the fallback alone.
     withPath(dir('nothing-dedupe'), nodeDir)
     const alone = await resolveClaudeExecutable(envFor(home))
     const aloneCalls = probeCalls(log).length
     writeFileSync(log, '')
-    // The same directory on PATH as well: the lookup tool and the native
-    // fallback now name the same file, and one probe is what it may cost.
+    // PATH and the native fallback now name the same file.
     withPath(bin, nodeDir)
     const overlapped = await resolveClaudeExecutable(envFor(home))
-    // Both halves in one check: reached exactly once through the fallback
-    // alone (the control that the fixture can be reached at all), and naming
-    // the same file twice costs one probe — not two.
     check('a file both PATH and the native directory name is probed once',
       aloneCalls === 1 && probeCalls(log).length === 1,
       { aloneCalls, overlappedCalls: probeCalls(log).length, alone, overlapped })
@@ -343,9 +265,7 @@ try {
     const install = npmInstall('npm-real', { script: true })
     withPath(install.prefix, nodeDir)
     const resolved = await resolveClaudeExecutable(envFor(dir('home-no-native-1')))
-    // Windows cannot spawn either wrapper, so resolution follows one to the
-    // package entry the SDK starts as `node <entry>`; POSIX spawns the `sh`
-    // wrapper itself, which then execs that same entry.
+    // POSIX runs the sh wrapper; Windows must follow it to cli.js.
     const expected = win ? install.entry : install.wrapper
     check('AC-4 the npm install resolves to the entry it runs, not the SDK bundle', resolved.source === 'path' && resolved.path === expected, resolved)
     const version = resolved.path === undefined ? undefined : await readClaudeVersion(resolved.path)
@@ -369,9 +289,6 @@ try {
     const both = npmInstall('npm-decoy-script', { script: true, runtime: true, wrapper: 'cmd' })
     withPath(both.prefix, nodeDir)
     const picked = await resolveClaudeExecutable(envFor(dir('home-no-native-4')))
-    // One family, two fixtures: naming only a runtime must never yield that
-    // runtime (it falls back to the bundle), and a wrapper with a script beside
-    // that runtime must pick the script.
     check('the runtime a wrapper names is never the CLI: the bundle without a script, the script with one',
       decoy.runtimePath !== undefined && resolved.path !== decoy.runtimePath && resolved.source === 'bundled'
         && picked.path === both.entry,

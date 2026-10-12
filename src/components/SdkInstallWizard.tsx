@@ -32,14 +32,8 @@ function manualLine(dir: string, specifier: string): string {
   return `cd ${dir} && pnpm add ${specifier}`
 }
 
-/**
- * The note under the guidance inside detection's hint: its first line is the
- * install guidance, everything after it is what the probe found on this
- * machine (a local Claude Code, with its version or just its path — D6 joins
- * the two lines and never merges them). This is the one place that split is
- * defined. An empty tail — no CLI, no field, or a single-line hint — yields
- * undefined, so the pane reads exactly as it did before the note existed.
- */
+/** Detection's first line is install guidance; only its optional note belongs
+ *  in the confirmation pane. */
 function noteAfterGuidance(hint: string | undefined): string | undefined {
   const note = hint?.split('\n').slice(1).join('\n').trim()
   return note === undefined || note === '' ? undefined : note

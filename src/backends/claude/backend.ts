@@ -161,32 +161,14 @@ const rememberHost = (host: BackendHost): void => {
   installClaudeLocale(host.locale)
 }
 
-/**
- * The version of a resolved executable: the one its winning candidate had to
- * report while the resolution adopted it, so nothing here probes a file the
- * resolution already probed. Only an explicit `CLAUDE_CODE_EXECUTABLE` — which
- * the chain adopts without validating, on purpose — has no version yet, and
- * that is the one case that still spends a bounded probe (undefined when that
- * probe fails, exactly as before: the caller degrades to the path, D5).
- */
+/** Reuse the winning probe; explicit env paths still need their first probe. */
 async function resolvedCliVersion(executable: ClaudeExecutable, host: BackendHost): Promise<string | undefined> {
   if (executable.version !== undefined) return executable.version
   if (executable.path === undefined) return undefined
   return readClaudeVersion(executable.path, host.appVersion)
 }
 
-/**
- * The `claude` this machine already has, as the extra hint line of the
- * SDK-missing branch (D5/D6): the version it reports, or its path when the
- * version cannot be read. Undefined when there is no CLI at all — the caller
- * then keeps the plain SDK-missing sentence, and not joining is what makes
- * "no CLI reads exactly as before" structural rather than a copy promise.
- *
- * Never throws: the probe reuses the same resolution chain and bounded
- * timeouts as a session start — and the version that chain read to adopt the
- * CLI — so a failed or timed-out probe degrades to "nothing found", like a CLI
- * that will not answer.
- */
+/** Best-effort CLI note for an SDK-missing hint; no CLI means no extra line. */
 async function foundClaudeCli(host: BackendHost): Promise<string | undefined> {
   try {
     const executable = await resolveClaudeExecutable()
@@ -212,9 +194,7 @@ export const claudeBackend: AgentBackend = {
       await loadClaudeSdk()
     } catch (error) {
       host.debug(`claude: SDK import failed (${errorText(error)})`)
-      // A machine without the SDK may still have the CLI (the native
-      // installer, a global npm install): say which one was found, beside the
-      // install guidance and never instead of it (D5).
+      // A local CLI does not remove the SDK requirement.
       const missing = claudeText('claude-sdk-missing', { version: VALIDATED_SDK_VERSION })
       const found = await foundClaudeCli(host)
       return { installed: false, hint: found === undefined ? missing : `${missing}\n${found}` }

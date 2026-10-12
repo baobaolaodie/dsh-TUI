@@ -901,7 +901,6 @@ export function Chat({
         dir: target.dir,
         version: surface.version,
         specifier: surface.specifier,
-        // 检测的 hint 现查现带（可选）：确认面板据此多画一行「已发现的本机 CLI」。
         ...(sdkOverlay.foundCli === undefined ? {} : { foundCli: sdkOverlay.foundCli }),
       })
     } else {

@@ -104,11 +104,7 @@ const texts = {
   'claude-version-drift': { zh: 'Claude CLI {{version}} 未经本版 dsh-tui 验证（已验证：{{validated}}），继续运行', en: 'Claude CLI {{version}} is not validated with this dsh-tui (validated: {{validated}}); continuing' },
   'claude-sdk-drift': { zh: 'Claude Agent SDK {{version}} 与验证版本 {{validated}} 不一致，继续运行', en: 'Claude Agent SDK {{version}} differs from the validated {{validated}}; continuing' },
   'claude-sdk-missing': { zh: '未安装 Claude Agent SDK：在 dsh-tui 安装目录运行 pnpm add @anthropic-ai/claude-agent-sdk@{{version}}', en: 'The Claude Agent SDK is not installed: run pnpm add @anthropic-ai/claude-agent-sdk@{{version}} in the dsh-tui install directory' },
-  // The CLI is already there while the SDK is not: said as a line of its own
-  // under the guidance above (never folded into a placeholder of it), so "no
-  // CLI found" stays the plain sentence above, word for word (D6). One key per
-  // shape of what the probe can report: the version with the path it came
-  // from, or the path alone when the version could not be read.
+  // Optional second line of the SDK-missing hint.
   'claude-sdk-missing-found-cli': { zh: '已发现本机 Claude Code {{version}}（{{path}}）', en: 'Found a local Claude Code {{version}} ({{path}})' },
   'claude-sdk-missing-found-cli-path': { zh: '已发现本机 Claude Code：{{path}}', en: 'Found a local Claude Code: {{path}}' },
   'claude-resume-not-found': { zh: '本机 Claude 会话库中没有会话 {{id}}', en: 'No Claude session {{id}} in the local session store' },
