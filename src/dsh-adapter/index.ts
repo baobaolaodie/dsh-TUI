@@ -17,6 +17,7 @@ import { normalizeSplashFont, type SplashFontSetting } from '../components/splas
 import { normalizeBrandSetting, type BrandSetting } from '../branding.js'
 import { editableConfig, type RuntimeConfig } from './compat/settings.js'
 import { EDITABLE_CONFIG_KEYS } from '../settings/definitions.js'
+import { peekEntrySlot, takeEntryAttach } from './entry-slot.js'
 
 export const name = 'dsh-tui'
 // `tuiWorkspaces` must stay OUT of this code-level inject (issue #183): the
@@ -118,6 +119,12 @@ export interface Config {
    *  /settings choices override this value after restart. The environment
    *  override DSH_TUI_DISABLE_TERMINAL_IMAGES can always force previews off. */
   terminalImages?: boolean
+  /** Launchpad landing page (settings `dsh-tui.launchpad`): an ordinary
+   *  launch (no --resume, no first prompt) starts on the launchpad — the
+   *  page where the first sentence gets typed. On by default; `false` boots
+   *  straight into the chat page. Saved /settings choices override this
+   *  value after restart; DSH_TUI_NO_LAUNCHPAD=1 skips it regardless. */
+  launchpad?: boolean
   /** UI language: `en` / `zh`. When absent, the `DSH_TUI_LANG` env var wins,
    *  then the `/lang` choice persisted in `~/.dsh-tui/lang.json`, then `zh`. */
   lang?: string
@@ -326,6 +333,10 @@ export const Config: Schema<Config, RuntimeConfig<Config>> = editableConfig<Conf
   contextBar: Schema.boolean().default(true),
   fullscreen: Schema.boolean().default(true),
   terminalImages: Schema.boolean().default(true),
+  // No `.default()` on purpose (same rule as recapOnOpen): an unset key must
+  // stay distinguishable from an explicit `false`, and the boot reads
+  // undefined as on (`config.launchpad !== false`).
+  launchpad: Schema.boolean(),
   lang: Schema.string().required(false),
   preset: Schema.string().required(false),
   diffLayout: Schema.union(['auto', 'split', 'unified']).default('auto'),
@@ -445,6 +456,14 @@ export const Config: Schema<Config, RuntimeConfig<Config>> = editableConfig<Conf
  * @returns a promise settling when the Loader entry has scheduled its runtime.
  */
 export async function apply(ctx: Context, config: RuntimeConfig<Config>): Promise<void> {
+  // The entry already mounted the screen in this process (./entry-slot.ts):
+  // the row only runs the DSH side and hands the session to that screen.
+  const entrySlot = peekEntrySlot()
+  if (entrySlot !== undefined) {
+    entrySlot.rowSeen = true
+    attachToEntry(ctx, config)
+    return
+  }
   // Upstream drift is NO LONGER spammed to stderr here: per-package
   // console.warn lines interleave with the TUI frame redraw and arrive
   // garbled (typewriter animation repaints over them). The merged,
@@ -469,6 +488,28 @@ export async function apply(ctx: Context, config: RuntimeConfig<Config>): Promis
   })
 }
 
+/** The row under the entry's screen: the DSH side in its own runtime fiber
+ *  once the Loader settled, never a second render; a recompose stays idle. */
+function attachToEntry(ctx: Context, config: RuntimeConfig<Config>): void {
+  const attach = takeEntryAttach()
+  if (attach === undefined) {
+    ctx.logger.warn('dsh-tui: the entry\'s screen already holds a DSH session; this dsh-tui row stays idle')
+    return
+  }
+  let disposed = false
+  ctx.effect(() => () => { disposed = true })
+  const loader = ctx.get('loader') as { await(): Promise<unknown> } | undefined
+  void (loader?.await() ?? ctx.fiber.await()).then(() => {
+    if (disposed) return
+    return ctx.plugin({
+      name: 'dsh-tui-runtime',
+      apply: (runtimeCtx: Context) => attach(runtimeCtx, config, ctx),
+    })
+  }).catch((error: unknown) => {
+    ctx.logger.error(`dsh-tui: the DSH side failed to start under the entry's screen: ${error instanceof Error ? error.message : String(error)}`)
+  })
+}
+
 // ── The Backend contribution family (B-2) ─────────────────────────────────────
 // `alpha`, and deliberately narrow: the *declaration* shape, its validator, the
 // admission verdict and the projection this package uses for its own manifests.
@@ -476,8 +517,9 @@ export async function apply(ctx: Context, config: RuntimeConfig<Config>): Promis
 // (scripts/verify-public-config-types.mjs compiles a real consumer file against
 // the published declarations), and from here on it may only grow — removing any
 // of it is a breaking change. What is NOT here: the registry, the loader and the
-// picker. Those stay the host's, and the C stage is where a bundle's declaration
-// reaches them (W-1 boundary; see docs/plugins.md).
+// picker. Those stay the host's, and the stage C install chain is where a mounted
+// bundle's declaration reaches them (the admission chain itself is wired; see
+// docs/plugins.md).
 export {
   BACKEND,
   BACKEND_CAPABILITY_NAMES,

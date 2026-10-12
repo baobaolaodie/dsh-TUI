@@ -2,11 +2,11 @@ import React from 'react'
 // 粘贴/清洗语义已抽到 utils/inputPaste.ts（方案 B：PromptInput 与 Launchpad 共享；
 // 行为逐字节不变，只是搬了家）。
 import { sanitizeEditableText, sanitizePastedText } from '../utils/inputPaste.js'
-import { constants as fsConstants } from 'node:fs'
-import { open, unlink } from 'node:fs/promises'
+import { unlink } from 'node:fs/promises'
 import { basename, resolve } from 'node:path'
 import { t } from '../i18n.js'
 import { Box, Text, useInput, useTerminalSize, useTheme, type ScrollBoxHandle } from '../ui.js'
+import { COMPOSER_IMAGE_TOKEN, imageTokenSpans, imageTokenAround, snapOffImageToken, expandImageTokenRange, type ImageTokenSpan } from './composerImageTokens.js'
 import { EffortChargeGlyph } from './EffortChargeGlyph.js'
 import { EffortInputBorder, type InputBorderLabel } from './EffortInputBorder.js'
 import { EffortTierBadge } from './EffortTierBadge.js'
@@ -25,7 +25,7 @@ import { truncateToWidth } from '../ink/truncateToWidth.js'
 import { getGraphemeSegmenter } from '../utils/intl.js'
 import { draftWordRangeAt, isDraftWordBoundary } from '../utils/draftWordBoundary.js'
 import { formatClipboardInsert, readClipboard } from '../utils/clipboard.js'
-import { imagePathMediaType, parsePastedImagePath, stageClipboardFilePaths } from '../utils/pastedImagePath.js'
+import { imagePathMediaType, parsePastedImagePath, readBoundedRegularFile, stageClipboardFilePaths } from '../utils/pastedImagePath.js'
 import { editInExternalEditor } from '../utils/externalEditor.js'
 import { setPromptEditorNode, EditorButton } from './PromptEditor.js'
 import type { ChannelUi as Channel } from '../adapter/channel/ui-policy.js'
@@ -35,7 +35,7 @@ import type {
   StagedImageHandle,
 } from '../dsh-adapter/channel.js'
 import type { TranscriptImage } from '../dsh-adapter/transcript-images.js'
-import { isHiddenCommandName, isUnavailableLocalCommand, parseCommandName, workingHoldOf } from '../commands.js'
+import { isBootSafeCommand, isHiddenCommandName, isUnavailableLocalCommand, parseCommandName, workingHoldOf } from '../commands.js'
 import { appendHistory, HISTORY_LIMIT, historyProjectKey, loadHistoryOldestFirst } from '../history.js'
 import { mentionAtCaret } from '../utils/mentions.js'
 import { preserveSelection, type FileCandidate } from '../utils/fileSuggestions.js'
@@ -225,60 +225,10 @@ const FOLD_MIN_CHARS = 600
 const isBigInput = (text: string): boolean =>
   text.split('\n').length >= FOLD_MIN_LINES || text.length >= FOLD_MIN_CHARS
 
-
-const COMPOSER_IMAGE_TOKEN = /\[Image #\d+\]/gu
-
 /** Format label for one image media type, matching the image preview card's
  *  title (`JPEG`, `PNG`, `WEBP`, `GIF`). */
 const mediaTypeLabel = (mediaType: string): string =>
   mediaType.replace(/^image\//u, '').replace(/\+xml$/u, '').toUpperCase()
-
-/** One `[Image #N]` occurrence: [start, end) offsets into the draft. */
-interface ImageTokenSpan {
-  readonly start: number
-  readonly end: number
-  readonly token: string
-}
-
-/** Every `[Image #N]` in `text`, in order. */
-function imageTokenSpans(text: string): ImageTokenSpan[] {
-  const spans: ImageTokenSpan[] = []
-  for (const match of text.matchAll(COMPOSER_IMAGE_TOKEN)) {
-    const start = match.index ?? 0
-    spans.push({ start, end: start + match[0].length, token: match[0] })
-  }
-  return spans
-}
-
-/** The span whose interior (exclusive of both edges) contains `offset`. */
-function imageTokenAround(spans: readonly ImageTokenSpan[], offset: number): ImageTokenSpan | undefined {
-  return spans.find(span => span.start < offset && offset < span.end)
-}
-
-/**
- * A caret never rests inside a staged token: an offset in a span's interior
- * moves to the edge `prefer` names — `'start'` (the token becomes the caret
- * cluster), `'end'`, or whichever is nearer.
- */
-function snapOffImageToken(
-  spans: readonly ImageTokenSpan[],
-  offset: number,
-  prefer: 'start' | 'end' | 'nearest',
-): number {
-  const span = imageTokenAround(spans, offset)
-  if (span === undefined) return offset
-  if (prefer === 'start') return span.start
-  if (prefer === 'end') return span.end
-  return offset - span.start < span.end - offset ? span.start : span.end
-}
-
-/** Expand a deletion or selection to include every staged token it touches. */
-function expandImageTokenRange(spans: readonly ImageTokenSpan[], start: number, end: number) {
-  return {
-    start: snapOffImageToken(spans, start, 'start'),
-    end: snapOffImageToken(spans, end, 'end'),
-  }
-}
 
 /** Capabilities referenced by `text`, in first occurrence order. A raw token
  * restored from disk/history has no sidecar entry and therefore stays inert. */
@@ -296,32 +246,6 @@ export function composerImageRefsForText(
     if (stageId !== undefined) refs.push({ token, stageId })
   }
   return refs
-}
-
-/** Read one regular file through one descriptor, bounded to `maxBytes + 1`.
- * The extra byte detects a file that grows after fstat; a short read detects
- * shrinkage. This avoids stat(path) → readFile(path)'s path-swap TOCTOU and
- * never allocates from an untrusted size before the profile limit is checked. */
-async function readBoundedRegularFile(path: string, maxBytes: number): Promise<Uint8Array> {
-  // O_NONBLOCK keeps a pasted FIFO/device path from parking the UI before
-  // fstat can reject it; regular-file reads are unchanged.
-  const file = await open(path, fsConstants.O_RDONLY | fsConstants.O_NONBLOCK)
-  try {
-    const info = await file.stat()
-    if (!info.isFile()) throw new Error(`${basename(path)} is not a regular file`)
-    if (info.size > maxBytes) throw new Error(`image exceeds this profile's per-image size limit`)
-    const data = Buffer.allocUnsafe(info.size + 1)
-    let offset = 0
-    while (offset < data.byteLength) {
-      const { bytesRead } = await file.read(data, offset, data.byteLength - offset, offset)
-      if (bytesRead === 0) break
-      offset += bytesRead
-    }
-    if (offset !== info.size) throw new Error(`${basename(path)} changed while it was being read`)
-    return data.subarray(0, offset)
-  } finally {
-    await file.close()
-  }
 }
 
 /** Index of the word boundary at or before `cursor` (readline alt+b). */
@@ -1978,6 +1902,11 @@ export function PromptInput({
     channel.notify(t('input-interrupt-immediate'), { timeoutMs: 2500 })
   }
 
+  /** The startup phase's refusal (see `ChannelUi.ready`). */
+  const notifyNotReady = (): void => {
+    channel.notify(t('startup-not-ready', { backend: backendLabel ?? channel.backendCapabilities.backendId }), { color: 'warning', timeoutMs: 2500 })
+  }
+
   /**
    * Execute a slash command (built-in, plugin-registered, or hidden) when
    * the input resolves to one: the name parses as the first token so
@@ -1990,6 +1919,12 @@ export function PromptInput({
     if (!text.startsWith('/')) return false
     const parsed = parseCommandName(text)
     if (parsed === undefined) return false
+    // Not ready (`ChannelUi.ready`): only boot-safe commands run; the rest
+    // are refused before dispatch so the draft stays. The one chokepoint.
+    if (channel.ready === false && !isBootSafeCommand(parsed.name)) {
+      notifyNotReady()
+      return true
+    }
     const command = channel.commandList.find(entry => entry.name === parsed.name)
     // A built-in the bound backend does not serve is hidden from the menu and
     // Tab, and a typed one must neither run nor reach the model as text. A
@@ -2112,6 +2047,12 @@ export function PromptInput({
         acceptFile(file)
         return
       }
+    }
+    // Not ready: refuse before any path that clears the draft.
+    if (channel.ready === false && value.trim() !== '') {
+      if (tryRunCommand(value)) return
+      notifyNotReady()
+      return
     }
     // A docked queue (Esc parked it) owns a bare Enter on an EMPTY draft
     // (Claude Code parity: "…or Enter to send them now"). A draft in
@@ -2706,6 +2647,8 @@ export function PromptInput({
         return
       }
       const line = (value + input).trim()
+      // Not ready: the line becomes the draft first, so a refused command keeps it.
+      if (channel.ready === false) setInput(line)
       if (line.startsWith('/')) {
         const matches = channel.commandCompletions(line)
         if (matches.length === 1) {
@@ -2713,7 +2656,12 @@ export function PromptInput({
           return
         }
       }
-      if (!tryRunCommand(line)) submitText(line)
+      if (tryRunCommand(line)) return
+      if (channel.ready === false) {
+        notifyNotReady()
+        return
+      }
+      submitText(line)
       return
     }
     if (key.return && isMod(key)) {

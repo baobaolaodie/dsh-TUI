@@ -33,9 +33,9 @@ import { RAIL_CHROME_ROWS, WORKSPACE_ROW_LINES, RAIL_MIN_TOTAL_COLUMNS, RAIL_WID
  *
  * A snapshot, not a source of truth: it only decides what the screen paints
  * before the fresh listing lands; the listing every open re-runs stays the
- * truth and corrects every stale title, order and deletion on arrival, so the
- * stale window is one listing's duration and a failed listing never writes
- * here — the screen keeps the previous list beside its error notice.
+ * truth: progress corrects titles and order, completion also removes deleted
+ * rows. A failed listing never writes here — the screen keeps the displayed
+ * rows beside its error notice.
  *
  * Keyed by the CHANNEL rather than by the process, because the rows belong to
  * one channel's persistence source and a process can host more than one: a
@@ -265,14 +265,26 @@ export function useSessionSupervisor(input: SessionSupervisorInput) {
   const [selectedPath, setSelectedPath] = useState<string | undefined>(undefined)
   /** True once the user picked a rail row by hand; see the selection effect. */
   const [selectionManual, setSelectionManual] = useState(false)
-  const recentSessionId = useMemo(() => {
+  /** The rail row whose sessions the pane is showing (or the fallback group). */
+  const selected = useMemo(() => {
+    const registered = railEntries.find(entry =>
+      entry.from === 'registry' && selectedPath !== undefined && samePath(entry.path, selectedPath))
+    if (registered !== undefined) return registered
+    if (selectedUnregisteredId !== undefined) return railEntries.find(entry => entry.id === selectedUnregisteredId)
+    return railEntries.find(entry => samePath(entry.path, channel.cwd)) ?? railEntries[0]
+  }, [railEntries, selectedPath, selectedUnregisteredId, channel.cwd])
+
+  // Recency chooses the default even when an older live row sorts above it.
+  const mostRecentIn = useCallback((path: string): string | undefined => {
+    const needle = query.trim().toLowerCase()
     let recent: SessionSummary | undefined
-    for (const session of listedSessions) {
-      if (samePath(session.cwd, channel.cwd)
+    for (const session of groupedEntries.get(path) ?? []) {
+      if (sessionMatchesQuery(session, needle)
         && (recent === undefined || session.updatedAt > recent.updatedAt)) recent = session
     }
     return recent?.id
-  }, [listedSessions, channel.cwd])
+  }, [groupedEntries, query])
+  const recentSessionId = useMemo(() => selected === undefined ? undefined : mostRecentIn(selected.path), [selected?.path, mostRecentIn])
   /**
    * The session column's cursor, as ONE fact.
    *
@@ -300,12 +312,11 @@ export function useSessionSupervisor(input: SessionSupervisorInput) {
     initialFocusPending.current = false
     setFocusSessionIdState(id)
   }, [])
-  // Correct the default as the first listing arrives, until navigation owns it.
+  // Keep the workspace's default current until the user chooses a list row.
   React.useEffect(() => {
     if (!initialFocusPending.current) return
     setFocusSessionIdState(recentSessionId)
-    if (!refreshing) initialFocusPending.current = false
-  }, [recentSessionId, refreshing])
+  }, [recentSessionId])
   /**
    * Which column owns the keyboard, and therefore which column draws the `❯`
    * cursor. Exactly one at a time: two cursors mean "where does Enter go?" has
@@ -381,10 +392,11 @@ export function useSessionSupervisor(input: SessionSupervisorInput) {
             slot.rows = slot.rows?.map(row => row.id === enriched.id ? enriched : row)
             setSessions(current => current.map(row => row.id === enriched.id ? enriched : row))
           }, partial => {
-            // Keep a complete cached list over a partial cold scan. With no
-            // snapshot, show useful rows now rather than waiting for every log.
-            if (slot.requestGeneration !== generation || slot.rows !== undefined) return
-            setSessions(partial)
+            // Fresh workspace rows supersede cached metadata immediately;
+            // retain other cached workspaces until the full listing arrives.
+            if (slot.requestGeneration !== generation) return
+            setSessions(current => [...new Map([...current, ...partial].map(row => [row.id, row])).values()]
+              .sort((left, right) => right.updatedAt - left.updatedAt))
             setLoading(false)
           })
           // Recorded only after success: a failed listing keeps the previous
@@ -417,7 +429,7 @@ export function useSessionSupervisor(input: SessionSupervisorInput) {
       setLoading(false)
       setRefreshing(false)
     }
-  }, [channel, workspaceLedger])
+  }, [channel, workspaceLedger, channel.cwd, channel.ready])
 
   React.useEffect(() => {
     void reload()
@@ -485,15 +497,6 @@ export function useSessionSupervisor(input: SessionSupervisorInput) {
     setRailFocus(current => Math.min(current, Math.max(0, railEntries.length - 1)))
   }, [railEntries.length])
 
-  /** The rail row whose sessions the pane is showing (or the fallback group). */
-  const selected = useMemo(() => {
-    const registered = railEntries.find(entry =>
-      entry.from === 'registry' && selectedPath !== undefined && samePath(entry.path, selectedPath))
-    if (registered !== undefined) return registered
-    if (selectedUnregisteredId !== undefined) return railEntries.find(entry => entry.id === selectedUnregisteredId)
-    return railEntries[0]
-  }, [railEntries, selectedPath, selectedUnregisteredId])
-
   /**
    * Sessions whose recorded cwd is the selected workspace, minus the search
    * filter. Live sessions in this workspace sort above stopped ones, then by
@@ -543,22 +546,13 @@ export function useSessionSupervisor(input: SessionSupervisorInput) {
     [visibleSessions],
   )
 
-  /**
-   * Enter the session column: land the cursor on the session this terminal is
-   * attached to (that is the one the user most likely means), else on the top
-   * row — which is the new-session card when the list sorted its live rows
-   * lower. A cursor that stayed put while the list scrolled elsewhere would act
-   * on a row the user never looked at.
-   */
+  /** Enter the session column without changing its selected row. */
   const activateList = useCallback((): void => {
     setActivePane('list')
-    const current = visibleSessions.find(session => liveStateOf(session.id)?.current === true)
-    setFocusSessionId(current?.id)
-  }, [liveStateOf, visibleSessions, setFocusSessionId])
+  }, [])
 
   /** Enter the workspace column. */
   const activateRail = useCallback((): void => {
-    initialFocusPending.current = false
     setActivePane('rail')
   }, [])
 
@@ -650,8 +644,13 @@ export function useSessionSupervisor(input: SessionSupervisorInput) {
     setSelectedPath(entry.from === 'registry' ? entry.path : undefined)
     setSelectedUnregisteredId(entry.from === 'unregistered' ? entry.id : undefined)
     setSelectionManual(true)
-    setFocusSessionId(undefined)
-  }, [setFocusSessionId])
+    if (selected === undefined || !samePath(selected.path, entry.path)) {
+      // One selection belongs to the current workspace, without a per-workspace
+      // memory. A cold group's default follows incoming rows until list movement.
+      initialFocusPending.current = true
+      setFocusSessionIdState(mostRecentIn(entry.path))
+    }
+  }, [selected, mostRecentIn])
 
   /**
    * Mount a session, refusing one another terminal holds.

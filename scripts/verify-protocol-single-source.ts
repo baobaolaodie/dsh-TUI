@@ -194,6 +194,9 @@ if (specData === undefined) {
     { apiVersion: 'storage.dsh/v1alpha1', kind: 'LocalStorage' },
     { apiVersion: 'messages.dsh/v1alpha1', kind: 'MessageObserver' },
     { apiVersion: 'tui.dsh/v1alpha1', kind: 'DecisionEvents' },
+    // W-2: the Backend contribution family is published from the registry's
+    // `extensions` section once the admission machine answers a real probe.
+    { apiVersion: 'tui.dsh/v1alpha1', kind: 'Backend' },
   ]
   const hostContractsKey = (contract: { apiVersion: string; kind: string }): string => `${contract.apiVersion}#${contract.kind}`
   const hostContractsMatch = JSON.stringify([...HOST_SUPPORTED_CONTRACTS].map(hostContractsKey).sort()) === JSON.stringify(

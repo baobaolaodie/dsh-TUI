@@ -241,6 +241,53 @@ export function listOfferedBackends(): readonly RegisteredBackend[] {
   return listBackends().filter(entry => entry.admission.decision !== 'waiting_authorization')
 }
 
+/**
+ * What the backend admission machine reports when asked whether it is mounted
+ * and can admit a *contribution* (W-2).
+ */
+export interface BackendAdmissionProbe {
+  /** Entries the registry holds: the built-in seed plus every registration. */
+  readonly registered: number
+  /** How many of them a picker may offer (not `waiting_authorization`). */
+  readonly offered: number
+  /** What a synthetic third-party declaration was admitted as. A machine that
+   *  could not answer `compatible` would refuse every contribution, so this is
+   *  the one verdict the probe accepts. */
+  readonly verdict: 'compatible'
+}
+
+/**
+ * Read-only probe behind the host descriptor's `Backend` contract (W-2): is the
+ * backend admission machine mounted, and does it answer for a *contribution*?
+ *
+ * The descriptor publishes `tui.dsh/v1alpha1#Backend` only on real probe evidence
+ * (`hasVerificationEvidence`, descriptor publication barrier), and "a service row
+ * exists" is deliberately not evidence. So this probe walks the same path a
+ * third-party declaration takes — build a declaration no host owns, run it
+ * through the family validator, then through the host's admission facts — and
+ * reports what came back. It registers nothing, imports nothing and writes
+ * nothing: an entry that was never loaded is still never loaded.
+ */
+export function probeBackendAdmission(): BackendAdmissionProbe {
+  const entries = listBackends()
+  const offered = listOfferedBackends().length
+  // A declaration with no reserved id, no capabilities and no grants — the shape
+  // the profile's own CLI-shaped fixture uses, so the verdict cannot depend on
+  // anything this host happens to have registered.
+  const declaration = validateBackendSpec({
+    id: 'admission-probe',
+    label: { text: 'Admission probe' },
+    shortLabel: 'Admission probe',
+    capabilities: [],
+    grants: [],
+  })
+  const verdict = backendAdmission(declaration, HOST_ADMISSION_FACTS)
+  if (verdict.decision !== 'compatible') {
+    throw new Error(`dsh-tui: backend admission machine answered ${verdict.decision}; it cannot admit a contribution`)
+  }
+  return Object.freeze({ registered: entries.length, offered, verdict: 'compatible' as const })
+}
+
 /** One backend, or undefined when no such backend is registered. */
 export function getBackend(id: string): RegisteredBackend | undefined {
   return entries.get(id)

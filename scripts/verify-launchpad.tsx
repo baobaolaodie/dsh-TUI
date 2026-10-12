@@ -38,6 +38,12 @@
  *      同屏且权限段一字不少、窄屏回落今天的尾部省段、焦点环只收画出来的段。
  *   S. 屏幕级 AC-4：被截断段的 tooltip——真 SGR motion 悬停 600ms 出完整名、
  *      离开即撤且高亮复原、点击/键盘仍开对应选择器、未截断段绝不弹卡片。
+ *   PK. 屏幕级：命令补全面板的**卡片几何**——面板锚在 cardWidth 宽的成组块里，
+ *      交给 SuggestionCard 的 columns 必须是 cardWidth（不是整屏 columns）：上下
+ *      边框闭合（`╮`/`╯`）、卡片行数 = 边框 2 + 命令数（长描述行不多出幽灵空行）、
+ *      过长描述在卡片内截断成 `…` 而不是被右 `│` 覆盖。行内容（含宿主 `input.hint`
+ *      型的超长 `[…]` tag）一律在 `usable` 内收口、与右 `│` 至少留 1 列白；装不下的
+ *      tag 显式截断成 `…`。宽/窄终端各钉一遍。
  *
  * Run: node --import tsx/esm scripts/verify-launchpad.tsx
  */
@@ -216,7 +222,10 @@ interface OpenOptions {
   overlayPanel?: boolean
   /** 高探针面板：探针行加六行空白，覆盖部分大字。 */
   overlayPanelTall?: boolean
-  /** 提供时才显示命令补全面板。 */
+  /**
+   * 提供时才显示命令补全面板（生产型 `CommandCompletion`：`tag` = 宿主命令的
+   * `input.hint`，行内以 `[…]` 呈现；`replacement` = Tab 补全插入的文本）。
+   */
   commands?: readonly CommandCompletion[]
   /** 模拟键盘交给覆盖层处理。 */
   inputPaused?: boolean
@@ -1157,9 +1166,10 @@ for (const brand of ['claude', 'codex'] as const) {
     rowOf(ok, 'dsh')?.current === false && rowOf(ok, 'claude')?.selectable === true && rowOf(ok, 'claude')?.current === true
       && rowOf(ok, 'claude')?.version === 'claude-code v2.1.287' && rowOf(ok, 'claude')?.reasonKey === undefined,
     JSON.stringify(ok))
-  check('K3 目录：auth=missing 置灰(未登录)；auth=unknown 仍可选（分不清≠没有）；installed=false → 未安装',
-    rowOf(catalog({ current: 'dsh', statuses: { claude: { installed: true, auth: 'missing', version: '1.2.3' } } }), 'claude')?.selectable === false
-      && rowOf(catalog({ current: 'dsh', statuses: { claude: { installed: true, auth: 'missing' } } }), 'claude')?.reasonKey === 'kernel-unavailable-auth-missing'
+  check('K3 目录：auth=missing/unknown 均可选（凭据可能在检测看不到的地方）；loginInSession 行带登录注记；installed=false → 未安装',
+    rowOf(catalog({ current: 'dsh', statuses: { claude: { installed: true, auth: 'missing', version: '1.2.3' } } }), 'claude')?.selectable === true
+      && rowOf(catalog({ current: 'dsh', statuses: { claude: { installed: true, auth: 'missing' } } }), 'claude')?.reasonKey === undefined
+      && rowOf(catalog({ current: 'dsh', statuses: { claude: { installed: true, auth: 'missing', loginInSession: true } } }), 'claude')?.noteKey === 'kernel-login-in-session'
       && rowOf(catalog({ current: 'dsh', statuses: { claude: { installed: true, auth: 'unknown' } } }), 'claude')?.selectable === true
       && rowOf(catalog({ current: 'dsh', statuses: { claude: { installed: false, version: '1.2.3' } } }), 'claude')?.reasonKey === 'kernel-unavailable-not-installed')
   // 短品牌名不再是宿主里的 id→名字表：它来自 manifest，经宿主投影（P0 D2）。
@@ -1186,7 +1196,8 @@ for (const brand of ['claude', 'codex'] as const) {
       && subtitleOf({ current: 'dsh', dshVersion: '0.2.6', statuses: { claude: { installed: false } } }, 'claude') === 'R:kernel-unavailable-not-installed'
       && subtitleOf({ current: 'dsh', dshVersion: '0.2.6' }, 'dsh') === 'dsh-core v0.2.6'
       && subtitleOf({ current: 'dsh' }, 'dsh') === undefined
-      && subtitleOf({ current: 'dsh', statuses: { claude: { installed: true, auth: 'missing', version: '1.2.3' } } }, 'claude') === 'claude-code v1.2.3 · R:kernel-unavailable-auth-missing',
+      && subtitleOf({ current: 'dsh', statuses: { claude: { installed: true, auth: 'missing', version: '1.2.3' } } }, 'claude') === 'claude-code v1.2.3'
+      && subtitleOf({ current: 'dsh', statuses: { claude: { installed: true, auth: 'missing', version: '1.2.3', loginInSession: true } } }, 'claude') === 'claude-code v1.2.3 · R:kernel-login-in-session',
     JSON.stringify(catalog({ current: 'dsh', dshVersion: '0.2.6' }).map(option => [option.id, kernelSubtitle(option, key => 'R:' + key)])))
 
   // kernel.json 记忆：原子写（tmp+rename，claude prefs.ts 同款）往返。
@@ -1318,8 +1329,10 @@ for (const brand of ['claude', 'codex'] as const) {
   // 组合根写入接线：启动与退出路径都要更新最后运行记录。
   const funnelSource = readFileSync(new URL('../src/dsh-adapter/plugin.ts', import.meta.url), 'utf8')
   const refreshCalls = funnelSource.split('refreshLastRunRecord()').length - 1
-  check('LR4 plugin.ts 写记录接线齐：boot 落盘 + 崩溃/更新//restart/干净退出四个漏斗分支刷新（内核切换分支不写——替换进程自己写）',
-    funnelSource.includes('const refreshLastRunRecord = (): void =>') && refreshCalls === 5,
+  // 第 6 处：进程内 DSH 内核在 attachDsh 拿到 DSH 会话后再写一次；
+  // 第 7 处：它启动失败后 /new 经 DSH 创建路径（openDshSession）打开会话时同样写一次。
+  check('LR4 plugin.ts 写记录接线齐：boot 落盘 + 崩溃/更新//restart/干净退出四个漏斗分支刷新（内核切换分支不写——替换进程自己写）+ 进程内 DSH 接管后一次 + 失败后 /new 一次',
+    funnelSource.includes('const refreshLastRunRecord = (): void =>') && refreshCalls === 7,
     'refresh calls=' + refreshCalls)
 
   // 启动页的 boot 门（用户实测：kernel.json 记住 claude 后全新启动直接进聊天页、
@@ -2248,6 +2261,79 @@ for (const cols of [120, 100, 72, 60, 48]) {
   s.close()
 }
 
+// ── K9. 面板卡片几何（浮层宽度契约）────────────────────────────────────────
+// 面板经 OverlayAbove（`left:0/right:0`）锚在**成组块**里，成组块宽 =
+// `cardWidth = max(24, min(columns - 4, 72))`，而卡片根节点 `width:'100%'` 填满
+// 它。所以交给 SuggestionCard 的 columns 必须是 cardWidth，不是整屏 columns——
+// 传整屏时（0.13.0 起的缺陷）卡片按整屏算边框与行宽，屏幕上是：
+//   ① 上下边框比卡片宽，被 `truncate-end` 截成 `…`（右上 `╮` / 右下 `╯` 消失）；
+//   ② 行内容比内容盒宽 2 列 → flex 收缩，长描述行的 `…` 落进右 `│` 那一格被
+//      覆盖（描述看起来被硬切），同一条边还被亚 1 列宽的 `│` 测量多顶出**一条
+//      幽灵空行**（`measure-text` 的 `ceil(1 / 0.973) = 2`）。
+// 夹具刻意用长描述（真源 `cmd-desc-setup`）撑出②，两类宽度各钉一遍。
+// 再加一条**宿主 hint 型**的 `goal`：宿主的 `input.hint` 会进 `tag`（见
+// `skill-catalog.ts`：`tag: input?.hint`），`/goal` 的真 hint 自带方括号
+// （`[<objective>|clear|edit <objective>|pause|resume]`，52 列），比整行预算还长
+// ——预算被 tag 吃光时若还白送一个 `…`，行就比内容盒宽 1 列，同样顶出幽灵空行。
+// `background` 用 10 列名把名字列撑到 15，与真实 `/` 全量列表同形（少一个都不复现）。
+const PALETTE_COMMANDS: readonly CommandCompletion[] = [
+  { name: 'status', description: t('cmd-desc-status' as never), commandLine: '/status ', replacement: '/status ' },
+  { name: 'setup', description: t('cmd-desc-setup' as never), commandLine: '/setup ', replacement: '/setup ' },
+  { name: 'skills', description: t('cmd-desc-skills' as never), commandLine: '/skills ', replacement: '/skills ' },
+  { name: 'background', description: 'Background this session and open agent view', tag: 'alias of /bg', commandLine: '/background ', replacement: '/background ' },
+  { name: 'goal', description: t('cmd-desc-goal' as never), tag: '[<objective>|clear|edit <objective>|pause|resume]', commandLine: '/goal ', replacement: '/goal ' },
+]
+
+async function checkPaletteCardGeometry(columns: number, label: string): Promise<void> {
+  const ev: Ev[] = []
+  const s = await openLaunchpad(ev, { columns, commands: PALETTE_COMMANDS })
+  await s.send('/')
+  await settled(() => rowOf(s.term, '╭─ 命令') >= 0)
+  const cardWidth = Math.max(24, Math.min(columns - 4, 72))
+  const lines = viewportLines(s.term)
+  const topRow = rowOf(s.term, '╭─ 命令')
+  // 从顶边框往下收集到第一条 `╰`（面板底边框；再往下才是输入框自己的边框）。
+  const card: string[] = []
+  for (let i = topRow; i >= 0 && i < lines.length; i++) {
+    card.push(lines[i]!)
+    if (lines[i]!.includes('╰')) break
+  }
+  const top = (card[0] ?? '').trimEnd()
+  const bottom = (card[card.length - 1] ?? '').trimEnd()
+  const longRow = (card.find(line => line.includes('setup')) ?? '').trimEnd()
+  const tagRow = (card.find(line => line.includes('goal')) ?? '').trimEnd()
+  // 面板左右缘 = 成组块左右缘，行首那段缩进不算卡片宽度。
+  const boxTop = lines.slice(topRow + card.length).find(line => line.includes('╭')) ?? ''
+  // 命令行不许贴到右 │：行内容 ≤ usable = cardWidth − 4，内容盒还留 2 列内边距，
+  // 所以每一行与右 │ 之间至少 1 个空格。贴边 = 行内容越界（flex 收缩 → 幽灵空行）。
+  const crowded = card.slice(1, -1).filter(line => line.trimEnd() !== '' && !/\s│$/u.test(line))
+  check(`PK1@${columns} ${label}：面板顶边框闭合（右上是 ╮，不是被截出来的 …），宽度 = cardWidth`,
+    top.endsWith('╮') && stringWidth(top) - leftGap(top) === cardWidth,
+    `top=${JSON.stringify(top)} w=${stringWidth(top) - leftGap(top)} cardWidth=${cardWidth}`)
+  check(`PK2@${columns} ${label}：面板底边框闭合（右下是 ╯），宽度 = cardWidth`,
+    bottom.endsWith('╯') && stringWidth(bottom) - leftGap(bottom) === cardWidth,
+    `bottom=${JSON.stringify(bottom)} w=${stringWidth(bottom) - leftGap(bottom)} cardWidth=${cardWidth}`)
+  check(`PK3@${columns} ${label}：卡片行数 = 边框 2 + 命令 ${PALETTE_COMMANDS.length}（长描述行 / 超长 tag 行都不再多出一条幽灵空行）`,
+    card.length === PALETTE_COMMANDS.length + 2 && card.every(line => line.trim() !== ''),
+    `lines=${card.length} card=${JSON.stringify(card)}`)
+  check(`PK4@${columns} ${label}：过长描述在卡片内截断并带 …（不是被右 │ 覆盖吃掉）`,
+    /…\s*│$/u.test(longRow) && stringWidth(longRow) - leftGap(longRow) === cardWidth,
+    `row=${JSON.stringify(longRow)} w=${stringWidth(longRow) - leftGap(longRow)}`)
+  check(`PK5@${columns} ${label}：面板与输入框同左缘（同一成组块，浮层不漂）`,
+    leftGap(boxTop) === leftGap(top) && stringWidth(boxTop) - leftGap(boxTop) === cardWidth,
+    `box=${JSON.stringify(boxTop)} boxLeft=${leftGap(boxTop)} panelLeft=${leftGap(top)}`)
+  check(`PK6@${columns} ${label}：每一行都在 usable 内收口（与右 │ 之间留白 ≥1 列；宿主 hint 型 tag 也一样）`,
+    crowded.length === 0 && /\s│$/u.test(tagRow),
+    `crowded=${JSON.stringify(crowded)} tagRow=${JSON.stringify(tagRow)}`)
+  check(`PK7@${columns} ${label}：过长的宿主 tag 显式截断带 …（不是整段消失）`,
+    tagRow.includes('…'),
+    `tagRow=${JSON.stringify(tagRow)}`)
+  s.close()
+}
+
+await checkPaletteCardGeometry(COLS, '宽终端（cardWidth 触顶 72）')
+await checkPaletteCardGeometry(60, '窄终端（cardWidth = columns - 4）')
+
 // ── L. Tips 点击与键盘轮换 ──
 {
   const ev: Ev[] = []
@@ -2504,12 +2590,11 @@ for (const cols of [120, 100, 72, 60, 48]) {
     `tui=${tuiRow} plate=${JSON.stringify(plateRows)} ${JSON.stringify(lines[tuiRow + 1]?.trimEnd())}`)
   const dshFg = fgKeyOf(firstGlyph(dshRow))
   const claudeFg = fgKeyOf(firstGlyph(claudeRow))
-  check('S2 当前内核行正常亮度（与 dim 行不同色），其余行两个空格前缀且与 TUI 版本行同色（dim）',
+  check('S2 当前内核行正常亮度（与 dim 行不同色），其余行与 TUI 版本行同色（dim）且右端贴齐',
     dshFg !== claudeFg && claudeFg === fgKeyOf(tuiCell) && claudeFg !== 'default'
       && !lines[claudeRow]!.includes(MARK)
-      // 前缀等宽：两个名字的起始列相同（▸ + 空格 vs 两个空格）。
-      && stringWidth(lines[dshRow]!.slice(0, lines[dshRow]!.indexOf(DSH_LABEL)))
-        === stringWidth(lines[claudeRow]!.slice(0, lines[claudeRow]!.indexOf(CLAUDE_LABEL))),
+      // 右缘对齐：每行右端都贴 TUI 版本行那条右边界（左端随内容长短参差）。
+      && Math.abs(rightGap(lines[dshRow]!, COLS) - rightGap(lines[claudeRow]!, COLS)) <= 1,
     `dsh=${dshFg} claude=${claudeFg} tui=${fgKeyOf(tuiCell)} claude=${JSON.stringify(lines[claudeRow]?.trimEnd())}`)
   check('S2b 底栏画短品牌名（DSH / Claude），全名一个都不画（全名只进选择器）',
     lines[dshRow]!.includes(MARK + DSH_LABEL + ' \u00b7 ') && lines[claudeRow]!.trim().startsWith(CLAUDE_LABEL + ' \u00b7 ')
@@ -2518,6 +2603,35 @@ for (const cols of [120, 100, 72, 60, 48]) {
   check('S3 探测未回来：claude 行显示「检测中…」——置灰但**不是**「未安装」',
     claudeRow >= 0 && lines[claudeRow]!.includes('检测中…') && !lines[claudeRow]!.includes('未安装'),
     JSON.stringify(lines[claudeRow]?.trimEnd()))
+  // 未登录行的铭牌形态：**登录状态不进铭牌**（要切内核时在选择器里看），铭牌只有
+  // 名字与版号；各行右端都贴 TUI 版本行那条右边界——参差全留在左边。
+  {
+    const signedOut = catalog({
+      current: 'dsh', dshVersion: '0.2.0-rc.2',
+      statuses: {
+        claude: { installed: true, auth: 'missing', version: '2.1.295', loginInSession: true },
+        codex: { installed: true, auth: 'ok', version: '0.160.1' },
+      },
+    })
+    const s3 = await openLaunchpad([], { kernels: signedOut })
+    await settled(() => s3.screen().includes('claude-code v2.1.295'))
+    const lines3 = viewportLines(s3.term)
+    const tuiRow3 = lines3.findIndex(l => l.includes(`dsh-tui v${VERSION}`))
+    const outRow = lines3.findIndex(l => l.includes('claude-code v2.1.295'))
+    const okRow = lines3.findIndex(l => l.includes('codex-cli v0.160.1'))
+    check('S3b 未登录不进铭牌：行只有名字与版号（状态留给选择器）',
+      outRow >= 0 && tuiRow3 >= 0 && outRow === tuiRow3 + 2
+        && !lines3[outRow]!.includes('未登录')
+        && lines3[outRow]!.includes('Claude · claude-code v2.1.295')
+        && (lines3[okRow] ?? '').trim().startsWith('Codex · '),
+      JSON.stringify({ out: lines3[outRow]?.trimEnd(), ok: lines3[okRow]?.trimEnd() }))
+    check('S3c 各行右端贴齐同一条右边界（TUI 行与全部内核行，差 ≤1 列）',
+      [tuiRow3 + 1, outRow, okRow].every(row => row >= 0)
+        && [tuiRow3 + 1, outRow, okRow].every(row =>
+          Math.abs(rightGap(lines3[row]!, COLS) - rightGap(lines3[tuiRow3]!, COLS)) <= 1),
+      [tuiRow3, tuiRow3 + 1, outRow, okRow].map(row => JSON.stringify(lines3[row]?.trimEnd())).join(' | '))
+    s3.close()
+  }
   // 鼠标路径：整块是一个可点目标（点开选择器 = Chat 的 onKernelPick），点击
   // 拦住冒泡，不能同时算「点空白」（那会既开选择器又清焦点）。
   const beforeClick = ev.length

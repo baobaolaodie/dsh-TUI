@@ -33,8 +33,11 @@ dsh-TUI 可以把会话跑在 Claude Agent 后端上，而不是 DeepSeek Harnes
 
 - 启动页的「内核」入口、右下角的内核区，或在会话里输入 `/kernel`，打开内核选择器。
   选中另一个内核后 dsh-TUI 记住选择（`~/.dsh-tui/kernel.json`）并重启，在新内核里开
-  一个新会话；原来的会话仍可在 `/resume` 找到。回合进行中不能切换。SDK 没装或没有
-  凭据时，选择器会把 Claude 标为「未安装」或「未登录」。
+  一个新会话；原来的会话仍可在 `/resume` 找到。回合进行中不能切换。SDK 没装时，选择器
+  会把 Claude 标为「未安装」；凭据检测不出**不会**拦住选择——key 完全可以放在检测看不到
+  的地方（Claude 设置的 `env`、`apiKeyHelper`、中转渠道），行仍可选（右下角铭牌不显示登录
+  状态，未登录在选择器里以副标题标注）。进去后 CLI 会应用自己的配置；订阅登录在会话里
+  `/login`，中转渠道用 `/channel` 配。
 - `dsh-tui --backend claude`（只对这一次启动生效）。
 - 在 dsh-tui 的配置行写 `backend: claude`。
 
@@ -124,7 +127,9 @@ Claude 设置 > `default`。Claude 设置里的 `defaultMode: bypassPermissions`
   `claude --resume <id>` 打开）。`Enter` 恢复（先回放历史再继续），`Ctrl+R` 重命名，
   `Ctrl+D` 删除；当前会话和另一个 dsh-TUI 终端正在用的会话不能删。置顶按后端分开保存。
   再次打开或重启后先显示上次完整列表，同时仍从 SDK 刷新。首屏快照按 Claude 配置
-  目录隔离；读取失败时保留上次完整快照。
+  目录隔离；没有快照时按 SDK 默认项目范围（当前工作目录及同仓库的 Git worktree）
+  先显示最近的最多 32 条，再补齐该项目及其他项目的完整列表；全部项目读取失败时
+  也保留该项目的 worktree 会话。读取失败时保留上次完整快照。
 - 从 shell 恢复：`dsh-tui --backend claude --resume <id>`；不带 id 时恢复本机最近一次
   用过的 Claude 会话。退出时 dsh-TUI 会打印这条命令。另一个 dsh-TUI 终端已打开的会话会
   被拒绝；`--resume` 打不开时直接报错，不会改开新会话。状态栏的短会话 id 就是
@@ -158,6 +163,14 @@ Claude 设置 > `default`。Claude 设置里的 `defaultMode: bypassPermissions`
 ## 已知限制
 
 - 一个 dsh-TUI 进程只用一个后端，切换要经 `/kernel` 重启。
+- Claude 内核下 `dsh-tui` 从本包自己的入口启动，只组合轻量 profile（本包与 profile
+  声明的第三方插件，不含 DSH 的 agent 核心）：界面先出现，
+  会话打开后才能发送：在此之前按 Enter 草稿留在原处并提示还在启动，命令行带的首句在
+  会话打开后发出；打开失败会说明原因（落地页自动收起），`/new` 重试。第三方
+  DSH/Cordis 插件（主题、面板、决策拦截）照常加载，在界面出现后加入；依赖 DSH 自身
+  服务（agent、工具、LLM 层）的插件在这个内核下不会激活。`DSH_TUI_HOST_ENTRY=0` 回到经
+  `dsh --profile dsh-tui` 启动。（DSH 内核默认也从本包入口启动，但会在同一进程里组合
+  完整的 DSH profile。）
 - 侧栏的工作区面板在 Claude 会话下提示不支持，轨迹面板为空。
 - 不支持 `/add-dir`；拒答对话框只有「重试」和「取消」；需要浏览器操作的 MCP 请求不会
   自动打开浏览器。

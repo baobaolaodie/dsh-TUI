@@ -2,7 +2,7 @@
  * verify-launchpad-onboarding-chat — launchpad and onboarding flows through Chat.
  *
  * Covers overlays, draft submission, onboarding persistence, model/effort/preset/
- * permission selection, command completion and recovery mounting.
+ * permission selection, command completion, recovery mounting and image paste.
  *
  *   A. `/setup` 打开向导：落地页里敲 `/setup` 回车 → 向导盖在落地页之上；
  *      Esc 跳过**回到落地页**（第七版：不再收掉落地页落到对话页）。
@@ -30,7 +30,9 @@ process.env.FORCE_COLOR = '3'
 process.env.DSH_TUI_THEME = 'dark'
 process.env.DSH_TUI_LANG = 'zh'
 
-import { existsSync, mkdtempSync, readFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { pathToFileURL } from 'node:url'
+import type { ComposerImageRef, StagedImageInput } from '../adapter/ports/channel-view.js'
 import { join } from 'node:path'
 import { PassThrough, Writable } from 'node:stream'
 import React from 'react'
@@ -126,7 +128,11 @@ const plainText = (frames: readonly string[]) => frames.join('')
  * Mutable settings and subscriptions let picker changes redraw the screen.
  */
 function makeChannel(over: Record<string, unknown> = {}) {
+  // Texts for the assertions; the channel itself carries the contract's
+  // items, which expire (the landing page shows the newest in its Tips row).
   const notifications: string[] = []
+  const notificationItems: Array<{ id: number; text: string; timeoutMs: number }> = []
+  let notificationId = 0
   const calls: string[] = []
   const listeners: Array<() => void> = []
   const channel: Record<string, unknown> = {
@@ -155,7 +161,7 @@ function makeChannel(over: Record<string, unknown> = {}) {
     turnStart: 0,
     lastUserText: '',
     pending: [],
-    notifications,
+    notifications: notificationItems,
     // plan / permission 由 dsh-base 注册为 external 命令（选择器打开的前提）。
     commandList: [...LOCAL_COMMANDS, { name: 'plan', external: true }, { name: 'permission', external: true }],
     // 能力事实（端口新增：AgentCapabilities）：桩 channel 必须实现，否则
@@ -190,7 +196,20 @@ function makeChannel(over: Record<string, unknown> = {}) {
     steer() {},
     cancel() {},
     clear() {},
-    notify(text: string) { notifications.push(text) },
+    notify(text: string, options?: { timeoutMs?: number }) {
+      notifications.push(text)
+      const item = { id: notificationId++, text, timeoutMs: options?.timeoutMs ?? 4000 }
+      notificationItems.push(item)
+      bump()
+      if (item.timeoutMs > 0) {
+        setTimeout(() => {
+          const index = notificationItems.indexOf(item)
+          if (index !== -1) notificationItems.splice(index, 1)
+          bump()
+        }, item.timeoutMs).unref()
+      }
+      return () => undefined
+    },
     listModels: () => Promise.resolve([
       { provider: 'deepseek', id: 'deepseek-chat', name: 'deepseek-chat' },
       { provider: 'deepseek', id: 'deepseek-reasoner', name: 'deepseek-reasoner' },
@@ -618,8 +637,11 @@ const heroIdentical = (before: readonly string[], after: readonly string[]): boo
   await settled(() => chat.screen().includes(WIZARD_MARK))
   await chat.send('\u001b')
   await settled(() => chat.screen().includes('说点什么'))
-  check('E5 跳过之后落地页仍带首启 Tips 文案（没记账，下次还会问）',
-    chat.screen().includes('第一次用 dsh-TUI'), chat.screen().slice(0, 200))
+  // 落地页没有 toast 区：跳过提示先借 Tips 行显示（4s），过期后首启文案回来。
+  check('E5 跳过提示显示在落地页 Tips 行',
+    await settled(() => chat.screen().includes('已跳过首次引导')), chat.screen().slice(0, 200))
+  check('E5 提示过期后落地页仍带首启 Tips 文案（没记账，下次还会问）',
+    await settled(() => chat.screen().includes('第一次用 dsh-TUI'), { timeoutMs: 8000 }), chat.screen().slice(0, 200))
   await chat.unmount()
 }
 
@@ -1259,9 +1281,17 @@ const heroIdentical = (before: readonly string[], after: readonly string[]): boo
   // 桩口径与真机 claude 会话一致：backendCapabilities.backendId = 'claude'
   // （Chat 的 kernelCurrentId 只认这一处——右下角内核区的 ▸ 与入口名都跟着它）。
   const claudeCaps = { backendId: 'claude', backendLabel: 'Claude', commands: [] }
-  const chat = await mountChat({ launchpadOnBoot: true }, { backendCapabilities: claudeCaps })
+  // 真机 claude 会话的 listPresets 是拒绝桩（action-readiness 的
+  // 「当前内核不支持：preset」提示）：记下调用，Y1b 断言启动页不去碰它。
+  const presetReads: string[] = []
+  const chat = await mountChat({ launchpadOnBoot: true }, {
+    backendCapabilities: claudeCaps,
+    listPresets: async () => { presetReads.push('listPresets'); return [] },
+  })
   check('Y1 claude 内核全新启动先落启动页（Launchpad 盖在最上层）',
     await settled(() => chat.screen().includes('说点什么')), chat.screen().slice(0, 200))
+  check('Y1b 内核不提供 /preset 时启动页不预读 preset 名册（否则每次启动都弹不支持）',
+    presetReads.length === 0, JSON.stringify(presetReads))
   check('Y2 内核角标把 claude 记为当前内核（▸ 在 Claude 行，不在 DSH 行）',
     await settled(() => /▸\s*Claude/.test(chat.screen()) && !/▸\s*DSH/.test(chat.screen())),
     chat.screen().slice(-320))
@@ -1495,6 +1525,334 @@ const AC4_CUT_PRESET = 'Standard (Git Bash'
   } finally {
     applySidePanelOpen(previousOpen)
     applySidePanelPanels(previousPanels)
+  }
+}
+
+
+// ── Z. 启动页图片：真实粘贴输入、附件随首句提交与草稿生命周期 ──
+{
+  const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==', 'base64')
+  const imagePath = join(fakeHome, 'launchpad image.png')
+  writeFileSync(imagePath, png)
+  const pastePath = `\x1b[200~"${imagePath}"\x1b[201~`
+  const imageHarness = (waitForStage?: () => Promise<void>) => {
+    const staged = new Set<string>()
+    const discarded: string[] = []
+    const inputs: StagedImageInput[] = []
+    const submissions: { text: string; images: readonly ComposerImageRef[] }[] = []
+    const patch = {
+      stagedImageGeneration: () => 0,
+      stagedImageLimits: () => ({ maxImageBytes: 4096, maxImagesPerMessage: 2 }),
+      async stageComposerImage(input: StagedImageInput) {
+        inputs.push(input)
+        await waitForStage?.()
+        const stageId = `launchpad-stage-${inputs.length}`
+        staged.add(stageId)
+        return { stageId }
+      },
+      hasStagedImage: (stageId: string) => staged.has(stageId),
+      discardStagedImage(stageId: string) { staged.delete(stageId); discarded.push(stageId) },
+      submit(text: string, images: readonly ComposerImageRef[] = []) { submissions.push({ text, images }) },
+    }
+    return { patch, staged, discarded, inputs, submissions }
+  }
+  for (const fullscreen of [false, true]) {
+    for (const columns of [120, 48]) {
+      const fixture = imageHarness()
+      const chat = await mountChat({ launchpadOnBoot: true, columns }, fixture.patch, { fullscreen })
+      try {
+        await settle(() => chat.screen().includes('说点什么'))
+        await chat.type('描述')
+        await chat.send(pastePath)
+        check(`Z1[${fullscreen ? 'fullscreen' : 'inline'} ${columns}] 图片路径在启动页暂存，粘贴不自动提交`,
+          await settled(() => chat.screen().includes('[Image #1]')) && fixture.submissions.length === 0
+            && fixture.inputs.length === 1 && Buffer.from(fixture.inputs[0]!.data).equals(png), chat.screen())
+        if (columns === 120) {
+          for (let i = 0; i < 5; i++) await chat.send('\x1b[B')
+          await chat.send('\r')
+          check('Z2 带图片草稿可打开会话管理', await settled(() => chat.screen().includes('新建会话')), chat.screen())
+          await chat.send('\x1b')
+          check('Z3 返回启动页保留图片绑定', await settled(() => chat.screen().includes('[Image #1]')) && fixture.staged.size === 1, chat.screen())
+        }
+        await chat.type('图') // 返回后将焦点交还输入框。
+        await chat.send('\r')
+        check(`Z4[${fullscreen ? 'fullscreen' : 'inline'} ${columns}] 首句携带正确附件，仅提交一次`,
+          await settled(() => fixture.submissions.length === 1)
+            && fixture.submissions[0]!.text === '描述[Image #1] 图'
+            && fixture.submissions[0]!.images[0]?.stageId === 'launchpad-stage-1'
+            && fixture.submissions[0]!.images[0]?.token === '[Image #1]'
+            && fixture.staged.size === 1, JSON.stringify(fixture.submissions))
+      } finally { await chat.unmount() }
+    }
+  }
+  {
+    const fixture = imageHarness()
+    const chat = await mountChat({ launchpadOnBoot: true }, fixture.patch)
+    await chat.send(pastePath)
+    await settle(() => chat.screen().includes('[Image #1]'))
+    await chat.send('\x1b')
+    check('Z5 Esc 清空图片草稿并释放附件', await settled(() => fixture.staged.size === 0 && chat.screen().includes('说点什么')))
+    await chat.send(pastePath)
+    await settle(() => fixture.staged.size === 1)
+    await chat.unmount()
+    check('Z6 Chat 卸载释放未发送图片', fixture.staged.size === 0 && fixture.discarded.length === 2)
+  }
+  {
+    let releaseStage!: () => void
+    const stageWait = new Promise<void>(resolve => { releaseStage = resolve })
+    const fixture = imageHarness(() => stageWait)
+    const chat = await mountChat({ launchpadOnBoot: true }, fixture.patch)
+    await chat.type('待清空')
+    await chat.send(pastePath)
+    await settle(() => fixture.inputs.length === 1)
+    await chat.send('\x1b')
+    releaseStage()
+    check('Z7 在途图片不复活已清空草稿，完成后释放附件',
+      await settled(() => fixture.discarded.length === 1) && fixture.staged.size === 0 && !chat.screen().includes('[Image #1]'))
+    await chat.unmount()
+  }
+
+  for (const action of ['submit', 'switch', 'typing']) {
+    let releaseStage!: () => void
+    const stageWait = new Promise<void>(resolve => { releaseStage = resolve })
+    const fixture = imageHarness(() => stageWait)
+    const chat = await mountChat({ launchpadOnBoot: true }, fixture.patch)
+    try {
+      await chat.type('原文')
+      await chat.send(pastePath)
+      await settle(() => fixture.inputs.length === 1)
+      if (action === 'submit') await chat.send('\r')
+      else if (action === 'switch') {
+        chat.channel.agentBindingGeneration = 1
+        await (chat.channel.setEffort as (id: string) => Promise<boolean>)('max')
+      } else await chat.type('继续输入')
+      releaseStage()
+      if (action === 'typing') {
+        check('Z11 异步暂存期间的新文字保留，图片落在最新光标处',
+          await settled(() => chat.screen().includes('原文继续输入[Image #1]')))
+      } else {
+        check(`Z12[${action}] 提交或会话替换后，旧图片完成时释放且不插入`,
+          await settled(() => fixture.discarded.length === 1) && fixture.staged.size === 0
+            && (action !== 'submit' || (fixture.submissions.length === 1 && fixture.submissions[0]!.images.length === 0)))
+      }
+    } finally { releaseStage(); await chat.unmount() }
+  }
+  {
+    const fixture = imageHarness()
+    const chat = await mountChat({ launchpadOnBoot: true }, fixture.patch)
+    try {
+      await chat.send(pastePath)
+      await settle(() => chat.screen().includes('[Image #1]'))
+      await chat.send(pastePath)
+      check('Z13 连续粘贴图片按顺序绑定到不同占位符',
+        await settled(() => chat.screen().includes('[Image #1] [Image #2]')) && fixture.inputs.length === 2)
+      await chat.send(pastePath)
+      check('Z14 累计附件数达到上限后拒绝继续暂存',
+        await settled(() => chat.screen().includes('图片数量超过当前配置的单条消息上限')) && fixture.inputs.length === 2, chat.screen())
+    } finally { await chat.unmount() }
+  }
+
+  {
+    let releaseStage!: () => void
+    const stageWait = new Promise<void>(resolve => { releaseStage = resolve })
+    let stages = 0
+    const fixture = imageHarness(() => ++stages === 2 ? stageWait : Promise.resolve())
+    const chat = await mountChat({ launchpadOnBoot: true }, fixture.patch)
+    try {
+      await chat.type('/help ')
+      await chat.send(pastePath)
+      await settle(() => chat.screen().includes('[Image #1]'))
+      await chat.send(pastePath)
+      await settle(() => fixture.inputs.length === 2)
+      await chat.send('\r')
+      await settle(() => chat.screen().includes('/help 不接受图片；草稿已保留'))
+      releaseStage()
+      check('Z18 命令拒绝不取消同一草稿正在暂存的图片',
+        await settled(() => chat.screen().includes('/help [Image #1] [Image #2]'))
+          && fixture.staged.size === 2 && fixture.discarded.length === 0 && fixture.submissions.length === 0,
+        chat.screen())
+    } finally { releaseStage(); await chat.unmount() }
+  }
+  // 命令拒绝图片时，草稿仍可编辑并作为普通消息重新发送。
+  for (const name of ['help', 'plaincmd', 'deepseek']) {
+    const fixture = imageHarness()
+    const commandCalls: string[] = []
+    const chat = await mountChat({ launchpadOnBoot: true }, {
+      ...fixture.patch,
+      commandList: [...LOCAL_COMMANDS, { name: 'plaincmd', description: 'Fixture command without images', external: true }],
+      async runExternalCommandOutcome(command: string) {
+        commandCalls.push(command)
+        return { kind: 'success', text: '', consumeDraft: true }
+      },
+    })
+    try {
+      await chat.type(`/${name} `)
+      await chat.send(pastePath)
+      await settle(() => chat.screen().includes('[Image #1]'))
+      await chat.send('\r')
+      const refused = await settled(() => chat.screen().includes(`/${name} 不接受图片；草稿已保留`))
+      check(`Z15[${name}] 不接受图片的命令显示提示，并保留草稿和附件`,
+        refused && chat.screen().includes(`/${name} [Image #1]`)
+          && fixture.staged.size === 1 && fixture.discarded.length === 0
+          && fixture.submissions.length === 0 && commandCalls.length === 0
+          && !chat.screen().includes(HELP_MARK), chat.screen())
+      if (refused) {
+        await chat.send('\x1b[H')
+        for (let i = 0; i < name.length + 2; i++) await chat.send('\x1b[3~')
+        await chat.send('\r')
+        check(`Z16[${name}] 删除命令前缀后仍能提交原图片`,
+          await settled(() => fixture.submissions.length === 1)
+            && fixture.submissions[0]!.text === '[Image #1]'
+            && fixture.submissions[0]!.images[0]?.stageId === 'launchpad-stage-1',
+          JSON.stringify(fixture.submissions))
+      }
+    } finally { await chat.unmount() }
+  }
+  for (const route of ['external', 'skill', 'unknown']) {
+    const fixture = imageHarness()
+    const commandCalls: { name: string; input: string; images: readonly ComposerImageRef[] }[] = []
+    const descriptor = route === 'external'
+      ? { name: 'vision', description: 'Fixture image command', external: true, acceptsImages: true }
+      : { name: 'vision', description: 'Fixture model skill', skill: true }
+    const chat = await mountChat({ launchpadOnBoot: true }, {
+      ...fixture.patch,
+      commandList: route === 'unknown' ? LOCAL_COMMANDS : [...LOCAL_COMMANDS, descriptor],
+      async runExternalCommandOutcome(name: string, input: string, images: readonly ComposerImageRef[]) {
+        commandCalls.push({ name, input, images })
+        return { kind: 'success', text: '', consumeDraft: true }
+      },
+    })
+    try {
+      await chat.type('/vision ')
+      await chat.send(pastePath)
+      await settle(() => chat.screen().includes('[Image #1]'))
+      await chat.send('\r')
+      const delivered = route === 'external'
+        ? await settled(() => commandCalls.length === 1)
+          && commandCalls[0]!.name === 'vision' && commandCalls[0]!.input.trim() === '[Image #1]'
+          && commandCalls[0]!.images[0]?.stageId === 'launchpad-stage-1' && fixture.submissions.length === 0
+        : await settled(() => fixture.submissions.length === 1)
+          && fixture.submissions[0]!.text === '/vision [Image #1]'
+          && fixture.submissions[0]!.images[0]?.stageId === 'launchpad-stage-1' && commandCalls.length === 0
+      check(`Z17[${route}] 支持图片的命令及模型路由携带原附件发送`, delivered,
+        JSON.stringify({ commandCalls, submissions: fixture.submissions }))
+    } finally { await chat.unmount() }
+  }
+
+  for (const fullscreen of [false, true]) {
+    for (const columns of [120, 48]) {
+      const fixture = imageHarness()
+      const chat = await mountChat({ launchpadOnBoot: true, columns }, fixture.patch, { fullscreen })
+      const mode = `${fullscreen ? 'fullscreen' : 'inline'} ${columns}`
+      const prefix = '中😀 ' + (columns === 48 ? '字 '.repeat(18) : '')
+      const token = '[Image #1]'
+      // Match actual cells: xterm's default emoji width differs from stringWidth.
+      const findToken = (): { col: number; row: number } | null => {
+        const buffer = chat.term.buffer.active
+        for (let row = 0; row < chat.term.rows; row++) {
+          const line = buffer.getLine(buffer.baseY + row)
+          for (let col = 0; col <= chat.term.cols - token.length; col++) {
+            if (Array.from(token).every((char, i) => line?.getCell(col + i)?.getChars() === char)) {
+              return { col: col + 1, row: row + 1 }
+            }
+          }
+        }
+        return null
+      }
+      const cellAt = (pos: { col: number; row: number }, offset = 0) =>
+        chat.term.buffer.active.getLine(chat.term.buffer.active.baseY + pos.row - 1)?.getCell(pos.col - 1 + offset)
+      const caretAt = (pos: { col: number; row: number }, offset = 0) =>
+        chat.term.buffer.active.cursorX === pos.col - 1 + offset && chat.term.buffer.active.cursorY === pos.row - 1
+      const wholeInverse = (pos: { col: number; row: number }) =>
+        Array.from({ length: token.length }, (_, i) => (cellAt(pos, i)?.isInverse() ?? 0) !== 0).every(Boolean)
+      const paste = async () => {
+        await chat.send(pastePath)
+        if (!await settled(() => chat.screen().includes(token))) throw new Error('atomic image fixture did not stage')
+      }
+      try {
+        await chat.type(prefix)
+        await paste()
+        await chat.type('尾')
+        const pos = findToken()!
+        check(`Z19[${mode}] 图片 token 使用聊天页相同的 chip 颜色`,
+          cellAt(pos)?.getFgColor() !== cellAt(pos, -1)?.getFgColor() && !cellAt(pos)?.isFgDefault(), chat.screen())
+        await chat.send('\x1b[D')
+        await chat.send('\x1b[D')
+        check(`Z20[${mode}] 光标到图片末端时保持 token 完整`,
+          await settled(() => caretAt(findToken()!, token.length)), chat.screen())
+        await chat.send('\x1b[D')
+        check(`Z21[${mode}] ← 一次跨过图片，整段高亮`,
+          await settled(() => {
+            const current = findToken()
+            return current !== null && caretAt(current) && wholeInverse(current)
+          }), chat.screen())
+        await chat.send('\x1b[C')
+        check(`Z22[${mode}] → 一次跨到图片末端`,
+          await settled(() => caretAt(findToken()!, token.length)), chat.screen())
+        await chat.send('\x7f')
+        check(`Z23[${mode}] Backspace 删除整张图片并释放附件`,
+          await settled(() => !chat.screen().includes('Image #') && fixture.staged.size === 0 && fixture.discarded.length === 1), chat.screen())
+        await paste()
+        await chat.send('\x1b[D')
+        await chat.send('\x1b[D')
+        await chat.send('\x1b[3~')
+        check(`Z24[${mode}] Delete 删除整张图片并释放附件`,
+          await settled(() => !chat.screen().includes('Image #') && fixture.staged.size === 0 && fixture.discarded.length === 2), chat.screen())
+        await paste()
+        await chat.send('\x17')
+        check(`Z25[${mode}] Ctrl+W 不拆开图片 token`,
+          await settled(() => !chat.screen().includes('Image #') && fixture.staged.size === 0 && fixture.discarded.length === 3), chat.screen())
+        await chat.type('[Image #9]')
+        await chat.send('\x7f')
+        check(`Z26[${mode}] 没有附件绑定的字面 token 仍逐字编辑`,
+          await settled(() => chat.screen().includes('[Image #9') && !chat.screen().includes('[Image #9]')), chat.screen())
+        await chat.send('\r')
+        check(`Z27[${mode}] 普通文字保留，删除的图片不会随消息提交`,
+          await settled(() => fixture.submissions.length === 1)
+            && fixture.submissions[0]!.text.startsWith(prefix) && fixture.submissions[0]!.text.endsWith('尾')
+            && fixture.submissions[0]!.images.length === 0, JSON.stringify(fixture.submissions))
+      } finally { await chat.unmount() }
+    }
+  }
+  if (process.platform === 'linux') {
+    const stubDir = mkdtempSync(join(fakeHome, 'launchpad-clipboard-'))
+    const offerPath = join(stubDir, 'offer.json')
+    writeFileSync(join(stubDir, 'wl-paste'), `#!${process.execPath}\n` + `
+const fs = require('node:fs')
+const offer = JSON.parse(fs.readFileSync(${JSON.stringify(offerPath)}, 'utf8'))
+const mime = offer.kind === 'image' ? 'image/png' : 'text/uri-list'
+if (process.argv.includes('--version')) process.stdout.write('stub')
+else if (process.argv.includes('--list-types')) process.stdout.write(mime + '\\n')
+else process.stdout.write(offer.kind === 'image' ? Buffer.from(offer.png, 'base64') : offer.uris)
+`, { mode: 0o755 })
+    const savedEnv = { PATH: process.env.PATH, WAYLAND_DISPLAY: process.env.WAYLAND_DISPLAY, DISPLAY: process.env.DISPLAY }
+    process.env.PATH = stubDir
+    process.env.WAYLAND_DISPLAY = 'launchpad-test'
+    delete process.env.DISPLAY
+    try {
+      for (const kind of ['image', 'files']) {
+        writeFileSync(offerPath, JSON.stringify({ kind, png: png.toString('base64'), uris: pathToFileURL(imagePath).href + '\n' }))
+        const fixture = imageHarness()
+        const chat = await mountChat({ launchpadOnBoot: true }, fixture.patch)
+        try {
+          await settle(() => chat.screen().includes('说点什么'))
+          await chat.send('\x16')
+          check(`Z8[${kind}] Ctrl+V 在启动页附加图片`, await settled(() => chat.screen().includes('[Image #1]')) && fixture.submissions.length === 0, chat.screen())
+          if (kind === 'image') {
+            check('Z9 剪贴板位图暂存后删除临时文件', await settled(() => fixture.inputs.length === 1 && !existsSync(fixture.inputs[0]!.path!)))
+          }
+          await chat.send('\r')
+          check(`Z10[${kind}] 仅图片首句带附件提交`, await settled(() => fixture.submissions.length === 1)
+            && fixture.submissions[0]!.text === '[Image #1]' && fixture.submissions[0]!.images.length === 1, JSON.stringify(fixture.submissions))
+        } finally { await chat.unmount() }
+      }
+    } finally {
+      for (const [key, value] of Object.entries(savedEnv)) {
+        if (value === undefined) delete process.env[key]
+        else process.env[key] = value
+      }
+      rmSync(stubDir, { recursive: true, force: true })
+    }
   }
 }
 

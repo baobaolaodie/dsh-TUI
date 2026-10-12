@@ -64,10 +64,13 @@ side panel (`Ctrl+B`/`Alt+Z`), subagent dashboard, show-all, and todo fold are r
 - Plugins may also contribute one text line above the prompt, or a compact rich status view of up to three rows when the host exposes `tuiStatus.registerView`.
 - Rich views receive only host `Box`, `Text`, `Image`, and terminal size. Click/hover/drag work in fullscreen, and the view never owns the keyboard.
 - `Image` takes decoded RGBA pixels plus a same-size cell fallback.
-- After a successful Kitty probe, the host centers the image at its natural aspect ratio
-  using terminal-reported cell geometry (or a conservative default), adding transparent
-  letterboxing and downsampling when needed. Otherwise it renders the fallback (including
+- After a successful Kitty probe, the host enlarges or downsamples the image to the
+  reserved cell box's physical pixels, preserving its aspect ratio with centered transparent
+  letterboxing. It uses terminal-reported cell geometry (or a conservative default) and
+  downsamples boxes that exceed the pixel budget. Otherwise it renders the fallback (including
   inline, accessibility, and multiplexer sessions).
+- The 16 MiB frame budget bounds both decoded sources and fitted rasters;
+  images over the budget keep their text fallback.
 - Plugins provide the keyboard path for the same action through a slash command or `tuiShortcuts`.
 - A refused rich registration returns `undefined`; an admitted one returns a disposer that removes both the view and its Cordis effect.
 
@@ -130,10 +133,12 @@ results back to the chat screen and add no new behavior.
   `▸ DSH · dsh-core v<kernel>` / `Claude · claude-code v<CLI>` (then `Codex · codex-cli v<CLI>`, and any
   installed plugin backend after it). The name is the backend manifest's short label; `▸` marks the
   current kernel and the other rows stay dim; an unavailable kernel adds the reason after its version (such as *Not installed*
-  or *Not signed in*), a row whose version cannot be read shows just the name, and *Checking…* shows
-  while the probe runs. The whole block is clickable and opens the same kernel picker (keyboard path =
-  focus ring + `Enter`). Rows are right-aligned, the cwd plate is top-aligned to the first row, and
-  narrow terminals truncate per the existing truncate-middle contract.
+  or *Too old · upgrade needed*), a row whose version cannot be read shows just the name, and *Checking…* shows
+  while the probe runs. Sign-in state never enters the plate — check it in the picker when switching (a signed-out
+  row is selectable, its subtitle says *Not signed in*). The whole block is clickable
+  and opens the same kernel picker (keyboard path =
+  focus ring + `Enter`). Every row ends flush at the same right edge, the cwd plate is top-aligned to the
+  first row, and narrow terminals truncate per the existing truncate-middle contract.
 - **Wizard**: `←`/`→` change step (except the effort slider in step 3 and a drilled-in model list, where the
   horizontal keys belong to the child control), `Tab` switches between the language/theme and
   model/effort/workspace panes, `↑`/`↓` move the selection; `Enter` runs the step (step 1 = re-check
@@ -352,7 +357,7 @@ brings it back.
 
 | Key | Action |
 | --- | --- |
-| `←` `→` | Choose the column that owns the keyboard (rail / sessions); exactly one `❯` is on screen |
+| `←` `→` | Choose the column that owns the keyboard (rail / sessions), preserving the selected session in the same workspace; exactly one `❯` is on screen |
 | `↑` `↓` / `PgUp` `PgDn` / wheel | Move in the rail; move in the session list (row 0 is the new-session card) |
 | Type | Filter the selected workspace's sessions live (title, directory, branch, model) |
 | `Enter` | Sessions: enter the row under the cursor (row 0 = start a session in this workspace). Rail: open that workspace's action menu |
@@ -362,6 +367,10 @@ brings it back.
 | `Ctrl+L` | Re-read the workspace registry and the session listing |
 | `Tab` / `Shift+Tab` | Next / previous source tab (when other agents have sessions) |
 | `Esc` | Dismiss a notice → clear the filter → leave the screen |
+
+Each workspace starts on its most recent visible session, or the new-session card if it has no matches. Changing columns or moving the mouse into the list preserves the current selection. Changing workspace chooses that workspace's newest session; returning chooses the newest again, without remembering past selections per workspace. Until you choose a list row, partial results, complete reads, and later refreshes keep following the newest visible session. After you select a session or the new-session card, refreshes preserve that choice.
+
+The native cursor follows the last-used region, as in the model picker: workspace navigation parks it on the workspace row, session navigation on the session row or new-session card, and typing or clicking the filter on its text caret. Row carets hide after 0.5 seconds at rest; the search caret stays visible. Animation and trail effects come from your terminal settings. Narrow layouts keep the caret on a visible target when the workspace rail is hidden. Arrow and Enter actions keep the same meaning while filtering.
 
 The right side of the title row is the **source strip**: `DSH │ Claude Code  Codex …`.
 
@@ -404,15 +413,6 @@ composition) or a session's directory is **not registered**. The group lists and
 those sessions as usual — "no registration" is not "no history".
 
 - The group lives only inside this screen and is never written back to the registry.
-
-On a normal exit (`/exit`, `/quit`, `/q`, a double `Ctrl+C` while idle, `Ctrl+D`), the TUI
-removes sessions **no human has ever spoken in** — leftovers from earlier runs included —
-and, when anything was cleaned, reports the count in its exit notice.
-
-- Only that path sweeps: hand-offs (`/update`, kernel switch, `/restart`), crashes and
-  signal-driven exits leave sessions alone.
-- A session with any human message (even if its turn never started) and any sub-agent are
-  **never removed**.
 
 **Behaviour changes versus the old screens** (deliberately removed, and no longer covered by regressions):
 
@@ -816,7 +816,7 @@ The command menu merges local commands with the DSH command registry. Type `/` t
 - `/update`, `/vim` — vim editing mode toggle, see "Editing keys".
 - `/terminal-setup`, `/connect`, `/help`, `/exit` — aliases `/quit`, `/q`.
 - `/kernel` — opens the kernel picker (the current kernel is ticked; every row
-  carries a version and a one-line explanation), on DSH and Claude sessions alike.
+  carries a version and a one-line explanation), on DSH, Codex and Claude sessions alike.
   Picking the other kernel remembers it and restarts into it with a new session;
   the old session stays in `/resume`, and if the new session fails to start you
   are back on the old one. A running turn blocks the switch. The launchpad's
@@ -825,6 +825,11 @@ The command menu merges local commands with the DSH command registry. Type `/` t
   a later direct launch follows the flag. A fresh launch lands on the launchpad
   whichever kernel is remembered; a launch with a resume target goes straight
   into the session.
+- `/dsh`, `/codex`, `/claude` — directly choose the named kernel through the same
+  checks and restart flow as `/kernel`. Choosing the current kernel only reports
+  that it is already current; a running turn blocks switching. Missing Claude
+  opens the install wizard; missing or outdated Codex shows install/upgrade guidance.
+  These shortcuts also work before startup is ready.
 
 **Registry**
 

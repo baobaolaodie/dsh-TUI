@@ -4,19 +4,25 @@ import { appendFileSync, chmodSync, copyFileSync, existsSync, lstatSync, mkdirSy
 import { homedir } from 'node:os'
 import { dirname, join, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { gte, gt, lt, valid } from 'semver'
+// Per-function imports: this file loads before the first frame.
+import gt from 'semver/functions/gt.js'
+import gte from 'semver/functions/gte.js'
+import lt from 'semver/functions/lt.js'
+import valid from 'semver/functions/valid.js'
 import { shellQuote } from './utils/shellQuote.js'
 import { DATA_DIR } from './utils/paths.js'
 import { stripResumeArgs } from './sessionHistory.js'
-import { KERNEL_SWITCH_HANDOFF_ENV, RESUME_BACKEND_ENV, RESUME_RETRY_ENV, parseBackendId, type KernelBackendId } from './kernelPrefs.js'
+import { HOST_ENTRY_PATH_ENV, KERNEL_SWITCH_HANDOFF_ENV, RESUME_BACKEND_ENV, RESUME_RETRY_ENV, hostEntryDisabled, parseBackendId, type KernelBackendId } from './kernelPrefs.js'
 import { classifyReplacementOutcome, formatHandoffNotice, handoffEventTag, writeHandoffStage } from './handoffEvents.js'
 import { HANDOFF_ACK_FD_ENV, HANDOFF_ATTEMPT_ENV, HANDOFF_SCREEN_ENV, parseHandoffAckLine } from './handoffAck.js'
 import { DISABLE_KITTY_KEYBOARD, DISABLE_MODIFY_OTHER_KEYS, DISABLE_WIN32_INPUT_MODE } from './ink/termio/csi.js'
 import { DBP, DFE, DISABLE_MOUSE_TRACKING, EXIT_ALT_SCREEN, SHOW_CURSOR } from './ink/termio/dec.js'
+import { detachHandoffStdin } from './ink/stdin-handoff.js'
 
 // Re-exported for scripts/verify-update.mjs and the bin launcher, which reads
 // the compiled copy at lib/types/utils/shellQuote.js.
 export { shellQuote }
+export { detachHandoffStdin }
 
 const PACKAGE_NAME = '@deepseek-harness-tui/dsh-tui'
 const DEFAULT_REGISTRY = 'https://registry.npmjs.org'
@@ -41,6 +47,13 @@ const UPDATED_FROM_ENV = 'DSH_TUI_UPDATED_FROM'
  * (ordinary launches stay silent, so the file is restart-only evidence).
  */
 const RESTART_CHILD_ENV = 'DSH_TUI_RESTART_CHILD'
+
+/**
+ * env marker on every replacement (/restart, /update, kernel switch): it is
+ * started with the original app arguments, so a command-line prompt in them
+ * was already sent by the first process and must not be sent again.
+ */
+export const LAUNCH_PROMPT_SENT_ENV = 'DSH_TUI_LAUNCH_PROMPT_SENT'
 
 /**
  * Field-diagnosis log for the /restart terminal handoff, appended by BOTH
@@ -995,6 +1008,9 @@ export async function resolveTuiUpdateTarget(): Promise<TuiUpdateTarget> {
  * or blocks the interactive TUI.
  */
 export async function checkForTuiUpdate(): Promise<TuiUpdateInfo | undefined> {
+  // Callers start this during the first render; the first `fetch()` loads
+  // undici synchronously, so yield first and let that cost land after the frame.
+  await new Promise<void>(resolve => setImmediate(resolve))
   const target = await resolveTuiUpdateTarget()
   return target.kind === 'update'
     ? {
@@ -1915,6 +1931,8 @@ export async function updateTuiAndRestart(
   profile: string,
   targetVersion?: string,
   kernel?: KernelBackendId,
+  /** The standalone entry's supervision hooks (TuiRestartOptions.onSpawn / onTerminationSignal). */
+  supervision: Pick<TuiRestartOptions, 'onSpawn' | 'onTerminationSignal'> = {},
 ): Promise<TuiUpdateResult> {
   const outcome = await updateTui(profile, targetVersion)
   const { updatedFrom } = outcome
@@ -1931,6 +1949,7 @@ export async function updateTuiAndRestart(
     env: { [UPDATED_FROM_ENV]: updatedFrom },
     kind: 'update',
     ...(kernel === undefined ? {} : { kernel }),
+    ...supervision,
   })
   return { updateCode: 0, restartCode }
 }
@@ -2002,36 +2021,6 @@ export async function cliUpdate(profile: string): Promise<number> {
     }
   }
   return outcome.code
-}
-
-/**
- * Release the shared console for the replacement without resetting it.
- *
- * A pty's termios is per-DEVICE: destroying this stream would write this
- * process's saved cooked/ECHO mode back over the replacement's raw mode
- * (libuv restores orig_termios on tty close; verified on Node 24 — mouse
- * reports then echo as `^[[<…M` and keys wait for a newline). Detaching —
- * no readers, paused, unref'd — keeps the mode untouched.
- *
- * Two deliberate trade-offs vs the old destroy():
- * - destroy() doubled as a permanent gate ("a destroyed stream can never be
- *   resumed"). Readers removed + paused already keep this process out of the
- *   console's key path (#284/#307), and after the handoff only the
- *   child-exit listener remains here — nothing re-attaches a reader.
- * - On exit Node still writes the saved cooked mode back once (atexit
- *   uv_tty_reset_mode). Fine in the normal order — this process outlives the
- *   replacement, and the shell wants cooked back anyway; it only bites if
- *   this process dies while the replacement is still running.
- *
- * @param stdin - Console stream to detach; injectable for the regression.
- */
-export function detachHandoffStdin(
-  stdin: Pick<NodeJS.ReadStream, 'removeAllListeners' | 'pause' | 'unref'> = process.stdin,
-): void {
-  stdin.removeAllListeners('readable')
-  stdin.removeAllListeners('data')
-  stdin.pause()
-  stdin.unref()
 }
 
 /**
@@ -2114,6 +2103,14 @@ export interface TuiRestartOptions {
    * (as it does after a kernel switch). Ignored when `backend` is set.
    */
   kernel?: KernelBackendId
+  /** The replacement was spawned (the standalone entry forwards SIGTERM to it). */
+  onSpawn?: (child: { kill(signal: NodeJS.Signals): boolean }) => void
+  /**
+   * The replacement ended by a signal: called before any outcome notice, so a
+   * standalone-entry supervisor can end by the same signal. Returning normally
+   * continues with the usual outcome handling.
+   */
+  onTerminationSignal?: (signal: NodeJS.Signals) => void
 }
 
 /**
@@ -2135,6 +2132,7 @@ export function restartChildEnv(
     // Marks the replacement so its own boot logs to restart.log without
     // noisy logging on every ordinary launch (/restart only).
     ...(kind === 'restart' ? { [RESTART_CHILD_ENV]: '1' } : {}),
+    [LAUNCH_PROMPT_SENT_ENV]: '1',
     ...options.env,
   }
   // The Config schema preserves '', so an absent session must be represented
@@ -2177,14 +2175,43 @@ export function restartChildEnv(
   return childEnv
 }
 
+/**
+ * The replacement's argv after `process.execPath`, pure: the same script and
+ * arguments again, except that a replacement started outside the entry goes
+ * to `hostEntry` with the app arguments (the entry hosts every kernel).
+ */
+export function restartArgv(input: {
+  readonly execArgv: readonly string[]
+  readonly argv: readonly string[]
+  /** Whether this is a kernel switch (resume flags are dropped). */
+  readonly switching: boolean
+  /** The replacement opens a fresh session (no session id to hand over, e.g.
+   *  after /new): inherited resume flags name the previous one and are dropped. */
+  readonly fresh?: boolean
+  readonly hostEntry: string | undefined
+}): string[] {
+  const strip = (args: readonly string[]): string[] => input.switching || input.fresh === true ? stripResumeArgs(args) : [...args]
+  const script = input.argv[1]
+  if (input.hostEntry !== undefined && script !== input.hostEntry) {
+    // The app arguments: everything after dsh's own `--`.
+    const separator = input.argv.indexOf('--', 2)
+    const appArgs = separator === -1 ? [] : input.argv.slice(separator + 1)
+    return [...input.execArgv, input.hostEntry, ...strip(appArgs)]
+  }
+  return [...input.execArgv, ...strip(input.argv.slice(1))]
+}
+
 export async function restartTui(sessionId: string, options: TuiRestartOptions = {}): Promise<number> {
   const kind = options.kind ?? 'restart'
   const tag = options.backend !== undefined ? 'backend-switch' : kind === 'update' ? 'update-restart' : 'restart'
-  // A fresh replacement must not inherit resume flags from the original
-  // launch: after /new they name the previous session, and after a kernel
-  // switch they name a session of the previous backend.
-  const appArgs = process.argv.slice(1)
-  const argv = [...process.execArgv, ...(options.backend === undefined && sessionId !== '' ? appArgs : stripResumeArgs(appArgs))]
+  const hostEntry = process.env[HOST_ENTRY_PATH_ENV]
+  const argv = restartArgv({
+    execArgv: process.execArgv,
+    argv: process.argv,
+    switching: options.backend !== undefined,
+    fresh: sessionId === '',
+    hostEntry: hostEntry === undefined || hostEntry === '' || hostEntryDisabled() ? undefined : hostEntry,
+  })
   logRestartEvent(`${tag}: spawning replacement`, {
     node: process.execPath,
     argv,
@@ -2224,6 +2251,9 @@ export async function restartTui(sessionId: string, options: TuiRestartOptions =
       childEnv[HANDOFF_ATTEMPT_ENV] = attemptId!
       logRestartEvent('handoff: alt-screen bracket held for the replacement', { attemptId })
     }
+    // Reassert after root disposal: even a late drain must not restart the
+    // parent's native stdin read before the replacement probes the terminal.
+    detachHandoffStdin()
     const child = spawn(process.execPath, argv, {
       env: childEnv,
       // stdin/stdout stay inherited so the replacement owns the console the
@@ -2274,6 +2304,7 @@ export async function restartTui(sessionId: string, options: TuiRestartOptions =
       ackWatch.unref()
     }
     logRestartEvent(`${tag}: replacement spawned`, { childPid: child.pid, ...(options.backend === undefined ? {} : { backend: options.backend }) })
+    options.onSpawn?.(child)
     // Handoff watchdog (field evidence 2026-08-24: restarted TUI mounts but
     // takes no input). Two jobs, both diagnosis-grade:
     // 1. SAMPLE this process's stdin state every second — if anything
@@ -2358,6 +2389,12 @@ export async function restartTui(sessionId: string, options: TuiRestartOptions =
         signal: signal ?? null,
         elapsedMs,
       })
+      // A replacement that took the screen over and died by a signal: the hook
+      // may end this process by that signal. Before a handoff's first frame this
+      // process still holds the screen, so the failure path below restores it.
+      if (signal !== null && options.onTerminationSignal !== undefined && (!handoff || ackReadyAt !== undefined)) {
+        options.onTerminationSignal(signal)
+      }
       if (options.backend !== undefined) {
         // Kernel switch outcome: success is quiet (restart.log only), a
         // replacement that never came up is a yellow failure with the session

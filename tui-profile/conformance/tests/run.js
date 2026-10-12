@@ -155,11 +155,25 @@ for (const [name, relative, schema, semanticCheck, expected] of [
   assert.equal(duplicateRefused, true, 'duplicate Backend coordinate is refused')
 }
 for (const [name, relative, expected] of [
-  ['valid Backend contribution', 'conformance/fixtures/valid-backend-contribution.json', true],
-  ['Backend unknown field rejected', 'conformance/fixtures/invalid-backend-unknown-field.json', false],
+  ['valid Backend contribution (SDK peer shape: install recipe + pool hook)', 'conformance/fixtures/valid-backend-contribution.json', true],
+  // The second shape, on purpose: a backend that drives a system CLI declares **no** install
+  // recipe ("the user's own binary is the dependency") while still owning a process-level pool.
+  // "Nothing for the host to add" is a first-class declaration, not a missing field.
+  ['valid Backend contribution (system CLI shape: no install recipe, pool hook)', 'conformance/fixtures/valid-backend-contribution-cli.json', true],
+  // The second implemented confirmation policy value: `trusted-source` asks for the host's own
+  // source judgment and is honored only when that judgment holds — declaring it is a request,
+  // never a self-granted exemption (see the definition comment).
+  ['valid Backend contribution (confirmation policy: trusted-source)', 'conformance/fixtures/valid-backend-contribution-trusted.json', true],
+  // This is the nativeKey refusal the roadmap names (§4.7 / §6 item 7): the fixture's shape is
+  // "unknown field", and the refusal it produces names `nativeKey` verbatim
+  // (`Backend content contains unknown field "nativeKey"`) — see notes 0009.
+  ['Backend native channel rejected (unknown field)', 'conformance/fixtures/invalid-backend-unknown-field.json', false],
   ['Backend bad id rejected', 'conformance/fixtures/invalid-backend-bad-id.json', false],
   ['Backend host label key rejected', 'conformance/fixtures/invalid-backend-key-label.json', false],
   ['Backend capability shape rejected', 'conformance/fixtures/invalid-backend-capability-shape.json', false],
+  ['Backend install recipe incomplete rejected', 'conformance/fixtures/invalid-backend-install-incomplete.json', false],
+  ['Backend confirmation policy rejected', 'conformance/fixtures/invalid-backend-confirmation-policy.json', false],
+  ['Backend grants shape rejected', 'conformance/fixtures/invalid-backend-grants-shape.json', false],
 ]) {
   const result = validate(name, undefined, undefined, () => parseAndValidateManifest(relative))
   assert.equal(result.pass, expected, `${name}: ${result.error ?? `expected pass=${expected}`}`)
@@ -199,6 +213,10 @@ for (const [name, relative, expected] of [
   assert.equal(broken.pass, false, 'Backend handler missing open() must be refused')
   cases.push(broken)
   assert.equal(BACKEND_CONFIRMATION_POLICIES.includes('confirm'), true, 'confirm stays the reserved default policy')
+  // The vocabulary only grows (the freeze's "additive, not breaking"): pinning the whole list here
+  // means removing a value — or adding one without telling the reference suite — is a deliberate act.
+  assert.deepEqual([...BACKEND_CONFIRMATION_POLICIES], ['confirm', 'trusted-source'],
+    'the implemented confirmation policies are confirm and trusted-source')
   // The reserved ids are vocabulary, not shape: the host refuses a *contribution*
   // wearing one at admission (`BACKEND_ID_RESERVED`), while its own seed — the
   // bundled backends — legitimately carries them. Publishing the list here is what

@@ -73,12 +73,12 @@ import type { TimelineSnapshot } from '../ink/timeline-rail.js'
 import { normalizeScrollGutter } from '../tuiDisplayPrefs.js'
 import { OverlayAbove } from '../components/OverlayAbove.js'
 import { TooltipLayer } from '../components/Tooltip.js'
-import { PromptInput, type PromptController } from '../components/PromptInput.js'
+import { PromptInput, composerImageRefsForText, type PromptController } from '../components/PromptInput.js'
 import { turnUsageParts } from '../components/TurnUsageRow.js'
 import { AgentTranscriptScene } from './AgentTranscriptScene.js'
 import { agentViewStore } from '../components/sidePanel/agentViewStore.js'
 import { agentComposeTargetOf, type AgentComposeTarget, type AgentMessageView, type AgentViewSource } from '../components/messages/agentTeam.js'
-import type { PromptDraftCache } from '../components/promptDraftCache.js'
+import { resolveBindingGeneration, type PromptDraftCache } from '../components/promptDraftCache.js'
 import type { InjectController } from '../dsh-adapter/inject-channel.js'
 import { PromptEditorLayer, usePromptEditorOpen } from '../components/PromptEditor.js'
 import { GoalTodoPanel } from '../components/GoalTodoPanel.js'
@@ -162,7 +162,7 @@ import { Launchpad, launchpadVisible, type LaunchpadAction } from './Launchpad.j
 import { resolveLaunchpadActions } from '../components/launchpadActions.js'
 import { Onboarding } from './Onboarding.js'
 import { appendHistory } from '../history.js'
-import { isHiddenCommandName, isLocalCommandName, parseCommandName } from '../commands.js'
+import { isBootSafeCommand, isHiddenCommandName, isLocalCommandName, isUnavailableLocalCommand, parseCommandName } from '../commands.js'
 import { extendTrajectory, projectWave, type TrajBuild } from '../dsh-adapter/trajectory/index.js'
 import { miniWakeWidth } from '../components/trajectory/MiniWake.js'
 import { readTrajectorySeen, writeTrajectorySeen } from '../trajectoryPrefs.js'
@@ -738,8 +738,16 @@ export function Chat({
   // 整屏」，浏览器必须提前藏在下面；现在整屏（会话/设置/任务面板）盖在
   // 落地页**之上**、Esc 退回落地页，按需打开即可——boot 时同时为真反而会
   // 让浏览器盖住落地页（渲染顺序见各 early-return）。恢复重挂同样不开它。
+  // A channel still starting its session (in-process DSH kernel) holds the two
+  // DSH boot screens (home, guide) until `ready`; the effect after
+  // `settingsOpen` opens them then.
+  const heldBootScreensRef = React.useRef(
+    channel.ready === false && !recoveryRemountOnBoot
+      ? { home: openHomeOnBoot === true && launchpadOnBoot !== true, onboarding: onboardingOnBoot === true }
+      : undefined,
+  )
   const [supervisorOpen, setSupervisorOpen] = React.useState(
-    openHomeOnBoot === true && launchpadOnBoot !== true && !recoveryRemountOnBoot,
+    openHomeOnBoot === true && launchpadOnBoot !== true && !recoveryRemountOnBoot && channel.ready !== false,
   )
   /**
    * The launchpad: the landing page every ordinary launch starts on.
@@ -758,6 +766,37 @@ export function Chat({
   const [launchpadDraft, setLaunchpadDraft] = React.useState('')
   const [launchpadCaret, setLaunchpadCaret] = React.useState(0)
   const [launchpadFocus, setLaunchpadFocus] = React.useState(-1)
+  const launchpadImagesRef = React.useRef(new Map<string, string>())
+  const changeLaunchpadDraft = (text: string, cursor: number): void => {
+    const live = new Set(composerImageRefsForText(text, launchpadImagesRef.current).map(image => image.token))
+    for (const [token, stageId] of launchpadImagesRef.current) {
+      if (live.has(token)) continue
+      launchpadImagesRef.current.delete(token)
+      channel.discardStagedImage(stageId)
+    }
+    setLaunchpadDraft(text)
+    setLaunchpadCaret(cursor)
+  }
+  const launchpadBindingGeneration = resolveBindingGeneration(channel)
+  // Capture the image epoch with each session binding. Automatic startup keeps
+  // it; explicit replacement revokes it before publishing the new binding.
+  const composerImageGeneration = channel.stagedImageGeneration?.() ?? 0
+  const launchpadSessionRef = React.useRef({ id: channel.agentId, imageGeneration: composerImageGeneration })
+  const discardLaunchpadImages = (): void => {
+    for (const stageId of launchpadImagesRef.current.values()) channel.discardStagedImage(stageId)
+    launchpadImagesRef.current.clear()
+  }
+  // Lifetime cleanup is separate from binding changes: startup adoption keeps
+  // the same draft, including the capabilities behind its image tokens.
+  React.useEffect(() => discardLaunchpadImages, [channel])
+  React.useEffect(() => {
+    const previous = launchpadSessionRef.current
+    launchpadSessionRef.current = { id: channel.agentId, imageGeneration: composerImageGeneration }
+    if (previous.id === '' && channel.agentId !== '' && previous.imageGeneration === composerImageGeneration) return
+    setLaunchpadDraft('')
+    setLaunchpadCaret(0)
+    discardLaunchpadImages()
+  }, [channel, channel.agentId, launchpadBindingGeneration])
   /**
    * 「整屏盖启动页」的显式授权（第七版防御位，用户实测回归：启动页一闪而过
    * 被顶掉）。整屏分支排在落地页**之前**，任何一处状态在开机后被异步置真
@@ -801,7 +840,7 @@ export function Chat({
    * "点了没反应"，状态还滞留着、等界面关掉才突然弹出来。默认收，白名单只留给覆盖层。
    */
   const overlayCommandNames = React.useMemo(
-    () => new Set(['model', 'effort', 'plan', 'preset', 'permission', 'kernel']),
+    () => new Set(['model', 'effort', 'plan', 'preset', 'permission', 'kernel', 'dsh', 'codex', 'claude']),
     [],
   )
   /**
@@ -831,7 +870,7 @@ export function Chat({
     }).catch(() => undefined)
   }, [launchpadShown])
   const canInstallSdk = onResolveSdkInstall !== undefined
-  const { currentId: kernelCurrentId, options: kernelOptions, open: openKernelPicker, pick: pickKernel, reprobe: reprobeKernels } = useKernelPicker({
+  const { currentId: kernelCurrentId, options: kernelOptions, open: openKernelPicker, pick: pickKernel, pickById: pickKernelById, reprobe: reprobeKernels } = useKernelPicker({
     channel, kernelVersion, kernelEntries, launchpadShown, onProbeKernels, onSwitchBackend, canInstallSdk, dispatchOverlay,
   })
   /** 当前内核那一行：短名给落地页入口、PromptInput 的不可用提示等消费（同源，
@@ -926,7 +965,7 @@ export function Chat({
    * The first-run guide. Renders above the launchpad (see the prop docs): a
    * launch that needs setup has not answered the launchpad's question yet.
    */
-  const [onboardingOpen, setOnboardingOpen] = React.useState(onboardingOnBoot === true && !recoveryRemountOnBoot)
+  const [onboardingOpen, setOnboardingOpen] = React.useState(onboardingOnBoot === true && !recoveryRemountOnBoot && channel.ready !== false)
   /**
    * 落地页那条"第一次用？跑一遍引导"的横幅认的是**还欠一次引导**，而不是启动快照：
    * 完成（写进 onboarding.json）之后立刻收掉；跳过刻意保留——没记账，下次启动还会问，
@@ -990,6 +1029,24 @@ export function Chat({
    *  browser, a screen rather than a panel: it owns its own focus, staged
    *  drafts and keyboard; Chat only opens it. */
   const [settingsOpen, setSettingsOpen] = React.useState(false)
+  // The held boot screens open once the session is adopted, unless the user
+  // went to another screen; a failed startup never opens them.
+  const channelReady = channel.ready
+  const channelStartupFailed = channel.startupFailure !== undefined
+  React.useEffect(() => {
+    const held = heldBootScreensRef.current
+    if (held === undefined) return
+    // A later `/new` that adopts a session must not open them over the chat.
+    if (channelStartupFailed) {
+      heldBootScreensRef.current = undefined
+      return
+    }
+    if (channelReady === false) return
+    heldBootScreensRef.current = undefined
+    if (settingsOpen || treeOpen) return
+    if (held.onboarding) setOnboardingOpen(true)
+    if (held.home) setSupervisorOpen(true)
+  }, [channelReady, channelStartupFailed, settingsOpen, treeOpen])
   /** 99h / 999 次的"求 star"开屏弹窗（`usageStats` 记账，一档只弹一次）：
    * 只在启动时判定一次——回合进行中、或已有整屏界面在开（如开机首页），
    * 这一轮不弹也**不记账**，留给下一次启动。`starPrompt` 是测试缝：传
@@ -1025,7 +1082,14 @@ export function Chat({
     // 让开屏先画半秒：弹窗压在介绍动画之上，而不是同抢第一帧。
     const timer = setTimeout(() => {
       // 到点时回合已经开始的仍不弹（channel 是活对象，读到的是当前值）。
-      if (channel.working) return
+      // /restart、/kernel 的旧进程不卸这棵树，channel 生命周期结束后读它会抛：读不到就不弹。
+      let working: boolean
+      try {
+        working = channel.working
+      } catch {
+        return
+      }
+      if (working) return
       if (starModalPreview) {
         const preview = STAR_MILESTONES.findIndex(milestone => milestone.hours === 99)
         if (preview >= 0) setStarModal({ index: preview, phase: 'ask' })
@@ -1141,14 +1205,18 @@ export function Chat({
    * （Standard/PTC/极简…），名册是异步的——落地页出来时顺手预热一次
    * （空名册不写；失败静默，段缺省不画）。/preset 自己的加载路径不动。
    */
+  // No roster to ask on a placeholder still starting, nor on a kernel without
+  // /preset (the refusal would land as a "not supported" notice).
+  const presetsReady = channel.ready !== false
+  const presetsServed = !isUnavailableLocalCommand('preset', channel.backendCapabilities as Channel['backendCapabilities'] | undefined)
   React.useEffect(() => {
-    if (!launchpadShown || presetOptions.length > 0) return
+    if (!launchpadShown || presetOptions.length > 0 || !presetsReady || !presetsServed) return
     let cancelled = false
     channel.listPresets()
       .then(list => { if (!cancelled && list.length > 0) setPresetOptions(list) })
       .catch(() => {})
     return () => { cancelled = true }
-  }, [launchpadShown, presetOptions.length, channel])
+  }, [launchpadShown, presetOptions.length, channel, presetsReady, presetsServed])
   /** `/effort` adapter levels: load async before the slider opens. */
   const [effortOptions, setEffortOptions] = React.useState<readonly EffortOption[]>([])
   /** True when those levels are the CLI-standard compatibility ladder (the
@@ -1944,8 +2012,9 @@ export function Chat({
     }
   }, [])
   const draftSessionId = channel.agentId
-  /** Session the effect below last reconciled against; a change is a switch. */
-  const draftSessionRef = React.useRef(draftSessionId)
+  const draftBindingGeneration = resolveBindingGeneration(channel)
+  /** Last reconciled binding; its image epoch distinguishes adoption from replacement. */
+  const draftSessionRef = React.useRef({ id: draftSessionId, generation: draftBindingGeneration, imageGeneration: composerImageGeneration })
   /**
    * The session a fill Chat itself requested belongs to, if one is in flight.
    *
@@ -1971,8 +2040,22 @@ export function Chat({
    * answered by the snapshot's owner fields.
    */
   React.useLayoutEffect(() => {
-    if (draftSessionRef.current === draftSessionId) return
-    draftSessionRef.current = draftSessionId
+    const previous = draftSessionRef.current
+    draftSessionRef.current = { id: draftSessionId, generation: draftBindingGeneration, imageGeneration: composerImageGeneration }
+    if (previous.id === draftSessionId) return
+    if (previous.id === '' && previous.imageGeneration === composerImageGeneration) {
+      // Startup adoption gives the existing draft its first conversation.
+      // A covered composer has parked that draft in the owner slot instead.
+      const snapshot = promptDraftRef.current.current
+      if (snapshot?.ownerAgentId === '' && snapshot.bindingGeneration === previous.generation) {
+        promptDraftRef.current.current = {
+          ...snapshot,
+          ownerAgentId: String(draftSessionId),
+          bindingGeneration: draftBindingGeneration,
+        }
+      }
+      return
+    }
     // A stored draft can only belong to the conversation being replaced: the
     // composer is the one that writes it, and it writes it on the way out.
     promptDraftRef.current.current = null
@@ -1981,7 +2064,7 @@ export function Chat({
       return
     }
     promptControllerRef.current?.clear()
-  }, [draftSessionId])
+  }, [draftSessionId, draftBindingGeneration])
   const previewGallery = activePreview === null ? [] : activePreview.peek
     ? promptControllerRef.current?.previewImages?.() ?? [activePreview]
     : overlay.kind === 'image-preview' ? overlay.gallery ?? [activePreview] : []
@@ -2014,7 +2097,7 @@ export function Chat({
         const controller = promptControllerRef.current
         if (!controller) return
         const text = controller.append('').trim()
-        if (text === '') return
+        if (text === '' || refusedAtStartup(undefined)) return
         channel.submit(text)
         controller.clear()
         channel.notify(
@@ -2449,13 +2532,22 @@ export function Chat({
     })()
   }
 
+  /** Not-ready refusal (`ChannelUi.ready`) for paths that bypass the composer:
+   *  true, after a notice, when `name` (undefined: plain text) must wait. */
+  const refusedAtStartup = (name: string | undefined): boolean => {
+    if (channel.ready !== false || (name !== undefined && isBootSafeCommand(name))) return false
+    channel.notify(t('startup-not-ready', { backend: kernelCurrentOption?.shortLabel ?? channel.backendCapabilities.backendId }), { color: 'warning', timeoutMs: 2500 })
+    return true
+  }
+
   /**
    * Submit launchpad input or a selected command through the chat routes.
    *
    * THREE cases, and they are genuinely different:
    *
    *   - a slash command → `runCommand`, the same dispatch a typed command
-   *     takes in the composer. The line is NOT submitted to the model.
+   *     takes in the composer. Completion-only filesystem skills keep
+   *     the composer's model route.
    *     Recognition is the composer's OWN rule (第六版 BUG 1 修复): the merged
    *     command list (locals + plugin/registry commands via channel.commandList)
    *     decides whether the line is a command — isLocalCommandName alone missed
@@ -2473,8 +2565,26 @@ export function Chat({
    * History is appended for the two non-empty cases (matching what PromptInput
    * does on submit) so the launchpad's first line is reachable with ↑ later.
    */
-  const submitLaunchpad = (submit: string): void => {
+  const submitLaunchpad = (submit: string): string | void => {
     const text = submit.trim()
+    const parsed = text.startsWith('/') ? parseCommandName(text) : undefined
+    // Refused BEFORE the page closes, so the draft stays on it.
+    if (text !== '' && refusedAtStartup(parsed?.name)) return
+    const images = composerImageRefsForText(text, launchpadImagesRef.current)
+    const command = parsed === undefined ? undefined : channel.commandList.find(entry => entry.name === parsed.name)
+    const knownCommand = parsed !== undefined && (
+      isLocalCommandName(parsed.name) || isHiddenCommandName(parsed.name) || command !== undefined
+    )
+    const modelRoutedSkill = command?.skill === true && command.external !== true
+    // Match the composer's image admission before consuming the draft.
+    if (knownCommand && images.length > 0 && !modelRoutedSkill && command?.acceptsImages !== true) {
+      return t('command-images-unsupported', { name: parsed.name })
+    }
+    const submitted = new Set(images.map(image => image.stageId))
+    for (const stageId of launchpadImagesRef.current.values()) {
+      if (!submitted.has(stageId)) channel.discardStagedImage(stageId)
+    }
+    launchpadImagesRef.current.clear()
     // 首启时 openHomeOnBoot 与落地页同时为真：会话浏览器已经开着、只是被落地页盖住。
     // 提交首句后必须把它收掉，否则用户落到浏览器而不是"草稿就在眼前的对话"，
     // 与本函数 doc 承诺的落点直接矛盾。
@@ -2487,7 +2597,6 @@ export function Chat({
       return
     }
     void appendHistory(text)
-    const parsed = text.startsWith('/') ? parseCommandName(text) : undefined
     // 第八版：/help 在落地页上也是盖屏浮层（补全面板被 Esc 收掉后直接
     // Enter 的那条路）——不收落地页、不进对话页。聊天页里 /help 的行为
     // 不变（那边不走这个回调）。
@@ -2497,26 +2606,47 @@ export function Chat({
     }
     // 与 composer 的 tryRunCommand 同一条判定：合并命令表（LOCAL_COMMANDS +
     // channel.commandList 的插件/registry 命令）里有名字才是命令；hidden
-    // 命令照旧认。判定之外的 / 开头行才走 submit（与聊天页 Enter 行为一致）。
-    if (parsed !== undefined && (
-      isLocalCommandName(parsed.name)
-      || isHiddenCommandName(parsed.name)
-      || channel.commandList.some(entry => entry.name === parsed.name)
-    )) {
+    // 命令照旧认。模型路由技能与判定之外的 / 开头行走 submit，与聊天页一致。
+    if (parsed !== undefined && knownCommand && !modelRoutedSkill) {
       if (launchpadScreenCommands.has(parsed.name)) {
         authorizeLaunchpadCover()
       } else if (!overlayCommandNames.has(parsed.name)) {
         setLaunchpadOpen(false)
       }
-      void runCommand(parsed.name, parsed.rawInput)
+      void runCommand(parsed.name, parsed.rawInput, images)
       return
     }
     // 直接发送：与 composer 回车同一条提交路径。发出去之后输入框是空的
     // （内容已作为首轮发出，绝不"既发了又留在框里"），也没有交接提示——
     // 没有草稿要交，一句"已放进输入框"的 toast 反而是假的。
     setLaunchpadOpen(false)
-    channel.submit(text)
+    channel.submit(text, images)
   }
+
+  /**
+   * A failed startup open closes the landing page, uncovering the failure row
+   * and its `/new` hint; the draft moves to the composer once it mounts.
+   */
+  const launchpadDraftHandoffRef = React.useRef<string | undefined>(undefined)
+  const startupFailure = channel.startupFailure
+  React.useEffect(() => {
+    if (!launchpadOpen || startupFailure === undefined) return
+    launchpadDraftHandoffRef.current = launchpadDraft
+    setLaunchpadOpen(false)
+    setSupervisorOpen(false)
+    setLaunchpadFocus(-1)
+    setLaunchpadDraft('')
+    setLaunchpadCaret(0)
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- the draft is read at the moment of the failure, not tracked
+  }, [launchpadOpen, startupFailure])
+  React.useEffect(() => {
+    const draft = launchpadDraftHandoffRef.current
+    if (launchpadOpen || draft === undefined) return
+    const controller = promptControllerRef.current
+    if (controller === null) return
+    launchpadDraftHandoffRef.current = undefined
+    if (draft.trim() !== '') controller.append(draft)
+  })
 
   /**
    * The screen's command dispatcher. Every entry point reaches this one
@@ -2529,6 +2659,7 @@ export function Chat({
     rawInput = '',
     images: readonly ComposerImageRef[] = [],
   ): boolean | Promise<boolean> => {
+    if (refusedAtStartup(name)) return true
     switch (name) {
       case 'activity': {
         // Ported from the pi working-activity extension: bare `/activity`
@@ -3758,13 +3889,18 @@ export function Chat({
         return true
       }
       case 'kernel':
-        // 内核选择器，每个内核下都可用（在对话页里切回 DSH 只有这一条路）。
+        // 内核选择器，每个内核下都可用。
         // 确认后由组合根的 onSwitchBackend 记住选择并以新内核重启。与 /help、
         // 参数行一致：选择器已开着就收起，没开才打开。
         setHelpOpen(false)
         if (overlay.kind === 'kernel') dispatchOverlay({ type: 'close' })
         else openKernelPicker()
         return true
+      case 'dsh':
+      case 'codex':
+      case 'claude':
+        setHelpOpen(false)
+        return pickKernelById(name).then(() => true)
       case 'restart':
         // pi-style reload tail: /reload cannot re-read boot-time-only state
         // (cordis.yml root config, frozen fullscreen layout, newly built
@@ -5338,8 +5474,7 @@ export function Chat({
                   // 鼠标等价），浮层收起、人还在启动页（第八版：不许进对话页）。
                   dispatchOverlay({ type: 'close' })
                   const filled = '/' + name + ' '
-                  setLaunchpadDraft(filled)
-                  setLaunchpadCaret(filled.length)
+                  changeLaunchpadDraft(filled, filled.length)
                   setLaunchpadFocus(-1)
                 }}
               />
@@ -5841,8 +5976,7 @@ export function Chat({
           // 不该跟过去）。
           setLaunchpadOpen(false)
           setLaunchpadFocus(-1)
-          setLaunchpadDraft('')
-          setLaunchpadCaret(0)
+          changeLaunchpadDraft('', 0)
           repaintTranscript()
           return result
         }}
@@ -5855,8 +5989,7 @@ export function Chat({
             // 同 onOpenSession：新建/切工作区会话也是有意导航，落地页一并收。
             setLaunchpadOpen(false)
             setLaunchpadFocus(-1)
-            setLaunchpadDraft('')
-            setLaunchpadCaret(0)
+            changeLaunchpadDraft('', 0)
             repaintTranscript()
           }
           return ok
@@ -6102,9 +6235,18 @@ export function Chat({
       backendId: kernelCurrentId,
       backendLabel: kernelCurrentOption?.shortLabel,
     })
+    const lastNotification = channel.notifications.at(-1)
+    // While the session's backend is still starting (the status line's
+    // `status-starting` segment), the Tips row says so — below any notice.
+    const launchpadNotice = lastNotification === undefined
+      ? channel.ready === false && channel.startupFailure === undefined
+        ? { text: t('status-starting', { backend: channel.backendCapabilities?.backendLabel ?? 'DSH' }), color: 'warning' as const }
+        : undefined
+      : { text: lastNotification.text, ...(lastNotification.color === undefined ? {} : { color: lastNotification.color }) }
     const launchpad = (
       <Launchpad
         query={launchpadDraft}
+        imageComposer={{ channel, bindings: launchpadImagesRef.current }}
         cursorOffset={launchpadCaret}
         focusIndex={launchpadFocus}
         isTerminalFocused={terminalFocused}
@@ -6117,6 +6259,8 @@ export function Chat({
         onStarClick={runStarAction}
         firstRun={onboardingPending}
         actions={launchpadActions}
+        // 落地页没有 toast 区：最近一条 channel 通知借 Tips 行显示。
+        notice={launchpadNotice}
         // 参数行四段点开的既有选择器（第五版）：pickerPanels 与聊天页共用
         // 同一份 JSX，盖在落地页之上；选择器开着时落地页键盘让位（inputPaused）。
         overlayPanel={launchpadOverlayUp ? pickerPanels : undefined}
@@ -6140,10 +6284,7 @@ export function Chat({
           }
           void runCommand(segment, '')
         }}
-        onQueryChange={(text, cursor) => {
-          setLaunchpadDraft(text)
-          setLaunchpadCaret(cursor)
-        }}
+        onQueryChange={changeLaunchpadDraft}
         onSubmit={submitLaunchpad}
         onFocusChange={setLaunchpadFocus}
         onAction={(action) => {
@@ -6164,6 +6305,7 @@ export function Chat({
           // launchpadGate 的授权位（防御：异步误置的整屏状态盖不走启动页）。
           // 其余命令（star / update——反馈在对话页的转录/通知）仍收掉落地页
           // 再执行，这是用户主动执行命令，不是「返回」。
+          if (refusedAtStartup(action.command)) return
           if (launchpadScreenCommands.has(action.command)) {
             authorizeLaunchpadCover()
           } else if (!overlayCommandNames.has(action.command)) {
