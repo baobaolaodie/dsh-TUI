@@ -294,6 +294,8 @@ OpenAI 条款约束。完整操作与当前边界：[Codex 后端](docs/codex-ba
 
 Agent 预设、主题、MCP 服务器、环境变量：[配置参考](docs/configuration.md) · [主题系统](docs/themes.md)。
 
+DeepSeek 品牌下，宠物皮肤 `deepy` 或 `whaleGirl` 会取代女仆娘立绘；选择 `whale` 并开启「女仆娘立绘」即可使用。Claude 使用自己的图案，Codex 使用自己的真图或女仆娘字符画回退；这两个品牌的开屏图案不受宠物皮肤和女仆娘开关影响。详见[配置参考](docs/configuration.md)。
+
 DSH profile 继承官方上报默认：DeepSeek API 请求向配置的 `baseURL`（包括第三方网关）发送插件包身份和增量会话日志，OpenTelemetry 只在显式反馈后上传截至反馈的会话日志。用户仍可覆盖，详见[上报设置](docs/configuration.md#官方请求元数据与反馈上报)。
 
 ## 工作原理
