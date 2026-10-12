@@ -41,6 +41,10 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import { setLang } from '../src/i18n.js'
 import { VALIDATED_SDK_VERSION } from '../src/backends/claude/contract.js'
 import { claudeText, installClaudeLocale } from '../src/backends/claude/text.js'
+// The counting-CLI fixture is shared with verify-claude-executable: one
+// definition, not two (2026-10-12 — duplicate verification is what upstream
+// asked us to stop).
+import { COUNT_LOG_ENV, PACKAGE_ENTRY, countingEntry, probeCalls } from './lib/claude-counting-cli.mjs'
 
 setLang('en')
 // The Claude dictionary reads the host's locale, not `setLang`: the parent
@@ -53,25 +57,8 @@ const check = (label: string, ok: boolean, detail?: unknown): void => {
   console.log(`PASS ${label}`)
 }
 
-/**
- * The env var the counting CLI's entry reads its log path from, the version it
- * reports, and the package bin it stands in for. The entry is the shape the
- * SDK itself starts (`node <entry>`), which is also the only counting shape
- * available here: Windows cannot spawn an npm `.cmd` through `execFile` (that
- * is why a wrapper gets followed at all) and this run cannot build a `.exe`.
- */
-const COUNT_LOG_ENV = 'DSH_TUI_TEST_CLAUDE_LOG'
+/** The version the shared counting CLI reports in this script's fixture. */
 const COUNTED_CLI_VERSION = '2.1.287'
-const PACKAGE_ENTRY = ['node_modules', '@anthropic-ai', 'claude-code', 'cli.js']
-
-/** Every line the counting CLI's entry appended, in the order it ran. */
-const probeCalls = (log: string): string[] => {
-  try {
-    return readFileSync(log, 'utf8').split(/\r?\n/u).filter(line => line !== '')
-  } catch {
-    return []
-  }
-}
 
 // ── the isolated child: two detections over a scrubbed environment ───────────
 {
@@ -180,18 +167,11 @@ const probeCalls = (log: string): string[] => {
   // appends a line and reports `2.1.287`. That count is what tells a
   // resolution which kept the version it read from one that reads it again.
   const cliPath = join(home, '.local', 'bin', win ? 'claude.exe' : 'claude')
-  const cliEntry = join(home, '.local', 'bin', ...PACKAGE_ENTRY)
+  const cliEntry = countingEntry(join(home, '.local', 'bin'), COUNTED_CLI_VERSION)
   const cliLog = join(root, 'cli-probe-calls.log')
-  mkdirSync(dirname(cliEntry), { recursive: true })
   mkdirSync(bareHome, { recursive: true })
   mkdirSync(configDir, { recursive: true })
   mkdirSync(dshHome, { recursive: true })
-  writeFileSync(cliEntry, [
-    "const { appendFileSync } = require('node:fs')",
-    `appendFileSync(process.env.${COUNT_LOG_ENV}, 'probe\\n')`,
-    `console.log('${COUNTED_CLI_VERSION} (Claude Code)')`,
-    '',
-  ].join('\n'))
   // The wrapper names its entry with this platform's separators (`join`), the
   // way the wrapper npm ships here spells it: `%dp0%` expands to the shim's
   // directory plus this platform's separator, so a relative path spelled for

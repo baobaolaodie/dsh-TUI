@@ -41,6 +41,9 @@ import { chmodSync, copyFileSync, mkdirSync, mkdtempSync, readFileSync, realpath
 import { tmpdir } from 'node:os'
 import { delimiter, dirname, join } from 'node:path'
 import { readClaudeVersion, resolveClaudeExecutable } from '../src/backends/claude/process.js'
+// The counting-CLI fixture is shared with verify-claude-detect: one definition,
+// not two (2026-10-12 — duplicate verification is what upstream asked us to stop).
+import { COUNT_LOG_ENV, PACKAGE_ENTRY, countingEntry, probeCalls } from './lib/claude-counting-cli.mjs'
 
 let passed = 0
 const check = (label: string, ok: boolean, detail?: unknown): void => {
@@ -115,9 +118,6 @@ const versionlessClaude = (target: string): string => {
   return target
 }
 
-/** Where an npm-installed `@anthropic-ai/claude-code` keeps its bin. */
-const PACKAGE_ENTRY = ['node_modules', '@anthropic-ai', 'claude-code', 'cli.js']
-
 /** The npm `sh` wrapper: a runnable script that execs the package bin through `node`. */
 const shWrapper = (entry: string): string =>
   `#!/bin/sh\nbasedir=$(dirname "$0")\nexec node "$basedir/${entry}" "$@"\n`
@@ -182,43 +182,6 @@ const npmInstall = (name: string, options: { script?: boolean; runtime?: boolean
     : deadClaude(join(prefix, 'claude'), shWrapper(PACKAGE_ENTRY.join('/')))
   deadClaude(join(prefix, 'claude.cmd'), cmd)
   return { prefix, entry, runtimePath, wrapper }
-}
-
-/**
- * The env var a counting CLI's entry reads the log path from, and the one line
- * it appends per run: the count is how "probed once" is read off, and it comes
- * from a child process this run really spawned — never from a mock of the
- * probe. The entry is the shape the SDK itself starts (`node <entry>`), which
- * is also the only shape a counting CLI can have here: Windows cannot spawn an
- * npm `.cmd` through `execFile` (that is why a shim is followed at all), and
- * this run cannot build a `.exe` that appends to a log.
- */
-const COUNT_LOG_ENV = 'DSH_TUI_TEST_CLAUDE_LOG'
-
-/** Every line a counting CLI's entry appended, in the order it ran. */
-const probeCalls = (log: string): string[] => {
-  try {
-    return readFileSync(log, 'utf8').split(/\r?\n/u).filter(line => line !== '')
-  } catch {
-    return []
-  }
-}
-
-/**
- * The entry of a counting CLI: every `--version` run appends one line, then
- * reports `version` — or, with none, the "spawns but cannot answer" text the
- * loop has to keep walking past.
- */
-const countingEntry = (prefix: string, version: string | undefined): string => {
-  const entry = join(prefix, ...PACKAGE_ENTRY)
-  mkdirSync(dirname(entry), { recursive: true })
-  writeFileSync(entry, [
-    "const { appendFileSync } = require('node:fs')",
-    `appendFileSync(process.env.${COUNT_LOG_ENV}, 'probe\\n')`,
-    version === undefined ? "console.log('definitely not a claude version')" : `console.log('${version} (Claude Code)')`,
-    '',
-  ].join('\n'))
-  return entry
 }
 
 /**
@@ -402,13 +365,17 @@ try {
     const decoy = npmInstall('npm-decoy-only', { script: false, runtime: true, wrapper: 'cmd' })
     withPath(decoy.prefix, nodeDir)
     const resolved = await resolveClaudeExecutable(envFor(dir('home-no-native-3')))
-    check('a wrapper naming only its runtime never yields it and falls back to the bundle',
-      decoy.runtimePath !== undefined && resolved.path !== decoy.runtimePath && resolved.source === 'bundled', resolved)
 
     const both = npmInstall('npm-decoy-script', { script: true, runtime: true, wrapper: 'cmd' })
     withPath(both.prefix, nodeDir)
     const picked = await resolveClaudeExecutable(envFor(dir('home-no-native-4')))
-    check('the package entry wins over the runtime named beside it', picked.path === both.entry, picked)
+    // One family, two fixtures: naming only a runtime must never yield that
+    // runtime (it falls back to the bundle), and a wrapper with a script beside
+    // that runtime must pick the script.
+    check('the runtime a wrapper names is never the CLI: the bundle without a script, the script with one',
+      decoy.runtimePath !== undefined && resolved.path !== decoy.runtimePath && resolved.source === 'bundled'
+        && picked.path === both.entry,
+      { resolved, picked })
   }
 } finally {
   if (originalPath === undefined) delete process.env.PATH
