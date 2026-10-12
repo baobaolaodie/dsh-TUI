@@ -62,8 +62,17 @@ export function useKernelPicker({ channel, kernelVersion, kernelEntries, launchp
         // The installable row opens the wizard instead of a dead-end toast;
         // the wizard owns its own keys (Enter/Esc) from here on. It carries the
         // row's id: the surface the wizard acts on is looked up per backend at
-        // open time, not assumed (Stage B / §6 item 12).
-        dispatchOverlay({ type: 'open', overlay: { kind: 'sdk-install', backendId: option.id } })
+        // open time, not assumed (Stage B / §6 item 12). Detection's hint rides
+        // along verbatim (when it has one): the confirm pane reads from it the
+        // CLI this machine already has (D4/D6).
+        dispatchOverlay({
+          type: 'open',
+          overlay: {
+            kind: 'sdk-install',
+            backendId: option.id,
+            ...(option.hint === undefined ? {} : { foundCli: option.hint }),
+          },
+        })
         return
       }
       // Detection's own guidance (how to install or upgrade) beats the bare reason.

@@ -81,8 +81,12 @@ export type ChatOverlay =
    *  状态，按本文件头注释第 3 条的分工留在 Chat.tsx，不冻进 overlay。
    *
    *  只带**后端 id**：装的是哪一行、就查哪一行的安装面——安装面在打开时按 id
-   *  从宿主现查（Stage B / §6 第 12 条），与 kernel 一样不冻名册。 */
-  | { kind: 'sdk-install'; backendId: KernelBackendId }
+   *  从宿主现查（Stage B / §6 第 12 条），与 kernel 一样不冻名册。
+   *
+   *  `foundCli` 是检测挂在那一行上的 hint 原文（D4/D6）：面板从中取自己要显示的
+   *  那一段，切分口径只写在面板里。**可选**——旧调用方 / stub 不带它时，面板
+   *  渲染与今天逐字一致。 */
+  | { kind: 'sdk-install'; backendId: KernelBackendId; foundCli?: string }
   | { kind: 'plan'; index: number }
   | { kind: 'lang'; index: number }
   /** `/panel` 无参的选择器：列出「已启用 ∩ 已注册」的面板（含插件）。 */

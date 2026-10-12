@@ -15,7 +15,7 @@ import { Pane } from './design-system/Pane.js'
  */
 export type SdkInstallPhase =
   | { readonly kind: 'idle' }
-  | { readonly kind: 'confirm'; readonly dir: string; readonly version: string; readonly specifier: string }
+  | { readonly kind: 'confirm'; readonly dir: string; readonly version: string; readonly specifier: string; readonly foundCli?: string }
   | { readonly kind: 'checking' }
   | { readonly kind: 'running' }
   | { readonly kind: 'done'; readonly rebuiltStore?: boolean }
@@ -32,7 +32,21 @@ function manualLine(dir: string, specifier: string): string {
   return `cd ${dir} && pnpm add ${specifier}`
 }
 
+/**
+ * The note under the guidance inside detection's hint: its first line is the
+ * install guidance, everything after it is what the probe found on this
+ * machine (a local Claude Code, with its version or just its path — D6 joins
+ * the two lines and never merges them). This is the one place that split is
+ * defined. An empty tail — no CLI, no field, or a single-line hint — yields
+ * undefined, so the pane reads exactly as it did before the note existed.
+ */
+function noteAfterGuidance(hint: string | undefined): string | undefined {
+  const note = hint?.split('\n').slice(1).join('\n').trim()
+  return note === undefined || note === '' ? undefined : note
+}
+
 export function SdkInstallWizard({ phase }: { phase: SdkInstallPhase }): React.ReactNode {
+  const cliNote = phase.kind === 'confirm' ? noteAfterGuidance(phase.foundCli) : undefined
   return (
     <Pane color="permission">
       <Box flexDirection="column">
@@ -45,8 +59,9 @@ export function SdkInstallWizard({ phase }: { phase: SdkInstallPhase }): React.R
           <Box flexDirection="column">
             <Text>{t('sdk-install-confirm-what', { specifier: phase.specifier, version: phase.version })}</Text>
             <Text>{t('sdk-install-confirm-where', { dir: phase.dir })}</Text>
-            <Box marginTop={1}>
+            <Box marginTop={1} flexDirection="column">
               <Text dimColor>{t('sdk-install-confirm-note')}</Text>
+              {cliNote !== undefined && <Text dimColor>{cliNote}</Text>}
             </Box>
           </Box>
         )}
