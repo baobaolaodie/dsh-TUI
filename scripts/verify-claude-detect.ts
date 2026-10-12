@@ -15,6 +15,11 @@
  *    guidance — and nothing at all when there is no CLI, where the hint is
  *    word for word the sentence it was before.
  *
+ *  - that found CLI is a counting fixture: its entry appends one line to a log
+ *    per `--version` run, so the branch's cost is pinned at exactly the one
+ *    probe the resolution already spends — never that probe plus a second one
+ *    for a version the resolution had in hand (REVIEW F-2 ②).
+ *
  * Both scenarios run in one isolated child (temp HOME/USERPROFILE/
  * CLAUDE_CONFIG_DIR/DSH_HOME, every ambient ANTHROPIC_ and CLAUDE_CODE_
  * variable scrubbed before the first import); the SDK peer resolves from
@@ -29,9 +34,9 @@
  */
 import assert from 'node:assert/strict'
 import { execFile } from 'node:child_process'
-import { chmodSync, copyFileSync, cpSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { chmodSync, copyFileSync, cpSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { setLang } from '../src/i18n.js'
 import { VALIDATED_SDK_VERSION } from '../src/backends/claude/contract.js'
@@ -46,6 +51,26 @@ const check = (label: string, ok: boolean, detail?: unknown): void => {
   assert.ok(ok, detail === undefined ? label : `${label}: ${typeof detail === 'string' ? detail : JSON.stringify(detail)}`)
   passed += 1
   console.log(`PASS ${label}`)
+}
+
+/**
+ * The env var the counting CLI's entry reads its log path from, the version it
+ * reports, and the package bin it stands in for. The entry is the shape the
+ * SDK itself starts (`node <entry>`), which is also the only counting shape
+ * available here: Windows cannot spawn an npm `.cmd` through `execFile` (that
+ * is why a wrapper gets followed at all) and this run cannot build a `.exe`.
+ */
+const COUNT_LOG_ENV = 'DSH_TUI_TEST_CLAUDE_LOG'
+const COUNTED_CLI_VERSION = '2.1.287'
+const PACKAGE_ENTRY = ['node_modules', '@anthropic-ai', 'claude-code', 'cli.js']
+
+/** Every line the counting CLI's entry appended, in the order it ran. */
+const probeCalls = (log: string): string[] => {
+  try {
+    return readFileSync(log, 'utf8').split(/\r?\n/u).filter(line => line !== '')
+  } catch {
+    return []
+  }
 }
 
 // ── the isolated child: two detections over a scrubbed environment ───────────
@@ -148,15 +173,26 @@ const check = (label: string, ok: boolean, detail?: unknown): void => {
   const bareHome = join(root, 'home-no-cli')
   const configDir = join(root, '.claude')
   const dshHome = join(root, '.dsh')
-  // The CLI the official installer drops outside PATH (`~/.local/bin`), a copy
-  // of node: `--version` then answers with the version this run knows.
+  // The CLI the official installer drops outside PATH (`~/.local/bin`), as a
+  // counting fixture: the wrapper is a shape nothing here can spawn (npm's
+  // `.cmd` forwarding line — the text whose parse verify-claude-executable.ts
+  // pins), so every pass costs exactly one run of the entry beside it, which
+  // appends a line and reports `2.1.287`. That count is what tells a
+  // resolution which kept the version it read from one that reads it again.
   const cliPath = join(home, '.local', 'bin', win ? 'claude.exe' : 'claude')
-  mkdirSync(join(home, '.local', 'bin'), { recursive: true })
+  const cliEntry = join(home, '.local', 'bin', ...PACKAGE_ENTRY)
+  const cliLog = join(root, 'cli-probe-calls.log')
+  mkdirSync(dirname(cliEntry), { recursive: true })
   mkdirSync(bareHome, { recursive: true })
   mkdirSync(configDir, { recursive: true })
   mkdirSync(dshHome, { recursive: true })
-  copyFileSync(process.execPath, cliPath)
-  if (!win) chmodSync(cliPath, 0o755)
+  writeFileSync(cliEntry, [
+    "const { appendFileSync } = require('node:fs')",
+    `appendFileSync(process.env.${COUNT_LOG_ENV}, 'probe\\n')`,
+    `console.log('${COUNTED_CLI_VERSION} (Claude Code)')`,
+    '',
+  ].join('\n'))
+  writeFileSync(cliPath, `"%dp0%\\${PACKAGE_ENTRY.join('\\')}" %*\n`)
   // A CLI-shaped file that exists and cannot report a version, the fixture
   // shape verify-claude-executable.ts uses too: `where` answers nothing for
   // `--version`, the POSIX script echoes a sentence. Pointed at explicitly, it
@@ -173,7 +209,7 @@ const check = (label: string, ok: boolean, detail?: unknown): void => {
   symlinkSync(realpathSync(join(checkout, 'node_modules', 'yaml')), join(root, 'node_modules', 'yaml'), 'junction')
   const backendUrl = pathToFileURL(join(root, 'src', 'backends', 'claude', 'index.ts')).href
   const child = [
-    "const [backendUrl, home, bareHome, versionlessCli, systemPath, configDir, dshHome] = process.argv.slice(2)",
+    "const [backendUrl, home, bareHome, versionlessCli, systemPath, configDir, dshHome, cliLog] = process.argv.slice(2)",
     "process.env.DSH_TUI_LANG = 'en'",
     "const fs = await import('node:fs')",
     "const path = await import('node:path')",
@@ -181,10 +217,15 @@ const check = (label: string, ok: boolean, detail?: unknown): void => {
     "process.env.USERPROFILE = home",
     "process.env.CLAUDE_CONFIG_DIR = configDir",
     "process.env.DSH_HOME = dshHome",
-    // PATH reaches the lookup tool and nothing else, and the explicit-variable
-    // escape hatch goes with the rest of CLAUDE_CODE_* below: only the fixture
-    // home's own ~/.local/bin copy is left for the probe to find.
-    "process.env.PATH = [home, systemPath].join(path.delimiter)",
+    // The counting CLI's entry reads the log path from here: the probe's child
+    // environment is built from this process's, so this is how the count
+    // crosses the two process hops (probe → entry → log file).
+    `process.env.${COUNT_LOG_ENV} = cliLog`,
+    // PATH reaches the lookup tool, the runtime the probe starts a JS entry
+    // with (`node <entry>`) and nothing else, and the explicit-variable escape
+    // hatch goes with the rest of CLAUDE_CODE_* below: only the fixture home's
+    // own ~/.local/bin copy is left for the probe to find.
+    "process.env.PATH = [home, path.dirname(process.execPath), systemPath].join(path.delimiter)",
     "for (const key of Object.keys(process.env)) {",
     "  const upper = key.toUpperCase()",
     "  if (upper.startsWith('ANTHROPIC_') || upper === 'CLAUDECODE' || upper.startsWith('CLAUDE_CODE_')) delete process.env[key]",
@@ -227,7 +268,7 @@ const check = (label: string, ok: boolean, detail?: unknown): void => {
   const expected = claudeText('claude-sdk-missing', { version: VALIDATED_SDK_VERSION })
   try {
     const ran = await new Promise<{ code: number | null; stdout: string; stderr: string }>(resolve => {
-      execFile(process.execPath, ['--import', 'tsx/esm', probe, backendUrl, home, bareHome, versionlessPath, systemPath, configDir, dshHome], {
+      execFile(process.execPath, ['--import', 'tsx/esm', probe, backendUrl, home, bareHome, versionlessPath, systemPath, configDir, dshHome, cliLog], {
         cwd: checkout,
         timeout: 60_000,
         env: { ...process.env, TMP: root, TEMP: root, TMPDIR: root },
@@ -254,11 +295,12 @@ const check = (label: string, ok: boolean, detail?: unknown): void => {
     check('detect-backend: loadClaudeSdk() is the import that failed in that child',
       (parsed?.debug ?? []).some(message => message.includes('SDK import failed') && message.includes('claude-agent-sdk')),
       parsed?.debug)
-    // AC-5 (the detection payload): the CLI is there, the SDK is not. Node's
-    // own version is what the fixture copy answers with, so the "or path" half
-    // covers the probe reporting no version (DESIGN D5's degradation).
+    // AC-5 (the detection payload): the CLI is there, the SDK is not. The
+    // counting fixture answers a version, so this is the exact line the
+    // payload must carry — which also proves the fixture was really reached
+    // (the "or path" half is the explicit-path check below).
     check('AC-5 a CLI found without the SDK travels in the detection payload (version or path)',
-      hint.includes(process.versions.node) || hint.includes(cliPath), hint)
+      hint === `${expected}\n${claudeText('claude-sdk-missing-found-cli', { version: COUNTED_CLI_VERSION, path: cliEntry })}`, hint)
     check('AC-5 the install guidance stays word for word, the found CLI on a line of its own',
       lines.length === 2 && lines[0] === expected && (lines[1] ?? '').trim() !== '', lines)
     check('AC-5 a CLI that answers no version is still reported, by its path',
@@ -266,6 +308,12 @@ const check = (label: string, ok: boolean, detail?: unknown): void => {
     // AC-6 (this script's half): nothing found reads exactly as it did before.
     check('AC-6 without any CLI the hint is the plain SDK-missing sentence, word for word',
       withoutCli?.hint === expected, { got: withoutCli?.hint, expected })
+    // F-2 (②): the resolution read this CLI's version to adopt it, so the
+    // branch must not spawn it a second time for a version it already had —
+    // the entry appended exactly one line. It is zero only if the fixture was
+    // never reached, which the payload check above rules out.
+    check('F-2 the SDK-missing branch that found a CLI probes it once, not twice',
+      probeCalls(cliLog).length === 1, { calls: probeCalls(cliLog), hint })
   } finally {
     rmSync(root, { recursive: true, force: true })
   }

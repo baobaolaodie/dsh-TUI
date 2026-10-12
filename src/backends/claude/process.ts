@@ -14,7 +14,10 @@
  *   shell), and handing one to the SDK fails the whole start with its own
  *   misleading "native binary … failed to launch" error. A shim is followed
  *   to the entry it really runs: a binary, or the package's `cli.js`, which
- *   the SDK starts as `node <entry>`.
+ *   the SDK starts as `node <entry>`. Each file is a candidate once — the two
+ *   sources name the same install when `~/.local/bin` is on PATH — and the
+ *   version a candidate had to report to win travels out with the result, so
+ *   nothing reads the same `--version` twice.
  * - Environment: the SDK's `env` option replaces the child environment, so it
  *   is built from `process.env`, tagged with the client app and the session
  *   state events this backend reads, and scrubbed of the variables a parent
@@ -24,7 +27,7 @@
  *   goes to the debug log and to the host's deduplicated notice reporter.
  */
 import { execFile } from 'node:child_process'
-import { existsSync, readFileSync } from 'node:fs'
+import { existsSync, readFileSync, realpathSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { basename, dirname, isAbsolute, join, normalize, sep } from 'node:path'
 
@@ -35,6 +38,18 @@ export interface ClaudeExecutable {
   /** Absolute path, or undefined to let the SDK use its bundled binary. */
   readonly path: string | undefined
   readonly source: ClaudeExecutableSource
+  /**
+   * The version the winning candidate had to report while it was being
+   * adopted, when one was read. Carrying it out of the resolution is what
+   * keeps a caller that needs the version (`/doctor`'s drift check, the
+   * SDK-missing hint) from spending a second `--version` on an answer this
+   * process already has.
+   *
+   * Absent for the bundled fallback, for an explicit
+   * `CLAUDE_CODE_EXECUTABLE` — adopted as it is, without a probe, so nothing
+   * was read — and for a path resolved without probing.
+   */
+  readonly version?: string
 }
 
 /**
@@ -165,6 +180,40 @@ function nativeInstall(env: NodeJS.ProcessEnv): string[] {
   return existsSync(candidate) ? [candidate] : []
 }
 
+/**
+ * The identity a candidate is deduplicated by: the file it really names.
+ *
+ * The lookup tool and the native fallback read the same install from two
+ * places (`~/.local/bin` is often on PATH as well) and can spell it
+ * differently while they do — another case on Windows, the 8.3 form under a
+ * short `TEMP`, a symlinked directory — so they are compared as the file on
+ * disk, with the case folded where the file system folds it.
+ */
+function candidateKey(path: string): string {
+  let real = path
+  try {
+    real = realpathSync.native(path)
+  } catch {
+    // A candidate the lookup tool listed may be gone by now; it stays one
+    // candidate under the spelling it came in as.
+  }
+  const normalized = normalize(real)
+  return process.platform === 'win32' ? normalized.toLowerCase() : normalized
+}
+
+/** The candidates in order, each file named once (see {@link candidateKey}). */
+function dedupeCandidates(candidates: readonly string[]): string[] {
+  const seen = new Set<string>()
+  const kept: string[] = []
+  for (const candidate of candidates) {
+    const key = candidateKey(candidate)
+    if (seen.has(key)) continue
+    seen.add(key)
+    kept.push(candidate)
+  }
+  return kept
+}
+
 /** Resolve the executable (never throws; the SDK binary is the fallback). */
 export async function resolveClaudeExecutable(env: NodeJS.ProcessEnv = process.env): Promise<ClaudeExecutable> {
   const configured = env.CLAUDE_CODE_EXECUTABLE
@@ -176,11 +225,16 @@ export async function resolveClaudeExecutable(env: NodeJS.ProcessEnv = process.e
   // a typo the user made should fail loudly, not silently.
   // PATH comes first, the native install directory only after it: a copy the
   // user put on PATH is the one they chose, and this fallback must not invert
-  // it. Both go through the same per-candidate probe, shim following included.
-  for (const candidate of [...await whichAll('claude'), ...nativeInstall(env)]) {
-    if (await readClaudeVersion(candidate) !== undefined) return { path: candidate, source: 'path' }
+  // it. Both go through the same per-candidate probe, shim following included,
+  // and a file both sources name is probed once: otherwise a hung copy pays
+  // the probe's ten-second timeout per spelling.
+  for (const candidate of dedupeCandidates([...await whichAll('claude'), ...nativeInstall(env)])) {
+    const version = await readClaudeVersion(candidate)
+    if (version !== undefined) return { path: candidate, source: 'path', version }
     const target = shimTarget(candidate)
-    if (target !== undefined && await readClaudeVersion(target) !== undefined) return { path: target, source: 'path' }
+    if (target === undefined) continue
+    const targetVersion = await readClaudeVersion(target)
+    if (targetVersion !== undefined) return { path: target, source: 'path', version: targetVersion }
   }
   return { path: undefined, source: 'bundled' }
 }

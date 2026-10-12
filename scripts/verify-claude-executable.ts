@@ -28,12 +28,16 @@
  *    never the CLI, even when it exists beside the wrapper;
  *  - a candidate that spawns but reports no version loses too, and one that
  *    hangs is skipped after the probe's bounded timeout (POSIX fixture;
- *    Windows has no spawnable hang without a compiler) — never waited for.
+ *    Windows has no spawnable hang without a compiler) — never waited for;
+ *  - a file the lookup tool and the native directory both name is probed
+ *    once: `~/.local/bin` is often on PATH too, and a repeated candidate
+ *    would spend the probe's bounded timeout again (the counting fixture
+ *    below appends one line per `--version` run and pins the count).
  *
  * Run: node --import tsx/esm scripts/verify-claude-executable.ts
  */
 import assert from 'node:assert/strict'
-import { chmodSync, copyFileSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, copyFileSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { delimiter, dirname, join } from 'node:path'
 import { readClaudeVersion, resolveClaudeExecutable } from '../src/backends/claude/process.js'
@@ -180,6 +184,52 @@ const npmInstall = (name: string, options: { script?: boolean; runtime?: boolean
   return { prefix, entry, runtimePath, wrapper }
 }
 
+/**
+ * The env var a counting CLI's entry reads the log path from, and the one line
+ * it appends per run: the count is how "probed once" is read off, and it comes
+ * from a child process this run really spawned — never from a mock of the
+ * probe. The entry is the shape the SDK itself starts (`node <entry>`), which
+ * is also the only shape a counting CLI can have here: Windows cannot spawn an
+ * npm `.cmd` through `execFile` (that is why a shim is followed at all), and
+ * this run cannot build a `.exe` that appends to a log.
+ */
+const COUNT_LOG_ENV = 'DSH_TUI_TEST_CLAUDE_LOG'
+
+/** Every line a counting CLI's entry appended, in the order it ran. */
+const probeCalls = (log: string): string[] => {
+  try {
+    return readFileSync(log, 'utf8').split(/\r?\n/u).filter(line => line !== '')
+  } catch {
+    return []
+  }
+}
+
+/**
+ * The entry of a counting CLI: every `--version` run appends one line, then
+ * reports `version` — or, with none, the "spawns but cannot answer" text the
+ * loop has to keep walking past.
+ */
+const countingEntry = (prefix: string, version: string | undefined): string => {
+  const entry = join(prefix, ...PACKAGE_ENTRY)
+  mkdirSync(dirname(entry), { recursive: true })
+  writeFileSync(entry, [
+    "const { appendFileSync } = require('node:fs')",
+    `appendFileSync(process.env.${COUNT_LOG_ENV}, 'probe\\n')`,
+    version === undefined ? "console.log('definitely not a claude version')" : `console.log('${version} (Claude Code)')`,
+    '',
+  ].join('\n'))
+  return entry
+}
+
+/**
+ * The wrapper shape no platform can spawn, forwarding to the entry: one probe
+ * of the candidate then costs exactly one entry run, on either platform (a
+ * spawnable `sh` wrapper would run the entry itself and be followed to it
+ * after the probe failed, logging twice per pass — the count has to be about
+ * the candidate, not about how the wrapper failed).
+ */
+const deadForwarder = (target: string): string => deadClaude(target, cmdWrapper(PACKAGE_ENTRY.join('\\')))
+
 try {
   // ── a dead wrapper earlier on PATH must not shadow a working binary ────
   {
@@ -284,6 +334,36 @@ try {
     versionlessClaude(join(nativeDir(muteHome), nativeName))
     const mute = await resolveClaudeExecutable(envFor(muteHome))
     check('AC-3 a native install that reports no version is not adopted', mute.source === 'bundled' && mute.path === undefined, mute)
+  }
+
+  // ── a file both PATH and the native directory name is probed once ──────
+  {
+    const home = dir('home-dedupe')
+    const bin = nativeDir(home)
+    const log = join(dir('dedupe-log'), 'calls.log')
+    // A counting CLI under the native install's own file name: it cannot
+    // answer, so the loop walks past it — which is exactly when a duplicate
+    // candidate costs the probe's timeout a second time. The worst case is
+    // not hypothetical: `~/.local/bin` is often on PATH too, and a hung copy
+    // there is what makes the old chain pay twenty seconds instead of ten.
+    countingEntry(bin, undefined)
+    deadForwarder(join(bin, nativeName))
+    process.env[COUNT_LOG_ENV] = log
+    // The control: through the native fallback alone the fixture is reached
+    // exactly once, so the check below is about the duplicate candidate and
+    // not about a fixture that never started. `nodeDir` is on PATH because
+    // the probe starts a JS entry the way the SDK does, `node <entry>`, and
+    // `node` has to be findable for the entry to run at all.
+    withPath(dir('nothing-dedupe'), nodeDir)
+    const alone = await resolveClaudeExecutable(envFor(home))
+    check('a counting fixture is reached once through the native fallback alone', probeCalls(log).length === 1, { calls: probeCalls(log), resolved: alone })
+    writeFileSync(log, '')
+    // The same directory on PATH as well: the lookup tool and the native
+    // fallback now name the same file, and one probe is what it may cost.
+    withPath(bin, nodeDir)
+    const overlapped = await resolveClaudeExecutable(envFor(home))
+    check('a file both PATH and the native directory name is probed once', probeCalls(log).length === 1, { calls: probeCalls(log), resolved: overlapped })
+    delete process.env[COUNT_LOG_ENV]
   }
 
   // ── AC-4: a real npm install resolves to the entry it runs ─────────────

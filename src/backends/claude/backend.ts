@@ -20,7 +20,7 @@ import { CLAUDE_OAUTH_PROVIDER, ClaudeChannelConflictError, channelMissingCreden
 import { createClaudeCatalog } from './catalog.js'
 import { resolveStartPermissionMode, type StartPermissionMode } from './options.js'
 import { fileClaudePrefs, memoryClaudePrefs, type ClaudePrefs } from './prefs.js'
-import { buildClaudeEnv, readClaudeVersion, resolveClaudeExecutable } from './process.js'
+import { buildClaudeEnv, readClaudeVersion, resolveClaudeExecutable, type ClaudeExecutable } from './process.js'
 import { activeProfileOf, fileClaudeChannels, hasChannelConnection, memoryClaudeChannels, type ClaudeChannelProfile, type ClaudeChannels } from './channels.js'
 import { fileClaudeChannelTokens, type ClaudeChannelTokens } from '../shared/channel-tokens.js'
 import { replayClaudeTranscript, type ClaudeReplay, type ClaudeSubagentTranscript } from './replay.js'
@@ -162,6 +162,20 @@ const rememberHost = (host: BackendHost): void => {
 }
 
 /**
+ * The version of a resolved executable: the one its winning candidate had to
+ * report while the resolution adopted it, so nothing here probes a file the
+ * resolution already probed. Only an explicit `CLAUDE_CODE_EXECUTABLE` — which
+ * the chain adopts without validating, on purpose — has no version yet, and
+ * that is the one case that still spends a bounded probe (undefined when that
+ * probe fails, exactly as before: the caller degrades to the path, D5).
+ */
+async function resolvedCliVersion(executable: ClaudeExecutable, host: BackendHost): Promise<string | undefined> {
+  if (executable.version !== undefined) return executable.version
+  if (executable.path === undefined) return undefined
+  return readClaudeVersion(executable.path, host.appVersion)
+}
+
+/**
  * The `claude` this machine already has, as the extra hint line of the
  * SDK-missing branch (D5/D6): the version it reports, or its path when the
  * version cannot be read. Undefined when there is no CLI at all — the caller
@@ -169,14 +183,15 @@ const rememberHost = (host: BackendHost): void => {
  * "no CLI reads exactly as before" structural rather than a copy promise.
  *
  * Never throws: the probe reuses the same resolution chain and bounded
- * timeouts as a session start, and a failed or timed-out one degrades to
- * "nothing found", like a CLI that will not answer.
+ * timeouts as a session start — and the version that chain read to adopt the
+ * CLI — so a failed or timed-out probe degrades to "nothing found", like a CLI
+ * that will not answer.
  */
 async function foundClaudeCli(host: BackendHost): Promise<string | undefined> {
   try {
     const executable = await resolveClaudeExecutable()
     if (executable.path === undefined) return undefined
-    const version = await readClaudeVersion(executable.path, host.appVersion)
+    const version = await resolvedCliVersion(executable, host)
     return version === undefined
       ? claudeText('claude-sdk-missing-found-cli-path', { path: executable.path })
       : claudeText('claude-sdk-missing-found-cli', { version, path: executable.path })
@@ -212,7 +227,7 @@ export const claudeBackend: AgentBackend = {
     }
     try {
       const executable = await resolveClaudeExecutable()
-      const version = executable.path === undefined ? undefined : await readClaudeVersion(executable.path, host.appVersion)
+      const version = await resolvedCliVersion(executable, host)
       const drift = cliVersionDrift(version) ?? sdkVersionDrift(installedSdkVersion())
       // The picker never blocks on a missing credential (the probe cannot see
       // a settings-file env, an apiKeyHelper or a relay token), and `/login`
