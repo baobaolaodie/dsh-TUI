@@ -1,4 +1,4 @@
-import type { Agent, AssistantStreamFrame, ModelSelectionRef } from '@deepseek-ai/dsh-agent'
+import type { Agent, AssistantStreamFrame } from '@deepseek-ai/dsh-agent'
 import type { Context } from '@deepseek-ai/cordis'
 import { carrierKeyOf } from '@deepseek-ai/dsh-scope'
 import type { ChannelProjection } from '../../channel/projection.js'
@@ -9,6 +9,7 @@ import { createSessionBatchRouter, createSessionBinder, type BindingFeedHooks, t
 import type { InputConvergence } from './input-actions.js'
 import type { DshChannelBinding } from './binding.js'
 import type { ChannelOwner } from './owner.js'
+import type { createModelSelection } from './model-selection.js'
 import type { ChannelState } from './types.js'
 
 /**
@@ -37,8 +38,8 @@ export function createBindingEvents(ctx: Context, deps: {
    *  request reports usage. */
   seedContextOccupancy?(session: unknown): void
   inputConvergence: InputConvergence
-  selection: ModelSelectionRef
-  modelActions: { applyPreferredEffort(): Promise<void>; selection: ModelSelectionRef }
+  modelSelection: ReturnType<typeof createModelSelection>
+  modelActions: { applyPreferredEffort(): Promise<void> }
   modeActions: {
     refreshMode(): void
     onSessionEvent(session: unknown, event: unknown): void
@@ -74,7 +75,7 @@ export function createBindingEvents(ctx: Context, deps: {
   /**
    * Preset of the last binding we announced a capability gap for. The gap is a
    * property of the agent's PRESET, so it is reported once per entry into a
-   * preset that lacks it (a rebind to the SAME preset — /model, /rewind —
+   * preset that lacks it (a rebind to the SAME preset — /rewind —
    * stays quiet; switching away and back reports again). Facts come from
    * `channel/capabilities.ts`, never from a preset-id list: a user preset that
    * adds compaction/pruning back gets no warning at all.
@@ -130,9 +131,9 @@ export function createBindingEvents(ctx: Context, deps: {
   /**
    * The DSH half of every bind (core/binding-feed.ts runs it): the owner-level
    * child listeners once, then per binding the activity seed, the model
-   * selection reset, the preferred effort and mode refresh, the model
-   * selection waterfalls, and the raw durable-event subscribers. Registered
-   * before the core's session subscription, so each raw event reaches the
+   * selection activation, the preferred effort and mode refresh, and the raw
+   * durable-event subscribers. Routing listeners survive foreground rebinds.
+   * Registered before the core's session subscription, so each raw event reaches the
    * DSH specialists before the projector folds it.
    */
   const hooks = {
@@ -146,10 +147,12 @@ export function createBindingEvents(ctx: Context, deps: {
     onBind({ capture, current, register }: BindingScope): void {
       deps.seedActivity?.(deps.binding.agent.session)
       deps.seedContextOccupancy?.(deps.binding.agent.session)
-      deps.modelActions.selection.current = undefined
-      deps.modelActions.selection.assembled = undefined
-      if (deps.binding.agent.options?.model === undefined && deps.state.provider !== '' && deps.state.model !== '') {
-        deps.modelActions.selection.current = { provider: deps.state.provider, model: deps.state.model }
+      deps.modelSelection.bind(deps.binding.agent, { provider: deps.state.provider, model: deps.state.model })
+      const selected = deps.modelSelection.selection.current
+      // A parked turn may not have logged its first selected request yet.
+      if (selected !== undefined) {
+        deps.state.provider = selected.provider
+        deps.state.model = selected.model
       }
       void deps.modelActions.applyPreferredEffort()
       deps.modeActions.refreshMode()
@@ -157,49 +160,15 @@ export function createBindingEvents(ctx: Context, deps: {
       // permission preference seeds sessions that never chose their own.
       void deps.modeActions.applyRememberedPermission()
       // The upstream auto-retry policy follows the route in use: the
-      // agent's own options name it after a /model switch or a resume,
-      // and a fresh session falls back to the launch route.
-      deps.seedUpstreamRetry?.(deps.binding.agent.options?.provider ?? deps.state.provider)
+      // agent's own options name it after a resume, and a fresh session
+      // falls back to the launch route (/model seeds its own selection).
+      deps.seedUpstreamRetry?.(selected?.provider ?? deps.binding.agent.options?.provider ?? deps.state.provider)
       // Entering/resuming a session whose preset serves neither automatic
       // compaction nor tool-result pruning changes what the user can expect
       // from a long session; say it once, here, before the turn starts.
       announceCapabilityGap()
       const native = capture.session.capabilities.native.dsh
       if (native === undefined) return
-      // Keep the upstream assembly/request pairing, but own each listener as
-      // soon as it is installed. The upstream combined disposer is too late
-      // if request registration throws, and its post-await assembly write is
-      // unsafe after a rebind (including A→B→A ABA).
-      const disposeAssembly = native.agent.ctx.on('system-prompt/assemble', async (_assembly, _context, next) => {
-        const selected = deps.selection.current
-        const assembled = await next()
-        if (!current()) return assembled
-        deps.selection.assembled = selected
-        if (selected === undefined) return assembled
-        return {
-          ...assembled,
-          variables: {
-            ...assembled.variables,
-            provider: selected.provider,
-            model: selected.model,
-          },
-        }
-      })
-      register(disposeAssembly)
-      const disposeRequest = native.agent.ctx.on('agent/request', async (_payload, next) => {
-        const resolved = await next()
-        if (!current()) return resolved
-        const selected = deps.selection.assembled
-        if (selected === undefined) return resolved
-        const { reasoningEffort: _inheritedEffort, ...withoutInheritedEffort } = resolved
-        return {
-          ...withoutInheritedEffort,
-          provider: selected.provider,
-          model: selected.model,
-          ...(selected.reasoningEffort === undefined ? {} : { reasoningEffort: selected.reasoningEffort }),
-        }
-      })
-      register(disposeRequest)
       // Raw durable events for the DSH specialists. Registered before the
       // session subscription, so each event reaches them before the
       // projector folds it.

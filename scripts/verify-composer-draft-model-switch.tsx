@@ -1,177 +1,112 @@
 #!/usr/bin/env node
-/**
- * Model-switch draft regression: mounted/parked composer, launchpad, images,
- * replacement/legacy channels, and the real channel-to-UI projection.
+/** Same-session model switches preserve mounted, parked and launchpad drafts.
+ * Real channel + UI facade + Chat; only DSH services are fakes, with no requests.
  * Run: node --import tsx/esm scripts/verify-composer-draft-model-switch.tsx
- * Optional subset: VERIFY_DRAFT_SWITCH_SCENARIOS=A,B,E,F,G
+ * Optional subset: VERIFY_DRAFT_SWITCH_SCENARIOS=A,B,G
  */
 import assert from 'node:assert/strict'
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { PassThrough, Writable } from 'node:stream'
+import type { PromptController } from '../src/components/PromptInput.js'
 import { settled, viewportLines, screenHas } from './lib/term-test.mjs'
 
 process.env.FORCE_COLOR = '3'
 process.env.DSH_TUI_THEME = 'dark'
 process.env.DSH_TUI_LANG = 'zh'
 process.env.DSH_TUI_DISABLE_TERMINAL_IMAGES = '1'
-// Preferences resolve HOME at module evaluation, before the first channel opens.
+// Preference paths are resolved when the application modules are evaluated.
 const home = mkdtempSync(join(tmpdir(), 'dsh-tui-draft-model-switch-'))
 process.env.HOME = process.env.USERPROFILE = home
 process.env.DSH_HOME = join(home, 'dsh')
+const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==', 'base64')
 const imagePath = join(home, 'draft.png')
-writeFileSync(imagePath, Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==', 'base64'))
-
-const [React, { Terminal: XTerm }, { render }, { Chat }, { QuestionStore }, { LOCAL_COMMANDS, completeCommands }, { t }, { Context }, { createChannel }, { mountChannelUi }, { registerTuiChannel }] = await Promise.all([
-  import('react'),
-  import('@xterm/headless'),
-  import('../src/ui.js'),
-  import('../src/screens/Chat.js'),
-  import('../src/dsh-adapter/questions.js'),
-  import('../src/commands.js'),
-  import('../src/i18n.js'),
-  import('@deepseek-ai/cordis'),
-  import('../src/dsh-adapter/channel.js'),
-  import('../src/dsh-adapter/channel-ui.js'),
+writeFileSync(imagePath, png)
+const [React, { Terminal: XTerm }, { render }, { Chat }, { QuestionStore }, { t }, { Context }, { createChannel }, { mountChannelUi }, { registerTuiChannel }] = await Promise.all([
+  import('react'), import('@xterm/headless'), import('../src/ui.js'),
+  import('../src/screens/Chat.js'), import('../src/dsh-adapter/questions.js'),
+  import('../src/i18n.js'), import('@deepseek-ai/cordis'),
+  import('../src/dsh-adapter/channel.js'), import('../src/dsh-adapter/channel-ui.js'),
   import('../src/adapter/channel/host-registry.js'),
 ])
 
-const EMPTY: readonly never[] = Object.freeze([])
 const ROWS = 36
 const TOKEN = '[Image #1]'
 const MODEL_BEFORE = 'probe-model-a'
 const MODEL_AFTER = 'probe-model-b'
 const DRAFT = 'line-one\nline-two'
-const placeholder = t('launchpad-placeholder')
 const noop = () => {}
-const subscribeNone = () => noop
 const runtimeErrors: string[] = []
 const stderrWrite = process.stderr.write.bind(process.stderr)
 ;(process.stderr as { write: (...args: unknown[]) => unknown }).write = (chunk: unknown, ...args: unknown[]) => {
   if (String(chunk).includes('[dsh-tui]')) runtimeErrors.push(String(chunk))
   return (stderrWrite as (...args: unknown[]) => unknown)(chunk, ...args)
 }
-
 async function wait(label: string, predicate: () => boolean): Promise<void> {
   assert.equal(await settled(predicate, { timeoutMs: 8000 }), true, label)
 }
 
-function makeChannel(legacy: boolean) {
-  const listeners = new Set<() => void>()
-  const state = {
-    generation: 0,
-    imageGeneration: 0,
-    nextImage: 1,
-    continuedFromAgentId: undefined as string | undefined,
-    staged: new Map<string, { id: string; path: string }>(),
-    rows: [{ id: 1, kind: 'user' as const, text: 'probe transcript row' }],
+function channelFixture() {
+  const agent = (id: string) => ({
+    id, status: 'idle', options: { provider: 'deepseek', model: MODEL_BEFORE },
+    ctx: { on: () => noop },
+    session: {
+      id: `session-${id}`, seq: 1, header: { cwd: '/tmp/probe' },
+      events: [{ seq: 0, time: 1, type: 'user/message', data: {
+        id: 'initial-prompt', source: { kind: 'user' }, content: [{ type: 'text', text: 'probe transcript row' }],
+      } }],
+    },
+    followup: noop, steer: noop, inbox: { remove: () => true }, cancel: noop, whenIdle: async () => {},
+  })
+  const ctx = new Context()
+  const provide = (ctx as unknown as { provide(name: string, value: unknown): void }).provide.bind(ctx)
+  let created = 0
+  provide('agents', { get: () => undefined, create: async () => ({ agent: agent(`new-${++created}`), dispose: async () => {} }) })
+  provide('attachments', {
+    imageLimits: { mediaTypes: ['image/png'], maxImageBytes: 1_000_000, maxImagesPerMessage: 8, maxMessageImageBytes: 8_000_000, maxImageDimension: 8192, maxImagePixels: 64_000_000 },
+    saveImage: async (input: { data: Uint8Array }) => ({ attachmentId: 'image-1', mediaType: 'image/png', width: 1, height: 1, bytes: input.data.byteLength }),
+    readImage: async () => ({ data: png }),
+  })
+  const raw = createChannel(ctx as never, agent('boot') as never, {
+    model: MODEL_BEFORE, cwd: '/tmp/probe', provider: 'deepseek', activity: false, whale: false, whaleIdle: false,
+  })
+  const staged: string[] = []
+  const stageImage = raw.stageComposerImage
+  raw.stageComposerImage = async (input, generation) => {
+    const handle = await stageImage(input, generation)
+    staged.push(handle.stageId)
+    return handle
   }
-  const channel = {
-    version: 0,
-    agentId: 'probe-agent',
-    sessionId: 'probe-session',
-    model: MODEL_BEFORE,
-    provider: 'deepseek',
-    status: 'idle',
-    sessionTitle: 'probe',
-    whaleIdle: false,
-    reasoningEffort: 'max',
-    effortLevels: EMPTY,
-    tokens: { input: 0, output: 0 },
-    cwd: '/tmp/probe',
-    displayCwd: '/tmp/probe',
-    gitBranch: 'main',
-    working: false,
-    spinnerMode: 'requesting',
-    responseChars: 0,
-    activeToolCount: 0,
-    turnStart: 0,
-    pending: EMPTY,
-    commandList: LOCAL_COMMANDS,
-    notifications: EMPTY,
-    mode: { plan: false, sandbox: undefined },
-    activityFrames: 'moon8',
-    lastUserText: '',
-    scrollGutter: 'timeline',
-    subagents: EMPTY,
-    backgroundJobs: EMPTY,
-    get rows() { return state.rows },
-    get agentBindingGeneration() { return state.generation },
-    get continuedFromAgentId() { return state.continuedFromAgentId },
-    subscribe(listener: () => void) {
-      listeners.add(listener)
-      return () => listeners.delete(listener)
-    },
-    bump() {
-      channel.version += 1
-      for (const listener of listeners) listener()
-    },
-    submit: noop,
-    cancel: noop,
-    clear: noop,
-    notify: noop,
-    listModels: async () => [],
-    listSessions: async () => [],
-    deleteSession: async () => true,
-    renameSessionTo: async () => true,
-    setResumeTarget: noop,
-    loadOlder: noop,
-    mcpStatus: () => EMPTY,
-    pushLocal: noop,
-    commandCompletions: (input: string) => completeCommands(input),
-    stagedImageGeneration: () => state.imageGeneration,
-    stagedImage: (id: string) => state.staged.get(id),
-    hasStagedImage: (id: string) => state.staged.has(id),
-    discardStagedImage: (id: string) => { state.staged.delete(id) },
-    stagedImageLimits: () => ({ maxImageBytes: 1_000_000, maxImagesPerMessage: 8, maxImageDimension: 8192, maxImagePixels: 64_000_000 }),
-    stageComposerImage: async () => {
-      const stageId = `stage-${state.nextImage++}`
-      state.staged.set(stageId, { id: stageId, path: imagePath })
-      return { stageId }
-    },
-    previewImages: () => EMPTY,
-    subagentControl: { interrupt: noop },
-    backgroundCurrent: async () => ({ ok: true, backgroundedSessionId: 'probe' }),
-    agentViewRows: () => EMPTY,
-    subscribeAgentView: subscribeNone,
-    settingsHost: () => undefined,
-    settingsSections: () => EMPTY,
-    subscribeSettingsSections: subscribeNone,
-    buildSessionTree: () => new Promise<null>(() => {}),
-    listPresets: async () => [],
-    permissionPresets: () => ({ availability: 'unavailable' as const, current: undefined }),
+  const unregister = registerTuiChannel(ctx, raw)
+  const mounted = mountChannelUi(ctx, raw, undefined, 'new')
+  return {
+    ui: mounted.channel, staged,
+    get created() { return created },
+    dispose() { mounted.dispose(); unregister(); raw.releaseContributions() },
   }
-  if (legacy) delete (channel as Partial<typeof channel>).continuedFromAgentId
-  return { channel, state }
 }
-
 class Stdin extends PassThrough {
   isTTY = true
   setRawMode() { return this }
   ref() { return this }
   unref() { return this }
 }
-
-async function mount(options: { launchpad?: boolean; legacy?: boolean; fullscreen?: boolean; columns?: number } = {}) {
-  const cols = options.columns ?? (options.launchpad ? 120 : 100)
-  const term = new XTerm({ cols, rows: ROWS, scrollback: 0, allowProposedApi: true })
-  const stdout = Object.assign(new Writable({
-    write(chunk, _encoding, done) { term.write(String(chunk), done) },
-  }), { columns: cols, rows: ROWS, isTTY: true })
+async function mount(fullscreen: boolean, columns: number, launchpad = false) {
+  const term = new XTerm({ cols: columns, rows: ROWS, scrollback: 0, allowProposedApi: true })
+  const stdout = Object.assign(new Writable({ write(chunk, _encoding, done) { term.write(String(chunk), done) } }), { columns, rows: ROWS, isTTY: true })
   const stderr = Object.assign(new Writable({ write(_chunk, _encoding, done) { done() } }), { isTTY: true })
   const stdin = new Stdin()
-  const fixture = makeChannel(options.legacy === true)
+  const fixture = channelFixture()
+  const controller = { current: null as PromptController | null }
   const app = await render(React.createElement(Chat, {
-    channel: fixture.channel as never,
-    questionStore: new QuestionStore(),
-    fullscreen: options.fullscreen ?? true,
-    launchpadOnBoot: options.launchpad === true,
+    channel: fixture.ui, questionStore: new QuestionStore(), fullscreen,
+    launchpadOnBoot: launchpad, promptControllerRef: controller,
   }), { stdout: stdout as never, stdin: stdin as never, stderr: stderr as never, exitOnCtrlC: false, patchConsole: false })
-  return { ...fixture, term, stdin, unmount: () => app.unmount() }
+  return { fixture, ui: fixture.ui, term, stdin, controller, unmount() { app.unmount(); fixture.dispose() } }
 }
 type Harness = Awaited<ReturnType<typeof mount>>
-
+const paste = (app: Harness, text: string) => app.stdin.write(`\x1b[200~${text}\x1b[201~`)
 function composer(app: Harness) {
   const rows = viewportLines(app.term)
   const bottom = rows.findLastIndex(row => row.includes('╰'))
@@ -179,28 +114,21 @@ function composer(app: Harness) {
   while (top >= 0 && !rows[top]!.includes('╭')) top -= 1
   const block = rows.slice(top, bottom + 1).map(row => row.trimEnd())
   if (top < 0 || !block.some(row => row.includes('❯')) || !block.some(row => row.includes('⛶'))) return null
-  // Transcript changes can move the whole box; only the caret within it matters.
+  // Transcript changes can move the box; compare the caret relative to it.
   return { block, caret: { x: app.term.buffer.active.cursorX, row: app.term.buffer.active.cursorY - top } }
 }
 const hasDraft = (app: Harness, text: string) => composer(app)?.block.join('\n').includes(text) ?? false
-const paste = (app: Harness, text: string) => app.stdin.write(`\x1b[200~${text}\x1b[201~`)
-function anchor(app: Harness, text: string) {
-  app.state.rows.push({ id: app.state.rows.length + 1, kind: 'user', text })
-  app.channel.bump()
+async function fence(app: Harness, text: string) {
+  // A separate update fences effects and terminal writes from the prior frame.
+  app.ui.notify(text, { timeoutMs: 0 })
+  await wait(`post-update frame: ${text}`, () => screenHas(app.term, text))
 }
-function adopt(app: Harness, continued: boolean) {
-  app.state.continuedFromAgentId = continued ? app.channel.agentId : undefined
-  app.channel.agentId = app.channel.sessionId = 'next-agent'
-  app.channel.model = MODEL_AFTER
-  app.state.generation += 1
-  app.state.imageGeneration += 1
-  app.state.staged.clear()
-  anchor(app, 'SWITCH-COMMITTED')
-}
-
-function tokenIsChip(app: Harness): boolean {
+function tokenIsChip(app: Harness) {
   const buffer = app.term.buffer.active
-  for (let row = 0; row < ROWS; row += 1) {
+  const state = composer(app)
+  if (state === null) return false
+  const top = buffer.cursorY - state.caret.row
+  for (let row = top; row < top + state.block.length; row += 1) {
     const line = buffer.getLine(buffer.baseY + row)
     const col = line?.translateToString(true).indexOf(TOKEN) ?? -1
     if (col < 0) continue
@@ -210,172 +138,101 @@ function tokenIsChip(app: Harness): boolean {
   }
   return false
 }
-
-async function typeDraft(app: Harness) {
-  await wait('composer mounted', () => composer(app) !== null)
-  paste(app, DRAFT)
-  await wait('multiline draft painted', () => hasDraft(app, 'line-one') && hasDraft(app, 'line-two'))
-  const end = app.term.buffer.active.cursorX
-  for (let step = 1; step <= 3; step += 1) {
-    app.stdin.write('\x1b[D')
-    await wait('caret moved left', () => app.term.buffer.active.cursorX === end - step)
-  }
+async function dashboard(app: Harness, open: boolean) {
+  app.stdin.write(open ? '\x01' : '\x1b')
+  await wait(open ? 'composer parked' : 'composer remounted', () => {
+    const visible = viewportLines(app.term).some(line => /^\s*─+\s*子代理面板\s*─+\s*$/u.test(line))
+    return visible === open && (composer(app) === null) === open
+  })
 }
-
-async function chatCase(options: { continued: boolean; legacy?: boolean; image?: boolean }) {
-  const app = await mount(options)
+async function chatCase(fullscreen: boolean, columns: number, parked: boolean) {
+  const app = await mount(fullscreen, columns)
+  const label = `${fullscreen ? 'fullscreen' : 'inline'} ${columns}, ${parked ? 'parked' : 'mounted'}`
   try {
-    if (options.legacy) assert.equal('continuedFromAgentId' in app.channel, false)
-    await typeDraft(app)
-    if (options.image) {
-      paste(app, imagePath)
-      await wait('image token painted', () => hasDraft(app, TOKEN))
-      assert.equal(tokenIsChip(app), true, 'chip probe sees the live image before revocation')
+    await wait('composer mounted', () => composer(app) !== null)
+    paste(app, DRAFT)
+    await wait('multiline draft painted', () => hasDraft(app, 'line-one') && hasDraft(app, 'line-two'))
+    const end = app.term.buffer.active.cursorX
+    for (let step = 1; step <= 3; step += 1) {
+      app.stdin.write('\x1b[D')
+      await wait('caret moved left', () => app.term.buffer.active.cursorX === end - step)
     }
+    paste(app, imagePath)
+    await wait('image staged', () => hasDraft(app, TOKEN))
+    assert.equal(tokenIsChip(app), true, 'positive control for image binding')
+    const images = () => app.controller.current?.previewImages?.().map(({ image, title }) => [image.id, title]) ?? []
+    const refs = images()
+    assert.equal(refs.length, 1)
+    const stageId = app.fixture.staged[0]!
     const before = composer(app)
-    anchor(app, 'CONTROL-COMMITTED')
-    await wait('neutral render committed', () => screenHas(app.term, 'CONTROL-COMMITTED'))
-    assert.deepEqual(composer(app), before, 'neutral render preserves text and caret')
-    adopt(app, options.continued)
-    await wait('switch committed', () => screenHas(app.term, 'SWITCH-COMMITTED'))
-    if (options.continued) assert.deepEqual(composer(app), before, 'continuation preserves text and caret')
-    else await wait('replacement clears the draft', () => !hasDraft(app, 'line-one'))
-    if (options.image) {
-      assert.equal(app.state.staged.size, 0)
-      assert.equal(tokenIsChip(app), false, 'revoked capability becomes plain text')
+    await fence(app, 'CONTROL-FRAME')
+    assert.deepEqual(composer(app), before, `${label}: neutral render`)
+    if (parked) {
+      await dashboard(app, true)
+      await dashboard(app, false)
+      await wait('control draft restored', () => hasDraft(app, TOKEN))
+      assert.deepEqual(composer(app), before, `${label}: ordinary round trip`)
+      await dashboard(app, true)
     }
+    const identity = [app.ui.agentId, app.ui.sessionId, app.ui.agentBindingGeneration, app.ui.stagedImageGeneration()]
+    assert.equal(await app.ui.switchModel('deepseek', MODEL_AFTER), true)
+    assert.equal(app.fixture.created, 0, 'model switch never creates another agent')
+    assert.deepEqual([app.ui.agentId, app.ui.sessionId, app.ui.agentBindingGeneration, app.ui.stagedImageGeneration()], identity)
+    if (parked) await dashboard(app, false)
+    await wait('new model painted', () => screenHas(app.term, MODEL_AFTER))
+    await fence(app, 'POST-SWITCH-FRAME')
+    assert.deepEqual(composer(app), before, `${label}: text and caret survive`)
+    assert.deepEqual(images(), refs, 'draft keeps its original image capability')
+    assert.equal(app.ui.hasStagedImage(stageId), true)
+    assert.equal(tokenIsChip(app), true, 'image remains bound after model switch')
+    if (fullscreen && columns === 48 && parked) console.log(composer(app)?.block.join('\n'))
+    if (parked) await dashboard(app, true)
+    assert.equal(await app.ui.newSession(), true)
+    if (parked) await dashboard(app, false)
+    await fence(app, 'POST-NEW-FRAME')
+    assert.notEqual(app.ui.agentId, identity[0])
+    await wait('replacement clears the draft', () => composer(app) !== null && app.controller.current?.text?.() === '')
+    assert.equal(app.ui.hasStagedImage(stageId), false, 'new conversation revokes old images')
   } finally { app.unmount() }
 }
-
 function launchpadDraft(app: Harness) {
   const row = viewportLines(app.term).find(line => line.includes('❯')) ?? ''
   const text = row.slice(row.indexOf('❯') + 1).replace(/│\s*$/u, '').trim()
-  return text.startsWith(placeholder) ? '' : text
+  return text.startsWith(t('launchpad-placeholder')) ? '' : text
 }
-const modelRow = (app: Harness) => viewportLines(app.term).findLast(row => row.includes('  ·  ')) ?? ''
-async function launchpadCase(continued: boolean) {
-  const app = await mount({ launchpad: true })
+async function launchpadCase(fullscreen: boolean, columns: number) {
+  const app = await mount(fullscreen, columns, true)
   try {
-    await wait('launchpad mounted', () => screenHas(app.term, placeholder))
+    await wait('launchpad mounted', () => screenHas(app.term, t('launchpad-placeholder')))
     paste(app, 'launch-draft-keep')
     await wait('launchpad draft painted', () => launchpadDraft(app) === 'launch-draft-keep')
-    assert.ok(modelRow(app).includes(MODEL_BEFORE))
-    adopt(app, continued)
-    await wait('new model painted', () => modelRow(app).includes(MODEL_AFTER))
-    // A second frame fences the launchpad's passive clear effect.
-    app.channel.model = `${MODEL_AFTER}-tick`
-    app.channel.bump()
-    await wait('passive effect flushed', () => modelRow(app).includes(`${MODEL_AFTER}-tick`))
-    assert.equal(launchpadDraft(app), continued ? 'launch-draft-keep' : '')
+    const beforeCaret = { x: app.term.buffer.active.cursorX, y: app.term.buffer.active.cursorY }
+    assert.equal(await app.ui.switchModel('deepseek', MODEL_AFTER), true)
+    await wait('new launchpad model painted', () => screenHas(app.term, MODEL_AFTER))
+    await fence(app, 'LAUNCHPAD-SWITCH-FRAME')
+    assert.equal(launchpadDraft(app), 'launch-draft-keep')
+    assert.deepEqual({ x: app.term.buffer.active.cursorX, y: app.term.buffer.active.cursorY }, beforeCaret)
+    assert.equal(app.fixture.created, 0)
+    assert.equal(await app.ui.newSession(), true)
+    await fence(app, 'LAUNCHPAD-NEW-FRAME')
+    await wait('replacement clears launchpad draft', () => launchpadDraft(app) === '')
     assert.equal(composer(app), null, 'launchpad stays open')
   } finally { app.unmount() }
 }
-
-async function parkedCase() {
-  for (const fullscreen of [false, true]) {
-    for (const columns of [100, 48]) {
-      for (const continued of [true, false]) {
-        const app = await mount({ fullscreen, columns })
-        const label = `${fullscreen ? 'fullscreen' : 'inline'} ${columns}, ${continued ? 'continuation' : 'replacement'}`
-        const dashboard = () => viewportLines(app.term).some(line => /^\s*─+\s*子代理面板\s*─+\s*$/u.test(line))
-        const park = async () => {
-          app.stdin.write('\x01')
-          await wait(`${label}: parked`, () => dashboard() && composer(app) === null)
-        }
-        const resume = async () => {
-          app.stdin.write('\x1b')
-          await wait(`${label}: remounted`, () => !dashboard() && composer(app) !== null)
-        }
-        try {
-          await typeDraft(app)
-          paste(app, imagePath)
-          await wait('image staged', () => hasDraft(app, TOKEN))
-          assert.equal(tokenIsChip(app), true)
-          const before = composer(app)
-          await park()
-          await resume()
-          await wait('control draft restored', () => hasDraft(app, TOKEN))
-          assert.deepEqual(composer(app), before, `${label}: control round trip`)
-          await park()
-          adopt(app, continued)
-          await resume()
-          await wait('switch committed', () => screenHas(app.term, 'SWITCH-COMMITTED'))
-          assert.equal(app.state.staged.size, 0)
-          if (continued) {
-            await wait('parked draft restored', () => hasDraft(app, TOKEN))
-            assert.deepEqual(composer(app), before, label)
-            assert.equal(tokenIsChip(app), false, 'revoked image stays plain text')
-            if (fullscreen && columns === 48) console.log(composer(app)?.block.join('\n'))
-          } else {
-            assert.equal(hasDraft(app, 'line-one') || hasDraft(app, TOKEN), false, label)
-          }
-        } finally { app.unmount() }
-      }
-    }
-  }
-}
-
-async function facadeCase() {
-  const agent = (id: string) => ({
-    id, status: 'idle', options: {}, ctx: { on: subscribeNone },
-    session: { id: `session-${id}`, seq: 0, events: [], header: {} },
-    followup: noop, steer: noop, inbox: { remove: () => true }, cancel: noop,
-    whenIdle: async () => {},
-  })
-  const ctx = new Context()
-  const provide = (ctx as unknown as { provide(name: string, value: unknown): void }).provide.bind(ctx)
-  const roster = ['switched-agent', 'replaced-agent']
-  provide('agents', {
-    get: () => undefined,
-    create: async () => {
-      const id = roster.shift()
-      assert.ok(id, 'unexpected extra agent creation')
-      return { agent: agent(id), dispose: async () => {} }
-    },
-  })
-  provide('sessions', { fork: () => ({ events: [] }) })
-  const raw = createChannel(ctx as never, agent('boot-agent') as never, { model: MODEL_BEFORE, cwd: '/tmp/probe', provider: 'deepseek', activity: false })
-  const unregister = registerTuiChannel(ctx, raw)
-  const mounted = mountChannelUi(ctx, raw, undefined, 'new')
-  const ui = mounted.channel
-  try {
-    assert.equal('continuedFromAgentId' in ui, true, 'production projection carries the property')
-    assert.equal(ui.continuedFromAgentId, undefined)
-    assert.equal(await ui.switchModel('deepseek', MODEL_AFTER), true)
-    assert.equal(ui.agentId, 'switched-agent')
-    assert.equal(ui.sessionId, 'session-switched-agent')
-    assert.equal(ui.continuedFromAgentId, 'boot-agent', 'real model-switch action records the source')
-    assert.equal(ui.continuedFromAgentId, raw.continuedFromAgentId, 'facade reads live state')
-    assert.ok(existsSync(join(home, '.dsh-tui', 'last-used.json')) && existsSync(join(home, '.dsh-tui', 'model.json')), 'action preferences stay in the isolated home')
-    assert.equal(await ui.newSession(), true)
-    assert.equal(ui.agentId, 'replaced-agent')
-    assert.equal(ui.continuedFromAgentId, undefined, 'replacement resets the fact')
-  } finally {
-    mounted.dispose()
-    unregister()
-    raw.releaseContributions()
-  }
-}
-
 const scenarios = [
-  { id: 'A', name: 'mounted draft text and caret', run: () => chatCase({ continued: true }) },
-  { id: 'B', name: 'launchpad continuation', run: () => launchpadCase(true) },
-  { id: 'C', name: 'replacement and legacy channels', run: async () => {
-    await chatCase({ continued: false })
-    await chatCase({ continued: false, legacy: true })
-    await launchpadCase(false)
-  } },
-  { id: 'E', name: 'mounted image revocation', run: () => chatCase({ continued: true, image: true }) },
-  { id: 'F', name: 'real action and facade projection', run: facadeCase },
-  { id: 'G', name: 'parked drafts in both terminal modes and widths', run: parkedCase },
+  { id: 'A', name: 'mounted draft', run: chatCase, parked: false },
+  { id: 'B', name: 'launchpad draft', run: launchpadCase, parked: false },
+  { id: 'G', name: 'parked draft', run: chatCase, parked: true },
 ]
 try {
   const selected = (process.env.VERIFY_DRAFT_SWITCH_SCENARIOS ?? '').split(',').map(id => id.trim().toUpperCase()).filter(Boolean)
   assert.ok(selected.every(id => scenarios.some(test => test.id === id)), 'unknown scenario selection')
   for (const test of scenarios.filter(test => selected.length === 0 || selected.includes(test.id))) {
     try {
-      await test.run()
-      console.log(`PASS ${test.id}: ${test.name}`)
+      for (const fullscreen of [false, true]) {
+        for (const columns of [100, 48]) await test.run(fullscreen, columns, test.parked)
+      }
+      console.log(`PASS ${test.id}: ${test.name} in both terminal modes and widths`)
     } catch (error) {
       console.error(`FAIL ${test.id}: ${test.name}`, error)
       process.exitCode = 1

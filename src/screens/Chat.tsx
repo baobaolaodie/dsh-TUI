@@ -793,10 +793,8 @@ export function Chat({
     const previous = launchpadSessionRef.current
     launchpadSessionRef.current = { id: channel.agentId, imageGeneration: composerImageGeneration }
     if (previous.id === '' && channel.agentId !== '' && previous.imageGeneration === composerImageGeneration) return
-    if (channel.continuedFromAgentId !== previous.id) {
-      setLaunchpadDraft('')
-      setLaunchpadCaret(0)
-    }
+    setLaunchpadDraft('')
+    setLaunchpadCaret(0)
     discardLaunchpadImages()
   }, [channel, channel.agentId, launchpadBindingGeneration])
   /**
@@ -2040,21 +2038,16 @@ export function Chat({
    * typed in between (the tree's hand-off, a fast user) would be wiped with the
    * old conversation's text. Which DRAFT the slot keeps is a separate question,
    * answered by the snapshot's owner fields.
-   *
-   * A model switch preserves the draft only when its continuation fact names
-   * the previous binding; replacements and older hosts still clear it.
    */
   React.useLayoutEffect(() => {
     const previous = draftSessionRef.current
     draftSessionRef.current = { id: draftSessionId, generation: draftBindingGeneration, imageGeneration: composerImageGeneration }
     if (previous.id === draftSessionId) return
-    const startupAdoption = previous.id === '' && previous.imageGeneration === composerImageGeneration
-    const continuation = channel.continuedFromAgentId === previous.id
-    if (startupAdoption || continuation) {
-      // A covered composer parked its draft under the previous binding.
-      // Transfer that ownership before the remounted input checks the slot.
+    if (previous.id === '' && previous.imageGeneration === composerImageGeneration) {
+      // Startup adoption gives the existing draft its first conversation.
+      // A covered composer has parked that draft in the owner slot instead.
       const snapshot = promptDraftRef.current.current
-      if (snapshot?.ownerAgentId === String(previous.id) && snapshot.bindingGeneration === previous.generation) {
+      if (snapshot?.ownerAgentId === '' && snapshot.bindingGeneration === previous.generation) {
         promptDraftRef.current.current = {
           ...snapshot,
           ownerAgentId: String(draftSessionId),
@@ -2994,8 +2987,8 @@ export function Chat({
         setHelpOpen(true)
         return true
       case 'model': {
-        // `/model <provider/model>` switches directly (same live-fork path
-        // as the picker's Enter), bare `/model` opens the picker.
+        // `/model <provider/model>` switches directly (same in-session route
+        // switch as the picker's Enter), bare `/model` opens the picker.
         const parts = rawInput.trim().split(/\s+/).filter(Boolean)
         if (parts.length > 0) {
           setHelpOpen(false)

@@ -1,144 +1,71 @@
 import type { Context } from '@deepseek-ai/cordis'
-import type { AgentHandle, CreateAgentOptions } from '@deepseek-ai/dsh-agent'
-import { randomUUID } from 'node:crypto'
-import { SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
-import type { AgentSession } from '../../agent/session.js'
+import type { ModelSelectionRef } from '@deepseek-ai/dsh-agent'
 import { t } from '../../i18n.js'
 import { WORKING_GATE_NOTICES } from '../../commands.js'
 import { writeModelPref } from '../../modelPrefs.js'
-import { touchSession } from '../../sessionHistory.js'
-import { createDshSession, dshHandleOf } from '../backend/session.js'
-import { liveSessionCreateOptions, sliceLiveSessionSeed, snapshotLiveSessionEvents } from '../compat/index.js'
-import { createFreshAgent, isUnstoredFreshSession } from '../fresh-agent.js'
-import { composePreset, runningPresetOf } from '../presets.js'
-import { holdsNoConversation, latestPolicyFacts, replayPolicyFacts } from '../session-seed.js'
-import { reserveNewSession } from '../../sessionMounts.js'
-import { attachSessionToWorkspace } from '../workspace.js'
-import type { DshChannelBinding } from './binding.js'
+import type { createChannelBinding } from './binding.js'
 import type { ChannelOwner } from './owner.js'
-import { resetSessionProjection } from './session-reset.js'
-import { childRecordsLineage } from './session-lineage.js'
 import type { ChannelState } from './types.js'
 
-type Binding = DshChannelBinding
-type SwitchState = Parameters<typeof resetSessionProjection>[0] & Pick<ChannelState,
-  'cwd' | 'working' | 'status' | 'agentId' | 'sessionId' | 'agentPreset' | 'provider' | 'model' | 'contextWindow' | 'effortLevels' | 'reasoningEffort' | 'emit'>
+type Binding = ReturnType<typeof createChannelBinding>
+type SwitchState = Pick<ChannelState, 'working' | 'provider' | 'model' | 'contextWindow' | 'effortLevels' | 'reasoningEffort' | 'emit'>
 
-/** Model-route adoption transaction. It settles compaction before its fork snapshot and owns the post-commit reset. */
+/** Select the next request's route without replacing the conversation or its agent. */
 export function createModelSwitchAction(
   ctx: Context,
   state: SwitchState,
   deps: {
     owner: Pick<ChannelOwner, 'current'>
-    binding: Pick<Binding, 'agent' | 'capture' | 'prepare' | 'isCurrent' | 'abandon' | 'adopt'>
-    rowIds: { value: number }
-    settleCompaction(): Promise<void>
-    resetProjector(): void
-    resetSubagents(): void
-    resetJobs(): void
-    replay(events: readonly SessionEvent[]): void
-    settleReplay(): void
-    bindAgent(): void
-    refreshCommands(): void
-    refreshLoadedContext(): Promise<void>
-    refreshSkillCommands(): Promise<void>
-    clearStagedImages(): void
+    binding: Pick<Binding, 'capture' | 'isCurrent'>
+    selection: ModelSelectionRef
+    /** Legacy DSH delegates from immutable creation options instead of request headers. */
+    supportsRouteSwitch: boolean
+    applyPreferredEffort(): Promise<void>
     dropModelCompletion(): void
+    /** No bind follows an in-session switch, so seed the new route here. */
+    seedUpstreamRetry(provider: string): void
     notify: ChannelState['notify']
   },
 ) {
+  let operation = 0
   return async (provider: string, model: string): Promise<boolean> => {
-    const adoption = deps.binding.capture()
+    if (!deps.owner.current()) return false
     if (state.working) { deps.notify(t(WORKING_GATE_NOTICES.model), { color: 'warning' }); return false }
-    const agents = ctx.get('agents') as { create(options: CreateAgentOptions): Promise<AgentHandle> } | undefined
-    if (agents === undefined) { deps.notify(t('model-switch-unavailable'), { color: 'error' }); return false }
-    const source = deps.binding.agent.session
-    let seed: readonly SessionEvent[]
-    let cut: readonly SessionEvent[]
-    const neverUsed = isUnstoredFreshSession(source)
-    try {
-      await deps.settleCompaction()
-      cut = neverUsed ? snapshotLiveSessionEvents(source) : sliceLiveSessionSeed(source)
-      seed = neverUsed || holdsNoConversation(cut) ? [] : cut
-    } catch (error) { deps.notify(t('model-switch-fork-failed', { err: error instanceof Error ? error.message : String(error) }), { color: 'error' }); return false }
-    // A policy-only cut starts fresh; seeded creation would publish it immediately.
-    const cutHoldsNoConversation = seed.length === 0
-    const policyFacts = cutHoldsNoConversation ? latestPolicyFacts(cut) : []
-    const childId = SessionId(randomUUID())
-    // Announce the id before the factory: from the moment `agents.create`
-    // returns this process holds the only write handle on a log the publisher
-    // will not name until its next beat.
-    const { reservation } = await reserveNewSession(String(childId))
-    const composed = await composePreset(ctx, runningPresetOf(source))
-    let candidate: AgentSession
-    try {
-      const create = (): Promise<AgentHandle> => cutHoldsNoConversation
-        ? createFreshAgent(ctx, agents, {
-          sessionId: childId,
-          meta: { cwd: state.cwd, ...(composed.agentPreset === undefined ? {} : { agentPreset: composed.agentPreset }) },
-          agentOptions: { provider, model },
-          setup: composed.setup,
-        })
-        : agents.create(liveSessionCreateOptions({
-          sessionId: childId,
-          seed,
-          runtimeSession: source,
-          inheritedCount: seed.length,
-          cwd: state.cwd,
-          parentSession: childRecordsLineage(seed) ? source.id : undefined,
-          agentPreset: composed.agentPreset,
-          agentOptions: { provider, model },
-          setup: composed.setup,
-        }))
-      candidate = await deps.binding.prepare(adoption, async () => {
-        const handle = await create()
-        if (cutHoldsNoConversation) replayPolicyFacts(handle.agent.session, policyFacts)
-        return createDshSession(ctx, handle)
-      })
-    } catch (error) { reservation.abandon(); deps.notify(t('model-switch-failed', { err: error instanceof Error ? error.message : String(error) }), { color: 'error', timeoutMs: 8000 }); return false }
-    try { await attachSessionToWorkspace(ctx, state.cwd, childId) }
-    catch (error) { deps.notify(t('model-switch-attach-failed', { err: error instanceof Error ? error.message : String(error) }), { color: 'warning', timeoutMs: 8000 }) }
-    if (!deps.binding.isCurrent(adoption) || !deps.owner.current()) { await deps.binding.abandon(candidate); reservation.abandon(); return false }
-    const handle = dshHandleOf(candidate)
-    let committed = false
-    try {
-      const result = deps.binding.adopt<boolean>(candidate, adoption, (previous, disposePrevious) => {
-        resetSessionProjection(state, deps.rowIds, deps.resetProjector, deps.resetSubagents, deps.resetJobs)
-        // Record continuation after the shared reset clears the previous fact.
-        state.continuedFromAgentId = String(previous.agent.id)
-        state.status = handle.agent.status
-        state.agentId = handle.agent.id
-        state.sessionId = handle.agent.session.id
-        state.agentPreset = composed.agentPreset
-        state.provider = provider
-        state.model = model
-        state.contextWindow = undefined
-        state.effortLevels = undefined
-        state.reasoningEffort = undefined
-        deps.dropModelCompletion()
-        deps.replay(seed)
-        deps.settleReplay()
-        state.working = handle.agent.status === 'running'
-        // Reset the input FIFO and pending-decision indicators BEFORE the first
-        // emit: a submit from a session-changed subscriber must not chain onto
-        // the replaced session's parked promise (main's bind → clear → refresh
-        // order).
-        deps.clearStagedImages()
-        deps.bindAgent()
-        deps.refreshCommands()
-        void deps.refreshLoadedContext()
-        void deps.refreshSkillCommands()
-        touchSession(childId)
-        state.emit()
-        disposePrevious('dispose')
-        if (!writeModelPref(provider, model)) deps.notify(t('model-pref-write-failed'), { color: 'warning' })
-        return true
-      })
-      committed = true
-      return result
-    } finally {
-      if (committed) reservation.settle()
-      else reservation.abandon()
+    const generation = ++operation
+    if (provider === state.provider && model === state.model) return true
+    if (!deps.supportsRouteSwitch) {
+      deps.notify(t('model-switch-legacy-unavailable'), { color: 'warning', timeoutMs: 8000 })
+      return false
     }
+    const capture = deps.binding.capture()
+    const current = (): boolean => deps.owner.current() && deps.binding.isCurrent(capture) && generation === operation
+    try {
+      const llm = ctx.get('llm') as { listModels?(provider: string): Promise<readonly { id: string }[]> } | undefined
+      if (llm?.listModels !== undefined) {
+        const models = await llm.listModels(provider)
+        if (models.length > 0 && !models.some(entry => entry.id === model)) throw new Error(`unknown model: ${provider}/${model}`)
+      }
+    } catch (error) {
+      if (current()) deps.notify(t('model-switch-failed', { err: error instanceof Error ? error.message : String(error) }), { color: 'error', timeoutMs: 8000 })
+      return false
+    }
+    if (!current()) return false
+    // A turn may have started during the model lookup; refuse it like the entry gate.
+    if (state.working) { deps.notify(t(WORKING_GATE_NOTICES.model), { color: 'warning' }); return false }
+    // Assembly captures this complete route for both persona variables and the
+    // request waterfall. The loop persists its actual header on the next request.
+    // In-flight compaction keeps running: it summarizes on the logged route.
+    deps.selection.current = { provider, model }
+    state.provider = provider
+    state.model = model
+    state.contextWindow = undefined
+    state.effortLevels = undefined
+    state.reasoningEffort = undefined
+    deps.dropModelCompletion()
+    void deps.applyPreferredEffort()
+    deps.seedUpstreamRetry(provider)
+    if (!writeModelPref(provider, model)) deps.notify(t('model-pref-write-failed'), { color: 'warning' })
+    state.emit()
+    return true
   }
 }

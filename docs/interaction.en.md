@@ -352,7 +352,7 @@ screen, and Chat keeps the draft — text, caret position, the staged image refe
 the edit state around them (fold block, fullscreen draft editor, vim mode) — until `Esc`
 brings it back.
 
-- A draft belongs to its **session**, so it never follows you into another conversation. Switching the model does not count as changing the conversation: the unsent draft (text and caret) is kept. DSH currently switches through a fork, revoking staged image references and leaving their [Image #N] tokens as plain text; Claude and Codex switch in place and keep staged image references.
+- A draft belongs to its **session**, so it never follows you into another conversation.
 - The message `/rewind` hands back belongs to the session the rewind created, so it does stay in the input.
 
 | Key | Action |
@@ -510,9 +510,7 @@ Confirmation submits only explicit effort drafts. Changing only the model leaves
 `Enter` applies the model and effort; `Esc` cancels the draft. Shortcuts sit below the title, and a separate effort heading and level strip sit below the models, with the `←/→` hint beside the effort heading. Selectable levels use the body text color and the current level is highlighted. DSH, Claude, and Codex use the terminal background while covering the text underneath.
 Click tabs, models, and effort levels, then click **select** or **cancel** below the title; the wheel moves through the model list. When space above the input is tight, navigation hints, model descriptions and neighboring models are omitted, effort collapses to one row, and Select / Cancel stay at the bottom. With only two rows, effort is hidden too, keeping the focused model and actions visible.
 
-`/model` switches through a session fork at the end of current history, because DSH has no in-place model-switch API. The old session remains in `/resume`. Switching the model does not count as changing the conversation: the unsent draft (text and caret) is kept. DSH currently switches through a fork, revoking staged image references and leaving their [Image #N] tokens as plain text; Claude and Codex switch in place and keep staged image references.
-
-- A session nobody has typed into records no branch: switching models there yields an independent session with no `parentSession` (inheriting the same session-scaffolding prefix), so the first real prompt you send still triggers automatic session-title generation. A session that already holds a conversation keeps its lineage as before.
+`/model` selects the next request’s route within the same DSH session, preserving its ID, history, and title. Switching is refused during a running turn. The next request records the actual route and a model-change notice. Parked agents retain their selection when reattached. After the process exits, a choice with no subsequent request is saved only as a global default; disk resume resolves the last recorded request route. DSH versions before `0.1.2-alpha.3` refuse switching and prompt an upgrade so legacy subagents cannot silently use the original model.
 
 - `/preset` switches in place only for a blank session. In a started session, the choice becomes the default for the next `/new` or launch.
 
@@ -854,7 +852,7 @@ Additional forms:
 - `/model` opens a two-level picker:
   - A pinned **Recently used** group first — the last 10 switched models, persisted at `~/.dsh-tui/model-recents.json` — then provider groups.
   - `Enter` drills into a group's models, and a single provider with no recents skips straight to the list.
-  - Switching = fork continuation, history preserved.
+  - Switching keeps the current session and history; the new model is used for the next request.
 - `/theme <name>` and `/theme status` are described in the theme guide.
 - `/permission` reads the DSH `permissionPresets` registry, preserving registry order for
   the picker, completion and the `Shift+Tab` cycle. Third-party presets need no TUI

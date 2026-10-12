@@ -29,7 +29,6 @@ export type SessionResetState = Pick<
    *  an adopted session must never carry the previous conversation's chips
    *  (or hand its model a panel context the user staged elsewhere). */
   | 'attachedContexts'
-  | 'continuedFromAgentId'
 >
 
 /**
@@ -84,8 +83,6 @@ export function resetSessionProjection(
   // A backend-reported cost belongs to the session that reported it.
   state.costReport = undefined
   state.attachedContexts = []
-  // Adoption defaults to replacement; a continuation caller overwrites this.
-  state.continuedFromAgentId = undefined
   state.contextSegments = {
     system: 0,
     prompt: 0,

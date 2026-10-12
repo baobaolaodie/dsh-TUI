@@ -25,7 +25,7 @@
  */
 import type { Context } from '@deepseek-ai/cordis'
 import { t } from '../../i18n.js'
-import type { Agent, AgentHandle, ModelSelectionRef } from '@deepseek-ai/dsh-agent'
+import type { Agent, AgentHandle } from '@deepseek-ai/dsh-agent'
 import type { CommandRuntime } from '@deepseek-ai/dsh-commands'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import type { DshNative } from '../../agent/capabilities.js'
@@ -34,6 +34,7 @@ import { channelCapabilities } from '../../channel/capabilities.js'
 import { isCommandCompletionToken, LOCAL_COMMANDS } from '../../commands.js'
 import { touchSession } from '../../sessionHistory.js'
 import { DEFAULT_SESSION_MODES, resolveSessionModes } from '../../sessionModes.js'
+import { installedMeetsVersion } from '../contract.js'
 import { createDshSession } from '../backend/session.js'
 import { createDshTranslator, dshPricingWindow } from '../backend/translate.js'
 import { getHostMessageObserver, type TuiMessageObserverRuntime } from '../message-observer.js'
@@ -55,6 +56,7 @@ import { createDetachedHandleFactory } from './lifetime-resources.js'
 import { createLoadedContextRefresher } from './loaded-context.js'
 import { createLocalActions } from './local-actions.js'
 import { mentionAttachments } from './mentions.js'
+import { createModelSelection } from './model-selection.js'
 import { createModelActions } from './model-actions.js'
 import { createModelSwitchAction } from './model-switch.js'
 import { createPermissionModeActions } from './mode-permission-actions.js'
@@ -120,7 +122,7 @@ export function attachDshExtensions(
   }
   // Upstream auto-retry seeding (upstream-retry.ts), scoped to the route
   // the bound session actually uses: the binding feed calls this on every
-  // bind (boot, /model switch, resume). The config gate defaults on,
+  // bind (boot, resume) and /model calls it for the route it selects. The config gate defaults on,
   // observational (shadow) compositions never write settings, and the
   // fire-and-forget promise never blocks a bind.
   const upstreamRetryAttempted = new Set<string>()
@@ -339,8 +341,8 @@ export function attachDshExtensions(
   const resetProjection = core.feed.resetProjection
   const projector = core.feed.projector
 
-  // Model selection is installed by bind; route/effort state is owned by model-actions.
-  const selection: ModelSelectionRef = { current: undefined, assembled: undefined }
+  const modelSelection = createModelSelection(ctx, { owner, agent: () => binding.agent })
+  const { selection } = modelSelection
   // Registry command policy and rc.8 image encoding are an owner-scoped module.
   const externalCommands = createExternalCommandInvoker(ctx, {
     commandService,
@@ -492,20 +494,11 @@ export function attachDshExtensions(
   const switchModelAction = createModelSwitchAction(ctx, state, {
     owner,
     binding,
-    rowIds,
-    // Compaction is installed below before the channel binds or exposes input.
-    settleCompaction: () => settleManualCompaction(),
-    resetProjector: resetProjection,
-    resetSubagents: subagentProjection.reset,
-    resetJobs: jobProjection.reset,
-    replay: replaySessionSeed,
-    settleReplay: projector.settleStreaming,
-    bindAgent: () => bindAgent(),
-    refreshCommands: refreshCommandList,
-    refreshLoadedContext,
-    refreshSkillCommands,
-    clearStagedImages,
+    selection,
+    supportsRouteSwitch: installedMeetsVersion('@deepseek-ai/dsh-agent', '0.1.2-alpha.3'),
+    applyPreferredEffort: () => modelActions.applyPreferredEffort(),
     dropModelCompletion: () => modelActions.dropModelNodeCache(),
+    seedUpstreamRetry,
     notify,
   })
 
@@ -534,8 +527,8 @@ export function attachDshExtensions(
   })
 
   // Event subscription routing is a distinct binding owner. Its hooks run in
-  // every core bind: owner-level child listeners once, then per binding the
-  // activity seed, the model selection waterfalls and the raw subscribers.
+  // every core bind: owner-level child listeners once, then the activity seed,
+  // activation of that agent's model selection, and foreground raw subscribers.
   const bindingEvents = createBindingEvents(ctx, {
     owner,
     binding,
@@ -543,7 +536,7 @@ export function attachDshExtensions(
     seedActivity: options.seedActivity,
     seedContextOccupancy: options.seedContextOccupancy,
     inputConvergence: core.inputConvergence,
-    selection,
+    modelSelection,
     modelActions,
     modeActions,
     projector,

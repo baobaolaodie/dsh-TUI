@@ -666,10 +666,8 @@ const GROUPS = {
 // 空草稿不留残留。这条测的是「渲染期写回会先于认领 effect 覆盖草稿」，
 // 只靠打字或由浮层换屏都到不了。
     ["verify-composer-draft-handoff", ['node', '--import', 'tsx/esm', 'scripts/verify-composer-draft-handoff.tsx']],
-// 模型切换草稿（#1455 第一项）：聊天页、启动页与卸载暂存的草稿保留文本/
-// 光标；替换会话仍清空，撤销的图片引用不复活。含真实 channel 门面投影、
-// legacy stub，以及 inline/fullscreen × 常规/窄终端的跨屏交错。
-// `VERIFY_DRAFT_SWITCH_SCENARIOS=A,B` 可运行子集。
+// 同会话换模型：真实 channel 门面与 Chat 保留文本、光标和图片；整屏停放、
+// inline/fullscreen × 常规/窄终端，以及 /new 清空旧草稿的对照。
     ["verify-composer-draft-model-switch", ['node', '--import', 'tsx/esm', 'scripts/verify-composer-draft-model-switch.tsx']],
 // Tooltip 悬停提示回归：悬停截断元素 ~600ms 后弹完整内容浮层——延迟未到
 // 不出现、到点内容正确、leave 即隐、leave 早于延迟取消、自定义 delayMs、
@@ -1130,15 +1128,12 @@ const GROUPS = {
 // （全量/截断/继承前缀跳过）、SessionTree 屏幕无头组装
 // （渲染、Enter 菜单、字母直达执行、Esc）。
     ["verify-session-tree", ['node', '--import', 'tsx/esm', 'scripts/verify-session-tree.tsx']],
-// 压缩 × 会话切换生命周期：压缩进行中 /model、/resume、/rewind 等必须先
-// abort 并等压缩落定再 fork 快照（后台提交 checkpoint = "压缩失败后换模型
-// 丢上下文"事故根因）；persistence 类失败与通用失败分开提示。
+// /model 保留压缩；fork/rewind 在快照前取消压缩。落盘失败须与通用失败区分。
     ["verify-compact-switch", ['node', '--import', 'tsx/esm', 'scripts/verify-compact-switch.tsx']],
     ["verify-live-session", ['node', '--import', 'tsx/esm', 'scripts/verify-live-session.ts']],
-// 血缘 × 自动标题回归：/model 在还没有人说过话的会话上不得写 parentSession
-// （上游 first-prompt 标题 provider 只为无 parent 的会话生成标题，fork 永不
-// 重试）；已有对话的源仍必须保留分支血缘，既有 /model 语义不得被削掉。
+// /model 保留会话与自动标题资格；路由及其异步快照跟随停放中的 agent。
     ["verify-session-title-lineage", ['node', '--import', 'tsx/esm', 'scripts/verify-session-title-lineage.ts']],
+    ["verify-model-route-lifetime", ['node', '--import', 'tsx/esm', 'scripts/verify-model-route-lifetime.ts']],
     ["verify-session-v3", ['node', '--import', 'tsx/esm', 'scripts/verify-session-v3.ts']],
     ["verify-session-tree-generations", ['node', '--import', 'tsx/esm', 'scripts/verify-session-tree-generations.ts']],
 // 裸 ● 空行回归：纯思考/纯工具步骤（无文本块）的 assistant/message
