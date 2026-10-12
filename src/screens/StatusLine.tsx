@@ -39,6 +39,8 @@ import { homeDir } from '../utils/paths.js'
 import {
   USED_SEGMENTS,
   channelContextOccupancy,
+  attributeBarTokens,
+  barSegments,
   contextBarBreakdown,
   contextBarSegmentColors,
   renderMiniContextBar,
@@ -670,6 +672,7 @@ const selectionBadge = formatSelectionBadge(channel.selection)
         {barVisible ? (
           <ContextBarView
             segments={channel.contextSegments}
+            breakdown={channel.contextBreakdown}
             usedTokens={contextUsed ?? 0}
             contextWindow={contextWindow ?? 0}
             width={barWidth}
@@ -789,9 +792,11 @@ function buildHoverDetail(
   if (hover === 'bar') {
     if (window === undefined || window <= 0 || contextUsed === undefined) return null
     // The bar's text-free design pays off here: this line is its legend, so
-    // every entry leads with a chip of the very color it names.
+    // every entry leads with a chip of the very color it names, and the numbers
+    // are the shares the fills above were drawn from — attributed to the
+    // occupancy, so five entries plus `free` make up the window.
     const { entries, separator } = contextBarBreakdown(
-      channel.contextSegments,
+      attributeBarTokens(barSegments(channel.contextSegments, channel.contextBreakdown), contextUsed),
       contextUsed,
       window,
       columns,
@@ -818,9 +823,18 @@ function buildHoverDetail(
       // The hover payoff for the ctx ask: percent + counts + free, then the
       // segment breakdown as the truncate-able tail (no bar — the row's
       // in-place morph and the segment bar above already carry the gauge).
-      const segments = USED_SEGMENTS.map(
-        segment => `${segment.labels[1] ?? segment.key} ${formatTokens(channel.contextSegments[segment.key])}`,
-      ).join(' · ')
+      // Match the bar's attributed shares, including its measured-used
+      // fallback when no content category can be attributed.
+      const sizes = attributeBarTokens(
+        barSegments(channel.contextSegments, channel.contextBreakdown),
+        contextUsed,
+      )
+      const hasComposition = USED_SEGMENTS.some(segment => sizes[segment.key] > 0)
+      const segments = hasComposition
+        ? USED_SEGMENTS.map(
+          segment => `${segment.labels[1] ?? segment.key} ${formatTokens(sizes[segment.key])}`,
+        ).join(' · ')
+        : `${t('context-bar-used')} ${formatTokens(contextUsed)}`
       return (
         <Text wrap="truncate">
           {((contextUsed / window) * 100).toFixed(1)}% ·{' '}
