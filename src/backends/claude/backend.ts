@@ -161,6 +161,31 @@ const rememberHost = (host: BackendHost): void => {
   installClaudeLocale(host.locale)
 }
 
+/**
+ * The `claude` this machine already has, as the extra hint line of the
+ * SDK-missing branch (D5/D6): the version it reports, or its path when the
+ * version cannot be read. Undefined when there is no CLI at all — the caller
+ * then keeps the plain SDK-missing sentence, and not joining is what makes
+ * "no CLI reads exactly as before" structural rather than a copy promise.
+ *
+ * Never throws: the probe reuses the same resolution chain and bounded
+ * timeouts as a session start, and a failed or timed-out one degrades to
+ * "nothing found", like a CLI that will not answer.
+ */
+async function foundClaudeCli(host: BackendHost): Promise<string | undefined> {
+  try {
+    const executable = await resolveClaudeExecutable()
+    if (executable.path === undefined) return undefined
+    const version = await readClaudeVersion(executable.path, host.appVersion)
+    return version === undefined
+      ? claudeText('claude-sdk-missing-found-cli-path', { path: executable.path })
+      : claudeText('claude-sdk-missing-found-cli', { version, path: executable.path })
+  } catch (error) {
+    host.debug(`claude: native CLI probe failed (${errorText(error)})`)
+    return undefined
+  }
+}
+
 export const claudeBackend: AgentBackend = {
   id: CLAUDE_BACKEND_ID,
   descriptor: { label: CLAUDE_BACKEND_LABEL },
@@ -172,7 +197,12 @@ export const claudeBackend: AgentBackend = {
       await loadClaudeSdk()
     } catch (error) {
       host.debug(`claude: SDK import failed (${errorText(error)})`)
-      return { installed: false, hint: claudeText('claude-sdk-missing', { version: VALIDATED_SDK_VERSION }) }
+      // A machine without the SDK may still have the CLI (the native
+      // installer, a global npm install): say which one was found, beside the
+      // install guidance and never instead of it (D5).
+      const missing = claudeText('claude-sdk-missing', { version: VALIDATED_SDK_VERSION })
+      const found = await foundClaudeCli(host)
+      return { installed: false, hint: found === undefined ? missing : `${missing}\n${found}` }
     }
     let auth: 'ok' | 'missing' | 'unknown' = 'unknown'
     try {
