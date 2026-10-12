@@ -147,6 +147,15 @@ try {
   await setImmediate()
   assert.equal(absent.get('sessionProjections'), undefined)
 } finally { await absent.fiber.dispose() }
+const late = new Context()
+try {
+  attachSessionListMetadata(late)
+  await late.plugin(Registry)
+  await setImmediate()
+  const empty = Session.create(SessionId('11111111-0000-4000-8000-000000000043'))
+  assert.deepEqual(late.get('sessionProjections')!.checkpoint(empty)[definition.key]?.val, initial,
+    'a registry composed after the entry still supplies the first session checkpoint')
+} finally { await late.fiber.dispose() }
 console.log('PASS real registry wire/checkpoint/restore, registration order, release and degradation')
 
 // Resolve through web-app's dependency tree, without adding a runtime dependency
