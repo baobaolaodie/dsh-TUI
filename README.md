@@ -212,8 +212,10 @@ including clicking outside it on the launchpad, cancels a pending installation.
 
 - **Sign-in**: a `/channel` relay profile, your dsh-auth `anthropic` sign-in
   (`/login`), `ANTHROPIC_API_KEY` or cloud-provider variables, or an existing
-  `claude login`, in that order. A `claude` on `PATH` is used when present,
-  otherwise the SDK's bundled binary.
+  `claude login`, in that order. A `claude` on `PATH` is used when present, then
+  one in the native install directory under your home (`~/.local/bin`, or
+  `%USERPROFILE%\.local\bin` on Windows); every candidate has to launch and
+  report a version, and the SDK's bundled binary is used only when none does.
 - **Works**: streaming, tool cards, approvals and questions, `/model`,
   `/effort`, Claude's permission modes (`/permission`, `Shift+Tab`),
   `/compact`, `/context`, `/mcp`, `/resume`, `/fork`, double-`Esc` rewind,

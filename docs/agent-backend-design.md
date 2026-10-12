@@ -117,8 +117,11 @@ SDK/原生进程；agent 读取 ports 类型并使用中立 helper。目录与 i
   `VALIDATED_SDK_VERSION`，CLI 的验证版本见 `VALIDATED_CLI_VERSIONS`；`package.json`、
   lockfile 与 `contract.ts` 是否一致由 `verify:claude-contract` 检查（在 `build` 里）。
   行为差异优先按 `system/init.capabilities` 判断，版本号只用来解释。
-- 可执行文件（`process.ts`）：`CLAUDE_CODE_EXECUTABLE` → `PATH` 上能启动的 `claude`
-  → SDK 自带二进制。子进程环境由 `process.env` 构造，并清掉父级 Claude Code 终端导出
+- 可执行文件（`process.ts`）：`CLAUDE_CODE_EXECUTABLE`（设置后原样采用）→ `PATH` 上能启动的
+  `claude`（npm 包装器会跟到它实际执行的入口）→ 用户主目录下的 `.local/bin`
+  （Windows `%USERPROFILE%\.local\bin\claude.exe`、POSIX `~/.local/bin/claude`）→ SDK
+  自带二进制；每个候选都要能启动并报出版本才被采用，`PATH` 命中优先于该回退目录。
+  子进程环境由 `process.env` 构造，并清掉父级 Claude Code 终端导出
   的会话变量（dsh-tui 可能就跑在那样的终端里）。子进程 stderr 只进调试日志和去重后的
   提示，不继承到终端。
 

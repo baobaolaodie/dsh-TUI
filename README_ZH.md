@@ -179,7 +179,9 @@ Enter，按引导一键安装——dsh-TUI 自己定位 profile 目录并装锁�
 
 - **登录**：依次使用 `/channel` 渠道档案、dsh-auth 的 `anthropic` 订阅登录（`/login`）、
   `ANTHROPIC_API_KEY` 或云厂商环境变量、本机已有的 `claude login`。`PATH` 上有
-  `claude` 就用它，否则用 SDK 自带的二进制。
+  `claude` 就用它，其次看用户主目录下的原生安装目录（`~/.local/bin`，Windows 是
+  `%USERPROFILE%\.local\bin`）；每个候选都要能启动并报出版本，都没有时才用 SDK
+  自带的二进制。
 - **可用**：流式回复、工具卡、审批与问卷、`/model`、`/effort`、Claude 的权限模式
   （`/permission`、`Shift+Tab`）、`/compact`、`/context`、`/mcp`、`/resume`、`/fork`、
   双击 `Esc` 回退、子代理、后台任务、图片、`/btw`，以及 Claude 上报的美元费用。
