@@ -273,7 +273,7 @@ dsh-tui
   表情包，22 个动画，被戳/被挠/被拎起来都有对应反应，独有「冒爱心」「举大拇指」）、`whale`（开屏
   同款像素鲸）。**鲸娘在有图像协议（kitty/sixel）的终端里按原帧数 240px 像素级渲染**（267 帧全保留、
   透明悬浮、按需解码），无图像协议自动回退字符画版。
-  开屏仅在 DeepSeek 品牌下使用这些皮肤：`deepy` 和 `whaleGirl` 会取代女仆娘立绘；选择 `whale` 并开启「女仆娘立绘」才会显示女仆娘。Claude/Codex 品牌固定各自立绘。见[优先级表](configuration.md)。
+  开屏仅在 DeepSeek 品牌下使用这些皮肤：`deepy` 和 `whaleGirl` 会取代女仆娘立绘；选择 `whale` 并开启「女仆娘立绘」才会显示女仆娘。Claude 使用自己的图案，Codex 使用自己的真图或女仆娘字符画回退；这两个品牌的开屏图案不受宠物皮肤和女仆娘开关影响。见[优先级表](configuration.md)。
 
 | 子命令 | 作用 |
 |---|---|
@@ -492,7 +492,7 @@ dsh-TUI 不预装通用技能；`/skills` 浏览 DSH 发现的技能，可直调
 
 - **开场动画**（约 3.4 秒，每次启动三选一，`/deepseek` 彩蛋重掷）：经典 / 爱心 / 睡觉。
 - **欢迎期闲置动画**（`whaleIdle`，默认开）：摆鱼鳍、眨眼、拍尾巴，空闲 10 秒入睡冒 Z；**点击冒爱心唤醒**。
-- **女仆娘立绘**（`whaleGirl`，默认关）：DeepSeek 品牌下，宠物皮肤设为 `whale` 并开启本项后，显示作者绘制的女仆娘——优先走 Kitty/Sixel 真图，不支持时回落字符画。**显示真图时，点她一下**会换成「高兴鲸娘」几秒，再自动回安静版；第一个任务后定格，不再响应点击。字符画保持静态。`deepy` 和 `whaleGirl` 皮肤会取代立绘；Claude/Codex 品牌固定各自立绘。见[优先级表](configuration.md)。
+- **女仆娘立绘**（`whaleGirl`，默认关）：DeepSeek 品牌下，宠物皮肤设为 `whale` 并开启本项后，显示作者绘制的女仆娘——优先走 Kitty/Sixel 真图，不支持时回落字符画。**显示真图时，点她一下**会换成「高兴鲸娘」几秒，再自动回安静版；第一个任务后定格，不再响应点击。字符画保持静态。`deepy` 和 `whaleGirl` 皮肤会取代立绘；Claude 使用自己的图案，Codex 使用自己的真图或女仆娘字符画回退；这两个品牌的开屏图案不受宠物皮肤和女仆娘开关影响。见[优先级表](configuration.md)。
 - 开始第一个 agent 任务后定格为静态帧（`/new` 重新进入欢迎期）。
 - 鲸鱼右侧文字列：`✦ dsh-TUI v版本号` → 块体大字 `DEEPSEEK / HARNESS`（加粗字形，两行等宽、中间空一行）→
   当前模型 + effort → 工作目录 → 启动提示行。
@@ -561,7 +561,7 @@ dsh-tui 自身区块在 0.1.7 写入当前 profile 的 `cordis.patch.yml`，旧�
 | whale | 开屏头部像素鲸鱼娘（默认开）；每次启动随机三选一开场动画（经典/爱心/睡觉），`/deepseek` 彩蛋重掷 |
 | whaleIdle | 鲸鱼娘欢迎期闲置动画（默认开）：定格后摆鱼鳍/拍尾巴/眨眼，空闲 10 秒入睡冒 Z；点击冒爱心。开始第一个任务后定格 |
 | splashFont | 开屏大字字体：按天轮换（默认，随本地日期换款）/ 加粗 / 方角实心 / 半立体 / 宽体 / 点阵灰度 / 镂空模板 / 细笔 / 方板。选某一款即固定那一款，选回「按天轮换」恢复。立即生效 |
-| whaleGirl | 女仆娘立绘（默认关）：DeepSeek 品牌下，设 `companion.skin=whale` 并开启本项；`deepy` 和 `whaleGirl` 皮肤会取代立绘。Claude/Codex 品牌固定各自立绘。优先 Kitty/Sixel 真图，不支持时回落字符画。见[优先级表](configuration.md) |
+| whaleGirl | 女仆娘立绘（默认关）：DeepSeek 品牌下，设 `companion.skin=whale` 并开启本项；`deepy` 和 `whaleGirl` 皮肤会取代立绘。Claude 使用自己的图案，Codex 使用自己的真图或女仆娘字符画回退；这两个品牌的开屏图案不受宠物皮肤和女仆娘开关影响。优先 Kitty/Sixel 真图，不支持时回落字符画。见[优先级表](configuration.md) |
 | diffLayout | Edit/Write diff 布局：auto（≥110 列双栏）/ split / unified |
 | thinkingFold | 思考块：preview（流式 2-3 行预览 + 落定折叠）/ full（展开到轮末） |
 | btw.contextBudget | `/btw` 追问携带的最近问答总字符预算（默认 24000，范围 1000-200000）；超出时从最旧的整组开始裁剪。立即生效 |

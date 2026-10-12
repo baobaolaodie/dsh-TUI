@@ -69,7 +69,7 @@ Profile 启动按顺序叠加：
 | `effortDefault` | 未设置 | 新会话默认推理强度（`/settings` 用户层，显式设定时优先于持久化 `/effort`）；`auto` 让位给持久化选择与 `effort`，可经 `/settings` 修改 |
 | `whale` / `whaleIdle` | `true` / `true` | 标题鲸鱼与欢迎页鲸鱼闲置动画 |
 | `splashFont` | `daily` | 开屏大字字体：`daily` 按本地日期轮换（默认），其余取字体 id（`bold` / `square` / `bevel` / `wide` / `dot` / `stencil` / `classic` / `slab`）pin 住那一款；非法值回落 `daily`。也可经 `/settings` 修改 |
-| `whaleGirl` | `false` | 女仆娘立绘开关：DeepSeek 品牌下，宠物皮肤 deepy 或 whaleGirl 会占据开屏艺术槽；选 whale 并开启「女仆娘立绘」才会显示女仆娘。Claude/Codex 品牌固定各自立绘。这里「宠物皮肤」即 `companion.skin`；立绘生效时优先走终端图像协议（Kitty/Sixel）的真图，终端不支持则回落字符画版女仆娘。见下方的优先级小表 |
+| `whaleGirl` | `false` | 女仆娘立绘开关：DeepSeek 品牌下，宠物皮肤 deepy 或 whaleGirl 会占据开屏艺术槽；选 whale 并开启「女仆娘立绘」才会显示女仆娘。Claude 使用自己的图案，Codex 使用自己的真图或女仆娘字符画回退；这两个品牌的开屏图案不受宠物皮肤和女仆娘开关影响。这里「宠物皮肤」即 `companion.skin`；立绘生效时优先走终端图像协议（Kitty/Sixel）的真图，终端不支持则回落字符画版女仆娘。见下方的优先级小表 |
 | `minimal` | `false` | 极简界面（Minimal UI）：精简标题装饰与配色。**这是界面显示开关**，与下面 `preset` 里的内核「极简模式」预设完全是两件事（那个才决定模型能用哪些工具） |
 | `sidePanel.splitEnabled` | `true`（布尔） | 分栏总开关：开启时 `Ctrl+B` 与 `/panel` 在聊天右侧展开侧栏；关闭时两者都不再分栏，`/jobs` 等仍走整屏面板。立即生效 |
 | `sidePanel.open` | `false`（布尔） | 启动时侧栏是否已展开；默认关闭，升级后布局与原来一致。会话内的 `Ctrl+B` / `/panel toggle` 不写回这里。立即生效 |
@@ -99,7 +99,7 @@ DeepSeek 品牌下，开启标题图形（`whale`）时，`companion.skin` 与�
 | `whaleGirl` | 鲸娘吉祥物（图像协议真图；无协议回落字母格） | **不生效** |
 | `whale` | 原路径：像素鲸鱼；打开女仆娘立绘后为立绘（真图优先，回落字符画） | **生效** |
 
-上表适用于「品牌外观」（`brand`）解析为 `deepseek` 时（包括 DSH 后端的 `auto`）。Claude、Codex 品牌外观固定使用各自立绘，不受 `companion.skin` 和 `whaleGirl` 影响；要使用表中的皮肤或女仆娘，先选 DeepSeek 品牌外观。关闭标题图形会隐藏所有品牌的图形。
+上表适用于「品牌外观」（`brand`）解析为 `deepseek` 时（包括 DSH 后端的 `auto`）。Claude 使用自己的真图或字符画；Codex 使用自己的真图，真图不可用或加载失败时回落女仆娘字符画。两者都不受 `companion.skin` 和 `whaleGirl` 影响；要使用表中的皮肤或女仆娘，先选 DeepSeek 品牌外观。关闭标题图形会隐藏所有品牌的图形。
 
 ### 优先级与强制关闭
 
