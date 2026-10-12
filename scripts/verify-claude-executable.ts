@@ -226,9 +226,13 @@ const countingEntry = (prefix: string, version: string | undefined): string => {
  * of the candidate then costs exactly one entry run, on either platform (a
  * spawnable `sh` wrapper would run the entry itself and be followed to it
  * after the probe failed, logging twice per pass — the count has to be about
- * the candidate, not about how the wrapper failed).
+ * the candidate, not about how the wrapper failed). The entry it names keeps
+ * this platform's separators (`join`), the way the wrapper npm ships here
+ * spells it: `%dp0%` expands to the shim's directory plus this platform's
+ * separator, so a relative path spelled for another platform names nothing and
+ * no entry would ever run.
  */
-const deadForwarder = (target: string): string => deadClaude(target, cmdWrapper(PACKAGE_ENTRY.join('\\')))
+const deadForwarder = (target: string): string => deadClaude(target, cmdWrapper(join(...PACKAGE_ENTRY)))
 
 try {
   // ── a dead wrapper earlier on PATH must not shadow a working binary ────

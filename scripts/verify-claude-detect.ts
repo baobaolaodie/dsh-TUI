@@ -192,7 +192,11 @@ const probeCalls = (log: string): string[] => {
     `console.log('${COUNTED_CLI_VERSION} (Claude Code)')`,
     '',
   ].join('\n'))
-  writeFileSync(cliPath, `"%dp0%\\${PACKAGE_ENTRY.join('\\')}" %*\n`)
+  // The wrapper names its entry with this platform's separators (`join`), the
+  // way the wrapper npm ships here spells it: `%dp0%` expands to the shim's
+  // directory plus this platform's separator, so a relative path spelled for
+  // another platform names nothing and this fixture would never be reached.
+  writeFileSync(cliPath, `"%dp0%${join(...PACKAGE_ENTRY)}" %*\n`)
   // A CLI-shaped file that exists and cannot report a version, the fixture
   // shape verify-claude-executable.ts uses too: `where` answers nothing for
   // `--version`, the POSIX script echoes a sentence. Pointed at explicitly, it
