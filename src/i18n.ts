@@ -365,7 +365,16 @@ const dict = {
   // The way out of a refusal caused by a ledger file that is not a ledger
   // document. Only appended when the refusal says so (`damaged`), so it must
   // read as advice about THAT file, never as a generic next step.
-  'resume-mount-ledger-repair': { zh: '文件已损坏时：在没有其他 dsh-tui 运行时删除它（含同名 .lock），下次写入会自动重建', en: 'If that file is damaged, remove it (and the matching .lock) while no other TUI is running; the next write rebuilds it' },
+  //
+  // The length is the screen's, not the writer's: the supervisor caps a notice
+  // at three rows, and on a 120-column terminal it wraps one at 80 columns, so
+  // a longer sentence arrives cut off. The action (`删除` / `remove`) and its
+  // precondition (`其他` / `no other`) therefore have to survive that cut, and
+  // only the reassurance that the file rebuilds itself may fall off the end.
+  // The same budget is why the `.lock` is not named here any more: it does not
+  // fit on the screen, and the CLI's `--resume` refusal is the sentence that
+  // names it.
+  'resume-mount-ledger-repair': { zh: '该文件已损坏：无其他 dsh-tui 运行时删除它，会自动重建', en: 'Damaged: remove it with no other TUI running (it rebuilds)' },
   'session-mount-occupied-short': { zh: '占用 pid {{pid}}', en: 'held by pid {{pid}}' },
   'resume-failed': { zh: '恢复失败 · {{err}}', en: 'Resume failed · {{err}}' },
   'resume-attach-failed': { zh: '已恢复会话，但工作区挂载失败 · {{err}}', en: 'Session resumed, but workspace attachment failed · {{err}}' },

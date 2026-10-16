@@ -229,9 +229,17 @@ parsed value that is not an object, an unknown `version`, no `owners` array, a
 record whose shape is wrong. That failure carries an **optional** `damaged`
 flag, and the flag travels with the refusal all the way to the user; the
 interactive surfaces append the actionable repair to the sentence they already
-show, and its points are: **remove the file and the matching `.lock`**
-(`session-mounts.lock`) while no other dsh-tui is running, and the next write
-rebuilds it. **Unreadable** (permissions, a directory in its place) and
+show: **remove that file while no other dsh-tui is running**, and it rebuilds
+itself. The sentence is that short because the screen is: the supervisor's
+notice is capped at three rows (`NOTICE_MAX_LINES`) and a 120-column terminal
+leaves it 80 columns to wrap in, so the wording is sized backwards from "the
+whole refusal on 120 columns, the action and its precondition still there on
+100" — a cut can only take the reassurance that follows them. (On a narrower
+terminal the refusal's own prefix and the ledger path fill those three rows
+first, and the repair goes with them; that is the row cap, not the wording.) It
+is also why naming the matching `.lock` (`session-mounts.lock`) is the CLI's
+`--resume` refusal and not the interactive surface. **Unreadable** (permissions,
+a directory in its place) and
 unwritable (a lock that cannot be taken, a directory that cannot be created, a
 failed replace) carry **no** such flag — they say nothing about the file's
 contents, and calling a path that may hold the user's own data "damaged" to

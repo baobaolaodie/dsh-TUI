@@ -33,11 +33,14 @@
  * Plus the refusal's way out: a ledger that exists but is not a ledger document
  * refuses as `damaged` — one form per branch of the strict read that sets the
  * flag — and the sentence the interactive surfaces show has to name the file to
- * delete and when deleting it is safe, in both languages. The counter-examples
- * are what keep that flag honest: a MISSING file is a genuine first run, an
- * UNREADABLE one (a directory in its place) is not damage, and a good ledger this
- * process may not write is a permission problem — sending a user to delete a file
- * that may be a peer's only claim would be the wrong repair.
+ * delete and when deleting it is safe, in both languages, and has to FIT the
+ * notice it is shown in: the screen caps that notice at three rows and hands it
+ * fewer columns than the terminal has, so a longer sentence arrives cut off
+ * (group 9). The counter-examples are what keep that flag honest: a MISSING
+ * file is a genuine first run, an UNREADABLE one (a directory in its place) is
+ * not damage, and a good ledger this process may not write is a permission
+ * problem — sending a user to delete a file that may be a peer's only claim
+ * would be the wrong repair.
  *
  * Every branch of `readMountLedgerStrict` that sets the flag has a row in group 8,
  * and each row was checked the only way that counts: take that branch's
@@ -61,7 +64,7 @@
 import { spawn } from 'node:child_process'
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, parse } from 'node:path'
 
 const tmpHome = mkdtempSync(join(tmpdir(), 'dsh-mounts-'))
 process.env.HOME = tmpHome
@@ -86,7 +89,10 @@ const {
 // imported under the redirected HOME above, because the language module reads
 // its saved choice out of that data directory at import time.
 const { mountFailureText } = await import('../src/sessions/resumeFailure.ts')
-const { i18nDict, setLang } = await import('../src/i18n.ts')
+const { i18nDict, setLang, t } = await import('../src/i18n.ts')
+// The wrap the screen itself applies to that sentence, plus the row cap it
+// applies it under (group 9 measures the sentence through these, not a copy).
+const { noticeLines, NOTICE_MAX_LINES } = await import('../src/screens/sessionSupervisor/model.js')
 
 const LEDGER = join(tmpHome, '.dsh-tui', 'session-mounts.json')
 const LOCK = join(tmpHome, '.dsh-tui', 'session-mounts.lock')
@@ -527,6 +533,61 @@ check('the --resume refusal still says to remove the file with nothing else runn
 // Leave the path free of the directory: every other group starts from
 // `rmSync(LEDGER, { force: true })`, which throws on one.
 rmSync(LEDGER, { recursive: true, force: true })
+
+// ── 9. Visibility: the refusal has to fit its notice, not just exist ───────
+// Advice a user never sees is the dead end #1579 was. The supervisor caps a
+// notice at NOTICE_MAX_LINES rows, and on a 120-column terminal it wraps that
+// notice at 80 columns — the rail takes 36+1 of the 120
+// (`useSessionSupervisor.ts:559-563`) and the notice gives up 3 more (`:581`) —
+// so the refusal arrives whole only if the wording wraps into three rows of 80.
+// The cap and the wrap are the screen's own function; measuring with a copy of
+// the rule here would pin the copy instead of the screen.
+console.log('visibility:')
+
+// A real install keeps the ledger at `~/.dsh-tui/session-mounts.json`; this
+// fixture's HOME is a temp path many columns longer, which no install has. The
+// wording is sized for the installed length, so the readings below REBASE the
+// real sentence onto one — the same `mountFailureText()` output off the same
+// damaged ledger, with nothing but the path swapped for the one a user's notice
+// carries. Spelled off the temp path's own root instead of a literal `C:\`, so
+// the reading means the same thing where HOME is POSIX.
+const INSTALLED_LEDGER = join(parse(tmpHome).root, 'Users', 'someone', '.dsh-tui', 'session-mounts.json')
+
+// The path is free of the directory above, so a plain write stages the damage.
+writeFileSync(LEDGER, Buffer.alloc(468))
+const visibleClaim = claimMount('visible-sess')
+if (!mountFailureText(visibleClaim).includes(LEDGER)) {
+  throw new Error('the damaged refusal no longer names the ledger — the visibility fixture has to be rebuilt')
+}
+
+/**
+ * The rows the supervisor paints for that refusal in `lang`, at notice width
+ * `width` — composed the way the screen composes it (`useSessionSupervisor.ts:679`).
+ */
+function refusalRows(lang, width) {
+  setLang(lang)
+  const reason = mountFailureText(visibleClaim).split(LEDGER).join(INSTALLED_LEDGER)
+  return noticeLines(t('supervisor-open-failed', { name: 'victim session', reason }), width)
+}
+
+/** Whether `noticeLines` dropped anything: it fills the cap and marks the cut with `…`. */
+const cutOff = rows => rows.length === NOTICE_MAX_LINES && rows[NOTICE_MAX_LINES - 1].endsWith('…')
+
+// 80 columns is what a 120-column terminal leaves the notice — the terminal the
+// wording is written for — so the refusal has to arrive whole there.
+for (const lang of ['zh', 'en']) {
+  check(`the ${lang} refusal fits the notice cap on a 120-column terminal`, !cutOff(refusalRows(lang, 80)))
+}
+
+// 66 columns is what a 100-column terminal leaves. The reassurance may fall off
+// a screen that narrow; the action and its precondition may not. Group 8 keeps
+// both words in the DICTIONARY, which is not the same thing as keeping them on
+// the screen: the wording this replaced had both and showed only `remove`.
+for (const lang of ['zh', 'en']) {
+  const painted = refusalRows(lang, 66).join(' ').toLowerCase()
+  check(`a 100-column terminal still shows the repair action and its precondition (${lang})`,
+    REPAIR_POINTS[lang].every(point => painted.includes(point)))
+}
 
 if (failures > 0) {
   console.error(`\n${failures} check(s) failed`)
