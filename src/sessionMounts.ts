@@ -123,7 +123,7 @@ const EMPTY: SessionOccupancy = { kind: 'free' }
  * document, so deleting it clears the refusal. A failure that is not marked
  * (permissions, a directory in its place, a lock we could not take) must not
  * be described as deformation — sending someone to delete a path that may be
- * their own data is worse than telling them nothing.
+ * their own data is worse than telling them nothing (issue #1579).
  */
 export type MountFailure =
   | { readonly ok: false; readonly reason: 'occupied'; readonly holders: readonly number[] }
@@ -202,10 +202,8 @@ export function readMountLedger(): readonly SessionMountOwner[] {
  * what was wrong, so a refusal can say "cannot verify occupancy" instead of
  * inventing a holder.
  *
- * `damaged` marks the one cause a user can repair: the file was read, and it
- * is not a ledger document. The distinction is the whole point of the flag —
- * "this file is in the way" is actionable, "we could not read this file" is
- * not, and only the former may be answered with "delete it".
+ * `damaged` is the read's half of {@link MountFailure}: set only when the bytes
+ * were in hand and they are not a ledger document.
  */
 export type MountLedgerRead =
   | { readonly ok: true; readonly owners: readonly SessionMountOwner[] }
@@ -221,11 +219,8 @@ export type MountLedgerRead =
  * a bad record and writing the ledger anyway is not an option either: the
  * record that failed to parse may be another writer's only claim, so the safe
  * move is to leave the file exactly as it is and ask the user to repair it.
- *
- * The failures are not all alike on the way out. Once the bytes are IN HAND and
- * only their interpretation failed, the file is something to replace and the
- * outcome says so (`damaged`); a failure to READ at all says nothing about the
- * file's contents, so it carries no verdict.
+ * The five refusals that mean "read, but not a ledger document" carry
+ * `damaged`; a failure to read at all carries no verdict.
  */
 export function readMountLedgerStrict(): MountLedgerRead {
   const path = join(DATA_DIR, MOUNTS_FILE)

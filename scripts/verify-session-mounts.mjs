@@ -46,9 +46,11 @@
  * and each row was checked the only way that counts: take that branch's
  * `damaged: true` away, re-run this script, watch that row go red. A row whose
  * branch can be dropped without a red is decoration — re-run the check when
- * extending the table. Note that group 8 is not full coverage of the flag:
- * `writeLedger()` forwards it too (src/sessionMounts.ts:491-493) and has no row
- * here — a gap adjudicated and accepted, recorded in this change's KNOWN-ISSUES.
+ * extending the table. Coverage stops at the strict read, though: `writeLedger()`
+ * forwards the flag as well and carries no row here, because the forward only
+ * changes what a caller sees when a peer rewrites the file between the claim's
+ * read and its replace — a window no fixture in this file can reach, so the gap
+ * is left open on purpose rather than pinned by a check that cannot fail.
  *
  * Ownership is pid-only, so the foreign holder is a REAL second process that
  * PUBLISHES through this same module in the same fake HOME — a staged JSON
@@ -507,10 +509,10 @@ const unreadableZh = mountFailureText(blockedByDirectory)
 check('and neither language sends the user off to delete anything',
   !namesFileAndRepair(unreadableEn, 'en') && !namesFileAndRepair(unreadableZh, 'zh'))
 
-// AC-3's machine half: the CLI keeps its own English sentence (the two surfaces
-// are worded separately on purpose), so the only thing worth pinning there is
-// the ACTION — loosely, so that a reworded sentence passes and a dropped piece
-// of advice does not. The branch's adjacent string literals are joined the way
+// The CLI keeps its own English sentence (the two surfaces are worded separately
+// on purpose), so the only thing worth pinning there is the ACTION — loosely, so
+// that a reworded sentence passes and a dropped piece of advice does not. The
+// branch's adjacent string literals are joined the way
 // the runtime would, so the match survives a reflow; a moved anchor reads as an
 // empty branch and fails loudly instead of passing on some other sentence.
 //
@@ -537,11 +539,11 @@ rmSync(LEDGER, { recursive: true, force: true })
 // ── 9. Visibility: the refusal has to fit its notice, not just exist ───────
 // Advice a user never sees is the dead end #1579 was. The supervisor caps a
 // notice at NOTICE_MAX_LINES rows, and on a 120-column terminal it wraps that
-// notice at 80 columns — the rail takes 36+1 of the 120
-// (`useSessionSupervisor.ts:559-563`) and the notice gives up 3 more (`:581`) —
-// so the refusal arrives whole only if the wording wraps into three rows of 80.
-// The cap and the wrap are the screen's own function; measuring with a copy of
-// the rule here would pin the copy instead of the screen.
+// notice at 80 columns: the rail takes 36+1 of the 120, and the notice gives up
+// 3 more — both are the supervisor's own width split. So the refusal arrives
+// whole only if the wording wraps into three rows of 80. The cap and the wrap
+// are the screen's own function; measuring with a copy of the rule here would
+// pin the copy instead of the screen.
 console.log('visibility:')
 
 // A real install keeps the ledger at `~/.dsh-tui/session-mounts.json`; this
@@ -562,7 +564,7 @@ if (!mountFailureText(visibleClaim).includes(LEDGER)) {
 
 /**
  * The rows the supervisor paints for that refusal in `lang`, at notice width
- * `width` — composed the way the screen composes it (`useSessionSupervisor.ts:679`).
+ * `width` — composed the way the screen composes its notices.
  */
 function refusalRows(lang, width) {
   setLang(lang)
