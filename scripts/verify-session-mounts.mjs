@@ -31,12 +31,18 @@
  * never take down a session screen. Only the deciding reader refuses.
  *
  * Plus the refusal's way out: a ledger that exists but is not a ledger document
- * refuses as `damaged`, and the sentence the interactive surfaces show has to
- * name the file to delete and when deleting it is safe — in both languages. The
- * counter-examples are what keep that flag honest: a MISSING file is a genuine
- * first run, and an UNREADABLE one (a directory in its place) is not damage —
- * sending a user to delete a file that may be a peer's only claim would be the
- * wrong repair.
+ * refuses as `damaged` — one form per branch that sets the flag — and the
+ * sentence the interactive surfaces show has to name the file to delete and when
+ * deleting it is safe, in both languages. The counter-examples are what keep
+ * that flag honest: a MISSING file is a genuine first run, an UNREADABLE one (a
+ * directory in its place) is not damage, and a good ledger this process may not
+ * write is a permission problem — sending a user to delete a file that may be a
+ * peer's only claim would be the wrong repair.
+ *
+ * Every branch that sets the flag has a row in group 8, and each row was checked
+ * the only way that counts: take that branch's `damaged: true` away, re-run this
+ * script, watch that row go red. A row whose branch can be dropped without a red
+ * is decoration — re-run the check when extending the table.
  *
  * Ownership is pid-only, so the foreign holder is a REAL second process that
  * PUBLISHES through this same module in the same fake HOME — a staged JSON
@@ -50,7 +56,7 @@
  * Run: node --import tsx/esm scripts/verify-session-mounts.mjs
  */
 import { spawn } from 'node:child_process'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -386,6 +392,44 @@ for (const form of DAMAGE_FORMS) {
   clearOwnMounts()
 }
 
+// The two forms above are both PARSE failures — one of the five places that set
+// `damaged`; this table is the rest of that map, one row per branch. Only the
+// parse failure was pinned before: with this table absent, any of the four could
+// be deleted from `readMountLedgerStrict` with every check in this file still
+// green, and the user would be back to a refusal with no way out.
+//
+// The shared half of the contract — the file named, both language notices, the
+// bytes surviving the attempt — stays on the two forms above: it is one sentence
+// for every form, and repeating it per row would pin the same behaviour six
+// times. What differs per branch is the verdict and the reason, so that is what
+// a row pins here. The reason is not a restatement of the verdict: a bare `0`
+// falling through to the version check would still refuse as damage, and only
+// the reason tells a scalar that is not a document from a version that was never
+// there (it would read `unknown version undefined`).
+const OTHER_DAMAGE_FORMS = [
+  { label: 'a bare 0 in place of a document', reason: 'is not a ledger document', document: '0' },
+  { label: 'a version this build does not know', reason: 'has unknown version', document: '{"version":9,"owners":[]}' },
+  { label: 'a document with no owners array', reason: 'has no owners array', document: '{"version":1}' },
+  { label: 'a record whose pid is not a pid', reason: 'has a record whose shape is wrong',
+    document: '{"version":1,"owners":[{"pid":"nope","startedAt":1,"sessionIds":[]}]}' },
+]
+
+for (const form of OTHER_DAMAGE_FORMS) {
+  rmSync(LEDGER, { force: true })
+  writeFileSync(LEDGER, form.document, 'utf8')
+
+  const read = readMountLedgerStrict()
+  check(`${form.label}: the strict read reports damage, not emptiness`,
+    read.ok === false && read.damaged === true)
+  check(`${form.label}: and the reason names this form`,
+    read.ok === false && read.detail.includes(form.reason))
+
+  const claim = claimMount('damaged-sess')
+  check(`${form.label}: the claim refuses as unavailable, flagged damaged`,
+    claim.ok === false && claim.reason === 'unavailable' && claim.damaged === true)
+  clearOwnMounts()
+}
+
 // The counter-examples are what keep the flag honest. Without them it drifts
 // into "anything that stopped a read", and the sentence starts sending users to
 // delete files that are either absent or perfectly good.
@@ -395,6 +439,35 @@ check('a MISSING ledger is a first run, not damage', absent.ok === true && absen
 const firstRun = claimMount('first-run-sess')
 check('so the first-run claim still goes through', firstRun.ok === true)
 check('and neither verdict is flagged as damage', absent.damaged !== true && firstRun.damaged !== true)
+clearOwnMounts()
+
+// A good ledger this process may not WRITE is not damage either: the bytes read
+// back, so there is no document to repair and "delete this file" — which is what
+// the damage advice says — would not fix a permission problem. `resumeFailure.ts`
+// names exactly these causes when it decides who gets that advice ("the other
+// causes (permissions, a lock, a failed replace) would make wrong"), so this row
+// is what keeps the flag on the right side of that line.
+//
+// Denying the write takes two moves, because the platforms deny it differently:
+// Windows refuses to replace a read-only FILE, while POSIX replaces that happily
+// and instead refuses to create anything (the lock, the temp file) in a
+// directory that lost its write bit.
+const LEDGER_DIR = join(tmpHome, '.dsh-tui')
+rmSync(LEDGER, { force: true })
+rmSync(LOCK, { force: true }) // a leftover lock would refuse as `busy` before the denial is reached
+writeRaw([])
+chmodSync(LEDGER, 0o444)
+chmodSync(LEDGER_DIR, 0o555)
+const protectedRead = readMountLedgerStrict()
+check('a write-protected ledger still reads as a good ledger', protectedRead.ok === true)
+const blockedByPermissions = claimMount('read-only-sess')
+check('so its refusal is a permission problem, never damage',
+  blockedByPermissions.ok === false && blockedByPermissions.reason === 'unavailable'
+  && blockedByPermissions.damaged !== true)
+// The deny is lifted again — 0o700 because that is the mode the module creates
+// its data directory with — since every block below writes into it.
+chmodSync(LEDGER, 0o644)
+chmodSync(LEDGER_DIR, 0o700)
 clearOwnMounts()
 
 // A directory in the ledger's place is the read failure the flag must NOT
