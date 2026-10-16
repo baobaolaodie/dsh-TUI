@@ -55,7 +55,6 @@ export interface HelperPaths {
   dir: string
   sourceCopyPath: string
   exePath: string
-  logPath: string
 }
 
 /** The in-box toolchain: the compiler plus the UIA assemblies it must be given. */
@@ -107,7 +106,6 @@ export function helperPaths(dataDir: string = DATA_DIR): HelperPaths {
     dir,
     sourceCopyPath: join(dir, SOURCE_FILE_NAME),
     exePath: join(dir, 'activate.exe'),
-    logPath: join(dir, 'activate.log'),
   }
 }
 

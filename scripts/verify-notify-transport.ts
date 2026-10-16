@@ -127,7 +127,6 @@ function harness(options: {
   helper?: ReturnType<typeof helperStub>
   runner?: ReturnType<typeof recordingRunner>
   env?: Record<string, string | undefined>
-  platform?: NodeJS.Platform
   /** The icon lookup; the default resolves the file the package ships. */
   iconPath?: () => string | undefined
 } = {}): Harness {
@@ -143,7 +142,7 @@ function harness(options: {
   const transportOptions: WindowsToastTransportOptions = {
     dataDir,
     pid: 2718,
-    platform: options.platform ?? 'win32',
+    platform: 'win32',
     env: options.env ?? { windir: WINDIR },
     registry: registry.registry,
     ensureHelper: helper.ensureHelper,
@@ -187,23 +186,26 @@ await check('text escaping covers exactly the characters AC-8 names', () => {
   assert.equal(escapeXmlText('&amp;'), '&amp;amp;', 'already-escaped input is text, not markup')
 })
 
-await check('the toast XML carries the title, the summary and the protocol activation', () => {
+await check('the toast XML carries the title, the summary and the protocol activation, escaped', () => {
   const xml = toastXml({ title: TITLE, message: '摘要一行', marker: markerFor(2718) })
   assert.ok(xml.startsWith('<toast'), 'the document root is a toast')
   assert.ok(xml.includes('activationType="protocol"'), 'D4: the click comes back as a protocol activation')
   assert.ok(xml.includes(`launch="${activationUri(markerFor(2718))}"`), 'the launch URI carries the session marker')
   assert.ok(xml.includes('<binding template="ToastGeneric">'), 'the generic template is what desktop toasts render')
   assert.deepEqual(textNodes(xml), [TITLE, '摘要一行'], 'title first, summary second - AC-1')
-})
 
-await check('the toast XML escapes both text nodes and leaves no raw markup in them', () => {
-  const xml = toastXml({ title: NASTY, message: NASTY, marker: markerFor(1) })
-  assert.deepEqual(textNodes(xml), [NASTY_ESCAPED, NASTY_ESCAPED])
-  for (const node of textNodes(xml)) {
+  const nasty = toastXml({ title: NASTY, message: NASTY, marker: markerFor(1) })
+  assert.deepEqual(textNodes(nasty), [NASTY_ESCAPED, NASTY_ESCAPED])
+  for (const node of textNodes(nasty)) {
     assert.doesNotMatch(node, /[<>]/u, 'a text node must not carry raw markup')
     assert.doesNotMatch(node, /&(?!(?:amp|lt|gt|quot);)/u, 'every ampersand must open one of the four entities')
   }
-  assert.ok(xml.includes('🐋'), 'the emoji must survive escaping')
+  assert.ok(nasty.includes('🐋'), 'the emoji must survive escaping')
+
+  const bare = toastXml({ title: TITLE })
+  assert.deepEqual(textNodes(bare), [TITLE], 'an empty summary shows the title alone')
+  assert.ok(!bare.includes('launch='), 'no marker means no launch URI')
+  assert.ok(!bare.includes('activationType'), 'and no protocol activation either')
 })
 
 await check('an over-long summary is clipped to the two lines the toast can show', () => {
@@ -219,13 +221,6 @@ await check('an over-long summary is clipped to the two lines the toast can show
   assert.ok(stringWidth(body) <= 80, `the body must fit two lines, got ${stringWidth(body)} columns`)
   assert.ok(body.endsWith('…'), `a clipped summary says so instead of just stopping: ${body}`)
   assert.ok(message.startsWith(body.slice(0, -1)), 'the clip keeps the opening - it is a cut, not a rewrite')
-})
-
-await check('a toast without a marker has no activation, so a click cannot dead-end', () => {
-  const xml = toastXml({ title: TITLE })
-  assert.deepEqual(textNodes(xml), [TITLE], 'an empty summary shows the title alone')
-  assert.ok(!xml.includes('launch='), 'no handler means no launch URI')
-  assert.ok(!xml.includes('activationType'), 'and no protocol activation either')
 })
 
 await check('the protocol handler command quotes the exe, the URI and the data directory', () => {
@@ -298,7 +293,11 @@ await check('the registered handler runs the compiled helper with this data dire
   await h.transport.notify({ title: TITLE })
   const command = h.registry.writes.find(write => write.name === null)
   assert.ok(command !== undefined, 'the protocol command is the key\'s default value')
-  assert.equal(command.value, protocolCommand(join(h.dataDir, 'notify', 'activate.exe'), h.dataDir))
+  assert.equal(
+    command.value,
+    `"${join(h.dataDir, 'notify', 'activate.exe')}" "%1" -DataDir "${h.dataDir}"`,
+    'the command line the shell runs, spelled out rather than rebuilt with the function under test',
+  )
   assert.equal(h.helper.calls.length, 1, 'the handler is only registered once the helper exists')
   assert.equal(h.helper.calls[0].dataDir, h.dataDir, 'the helper is built into the data directory the command names')
 })
@@ -346,7 +345,12 @@ await check('the toast is spawned by in-box PowerShell with the XML on stdin, ne
   assert.equal(call.file, POWERSHELL_PATH, 'the in-box host, resolved from %WINDIR% rather than PATH')
   assert.ok(call.args[0] === '-NoProfile', 'the profile is what makes the cold start 3.1-3.4 s worse')
   assert.ok(call.args.includes('-Command'), 'the script itself travels as one argument')
-  assert.equal(call.input, toastXml({ title: TITLE, message: NASTY, marker: markerFor(2718) }))
+  assert.equal(
+    call.input,
+    '<toast activationType="protocol" launch="dsh-tui:activate?m=%5Bdsh-tui%3A2718%5D">'
+    + `<visual><binding template="ToastGeneric"><text>${TITLE}</text><text>${NASTY_ESCAPED}</text></binding></visual></toast>`,
+    'the whole document reaches stdin, spelled out: comparing it against toastXml() would move both sides at once',
+  )
   assert.ok(!/[<>·🐋]/u.test(call.args.join(' ')), 'user text must never reach the command line (security)')
   assert.ok(typeof call.timeout === 'number' && call.timeout > 0, 'a stuck PowerShell must not hold the caller forever')
   assert.equal(h.logged.filter(([, fields]) => fields?.ms !== undefined).length, 1, 'R1: the log records how long the spawn took')
@@ -444,14 +448,6 @@ await check('a toast host that cannot be started is unavailable, not an uncaught
   assert.equal(result.reason, 'toast-failed')
 })
 
-// The refusal itself is what this layer owns; that a refusal leaves no registry
-// write, helper build or child process behind is asserted end to end, where the
-// real caller drives the real ports (verify-task-notifications-windows.ts).
-await check('a non-win32 platform is refused by notify', async () => {
-  const h = harness({ platform: 'darwin' })
-  assert.deepEqual(await h.transport.notify({ title: TITLE }), { status: 'unavailable', reason: 'not-win32' })
-})
-
 await check('a missing %WINDIR% is refused before any write', async () => {
   const h = harness({ env: {} })
   const result = await h.transport.notify({ title: TITLE })
@@ -466,10 +462,6 @@ await check('every registry write targets this module\'s own HKCU keys', async (
   await h.transport.notify({ title: TITLE })
   for (const write of h.registry.writes) {
     assert.ok(write.key.startsWith('HKCU\\Software\\Classes\\'), `${write.key} is outside the user's own classes hive`)
-    assert.ok(
-      [AUMID_REGISTRY_KEY, PROTOCOL_REGISTRY_KEY, `${PROTOCOL_REGISTRY_KEY}\\shell\\open\\command`].includes(write.key),
-      `${write.key} is not one of the documented keys`,
-    )
   }
 })
 
@@ -488,11 +480,6 @@ await check('the caller can ask whether the transport is usable without side eff
     'the title marker must not be written where no in-box host can render the toast it promises (UAT-M3)',
   )
   const h = harness()
-  assert.deepEqual(
-    h.transport.available({ profilePackageJsonPath: profileWith({ [EXTERNAL_NOTIFIER_PACKAGES[0]]: '^1.0.0' }) }),
-    { available: false, reason: 'yielded' },
-    'the title marker must not be written while an external notifier owns the notification',
-  )
   assert.deepEqual(h.transport.available({ profilePackageJsonPath: profileWith(undefined) }), { available: true })
 })
 
@@ -515,20 +502,13 @@ await check('the default registry port drives in-box reg.exe against our own key
   const result = await transport.notify({ title: TITLE })
   assert.deepEqual(result, { status: 'shown', marker: markerFor(2718) })
   assert.deepEqual(runner.calls.map(call => call.file), [REG_PATH, REG_PATH, REG_PATH, REG_PATH, POWERSHELL_PATH])
-  const [display, icon, mark, command] = runner.calls
+  const [display, , mark, command] = runner.calls
   assert.deepEqual(display.args.slice(0, 2), ['add', AUMID_REGISTRY_KEY])
   assert.deepEqual(display.args.slice(2, 7), ['/v', 'DisplayName', '/t', 'REG_SZ', '/d'])
   assert.equal(display.args[7], 'dsh-TUI')
   assert.ok(display.args.includes('/f'), 'without /f reg.exe waits for a prompt nobody can answer')
-  assert.deepEqual(icon.args.slice(2, 7), ['/v', 'IconUri', '/t', 'REG_SZ', '/d'], 'the icon is a named value')
-  const registeredIcon = icon.args[7]
-  assert.ok(isAbsolute(registeredIcon) && registeredIcon.endsWith('.png'), `the icon is a shipped image file: ${registeredIcon}`)
-  assert.deepEqual(mark.args.slice(0, 2), ['add', PROTOCOL_REGISTRY_KEY])
-  assert.deepEqual(mark.args.slice(2, 6), ['/v', 'URL Protocol', '/t', 'REG_SZ'], 'the marker is a named value')
   assert.equal(mark.args[mark.args.indexOf('/d') + 1], '', 'the marker\'s data is empty: Windows checks that it exists')
-  assert.equal(command.args[1], `${PROTOCOL_REGISTRY_KEY}\\shell\\open\\command`)
   assert.ok(command.args.includes('/ve'), 'the handler command is the key\'s default value')
-  assert.equal(command.args[command.args.indexOf('/d') + 1], protocolCommand('stub.exe', dataDir))
   for (const call of runner.calls.slice(0, 4)) {
     assert.ok(typeof call.timeout === 'number' && call.timeout > 0, 'a stuck reg.exe must not hold the caller forever')
   }

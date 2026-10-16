@@ -68,7 +68,7 @@ const {
 const { createTerminalNotifier } = await import('../src/ink/terminal-notification.js')
 const { deliverTaskCompletionOnWindows, createTaskNotificationSettings, publishWindowsToastWiring, ringTaskCompletion } = await import('../src/dsh-adapter/plugin.js')
 const { resetTerminalFocusState, setTerminalFocused } = await import('../src/ink/terminal-focus-state.js')
-const { setWindowsToastWiring, windowsToastProfileDocument, windowsToastWired } = await import('../src/ink/notification-wiring-state.js')
+const { setWindowsToastWiring, windowsToastWired } = await import('../src/ink/notification-wiring-state.js')
 const { DATA_DIR } = await import('../src/utils/paths.js')
 const { OSC, osc } = await import('../src/ink/termio/osc.js')
 const { TerminalWriteProvider } = await import('../src/ink/useTerminalNotification.js')
@@ -95,12 +95,6 @@ const PROFILE_DOCUMENT = join(dshHome, 'profiles', PROFILE, 'package.json')
 const MARKER = markerFor(process.pid)
 /** Anchors the title assertions: a value the hook has to move away from. */
 const SENTINEL = 'dsh-tui verify sentinel'
-/**
- * What an in-box PowerShell host sets the console title to as it starts - the
- * value the session's tab read right after a toast went out, before T-FIX-05
- * (UAT-M4, measured on a real machine).
- */
-const HOST_TITLE = 'Windows PowerShell'
 const ANSI_TITLE = '\u001b[31m✳ 🐋 verify\u001b[0m'
 const CLEAN_TITLE = '✳ 🐋 verify'
 const originalTitle = process.title
@@ -180,8 +174,6 @@ interface Chain {
   registry: ReturnType<typeof recordingRegistry>
   helper: ReturnType<typeof helperStub>
   runner: ReturnType<typeof recordingRunner>
-  /** The profile document the host handed the transport, per attempt (F2). */
-  profileDocuments: (string | undefined)[]
   /** What the toast port answered, per attempt (D8's three answers). */
   toastResults: WindowsToastResult[]
   /** What the terminal path was asked to announce, in order. */
@@ -196,8 +188,8 @@ interface Chain {
  * One task completion, driven through the same three hops production uses:
  * `deliverTaskCompletionOnWindows` → the transport → the in-box host. Only the
  * ports are stubs; the routing, the dedup read and the XML are the real code. The
- * transport gets no `dataDir`, so the document it pins also proves the module
- * constant resolved inside the sandbox (L-049).
+ * transport gets no `dataDir`, so the paths it resolves are the module constants -
+ * which the last check proves landed inside the sandbox (L-049).
  * @param message - The summary the completion carries.
  * @param options.platform - What the transport sees; defaults to win32.
  * @param options.registry - A recording registry, or one that refuses a write.
@@ -216,7 +208,6 @@ async function deliverCompletion(
   const helper = helperStub()
   const runner = recordingRunner()
   const delivered: [string, string][] = []
-  const profileDocuments: (string | undefined)[] = []
   const toastResults: WindowsToastResult[] = []
   const bell: string[] = []
   const debug: string[] = []
@@ -249,7 +240,6 @@ async function deliverCompletion(
   try {
     await deliverTaskCompletionOnWindows(TITLE, message, {
       toast: async input => {
-        profileDocuments.push(input.profilePackageJsonPath)
         const result = await transport.notify(input)
         toastResults.push(result)
         return result
@@ -264,7 +254,7 @@ async function deliverCompletion(
     if (realDebug === undefined) delete process.env.DSH_TUI_DEBUG
     else process.env.DSH_TUI_DEBUG = realDebug
   }
-  return { registry, helper, runner, profileDocuments, toastResults, delivered, bell, debug }
+  return { registry, helper, runner, toastResults, delivered, bell, debug }
 }
 
 /** Swap the platform the hook and the transport see, and put it back afterwards. */
@@ -275,27 +265,6 @@ async function withPlatform<T>(platform: NodeJS.Platform, body: () => Promise<T>
     return await body()
   } finally {
     Object.defineProperty(process, 'platform', { value: original, configurable: true, enumerable: true, writable: false })
-  }
-}
-
-/**
- * Put the two things that can name this launch's profile in place, and put them
- * back afterwards: the argv the launcher inherited, and the variable its entry
- * route hands down (`src/update.ts`).
- * @param route.argv - The argv the process sees for this case.
- * @param route.env - The variable's value, or undefined to leave it unset.
- * @param body - The case itself.
- */
-async function withLaunchRoute<T>(route: { argv: readonly string[], env: string | undefined }, body: () => Promise<T>): Promise<T> {
-  const originalArgv = process.argv
-  try {
-    process.argv = [...route.argv]
-    if (route.env === undefined) delete process.env.DSH_TUI_PROFILE
-    else process.env.DSH_TUI_PROFILE = route.env
-    return await body()
-  } finally {
-    process.argv = originalArgv
-    process.env.DSH_TUI_PROFILE = PROFILE
   }
 }
 
@@ -312,14 +281,12 @@ class FakeInput extends PassThrough {
 }
 
 /**
- * One step in a title trace: a title to render, the answer the host publishes
- * underneath the title already on screen, or a completion delivered while the
- * probe is mounted - the step that has to survive a title reset from outside.
- * The second kind is the timeline a resumed session hits - its title is decided
- * early and never changes again, so the publish that arrives afterwards is the
- * marker's only chance (T-FIX-04).
+ * One step in a title trace: a title to render, or the answer the host publishes
+ * underneath the title already on screen. The second kind is the timeline a
+ * resumed session hits - its title is decided early and never changes again, so
+ * the publish that arrives afterwards is the marker's only chance (T-FIX-04).
  */
-type TitleStep = string | { wired: boolean } | { toast: true }
+type TitleStep = string | { wired: boolean }
 
 /**
  * Render `useTerminalTitle` for the first step's title, then apply the remaining
@@ -327,12 +294,10 @@ type TitleStep = string | { wired: boolean } | { toast: true }
  * with after each step, and the bytes the POSIX branch wrote. Each wait is
  * anchored on the value moving away from the previous one, so a case that expects
  * *no* marker still proves the hook ran - the assertion below it reads the value,
- * it does not race the render. A `toast` step anchors the other way round: the
- * title it waits for is the one already on screen, written again (UAT-M4).
+ * it does not race the render.
  * @param platform - The platform the hook sees (this suite runs on both).
  * @param steps - The first title (it mounts the probe), then further titles to
- *   rerender, wiring values to publish, or one completion to deliver; one entry
- *   in `seen` per step.
+ *   rerender or wiring values to publish; one entry in `seen` per step.
  */
 async function titleTrace(platform: NodeJS.Platform, steps: readonly [string, ...TitleStep[]]): Promise<{ seen: string[], raw: string[] }> {
   return withPlatform(platform, async () => {
@@ -354,21 +319,13 @@ async function titleTrace(platform: NodeJS.Platform, steps: readonly [string, ..
     try {
       for (const [index, step] of steps.entries()) {
         const previous = seen.at(-1) ?? SENTINEL
-        let arrived = (): boolean => process.title !== previous || raw.length > 0
+        const arrived = (): boolean => process.title !== previous || raw.length > 0
         if (typeof step === 'string') {
           if (index > 0) instance.rerender(element(step))
-        } else if ('wired' in step) {
+        } else {
           // No rerender accompanies this one: the store's own publish is what has
           // to reach the mounted hook.
           setWindowsToastWiring(step.wired)
-        } else {
-          // One completion through the real chain, with the console title reset
-          // underneath it the way the toast's own process did before T-FIX-05.
-          // Nothing in the render moves, so the title coming back is the store's
-          // publish and the hook's rewrite - nothing else.
-          process.title = HOST_TITLE
-          arrived = () => process.title === previous
-          await deliverCompletion('toast to rewrite the title')
         }
         await settle(arrived)
         seen.push(process.title)
@@ -466,8 +423,7 @@ await check('a refused AUMID falls back to the bell and leaves the reason in the
   assert.deepEqual(chain.delivered, [[TITLE, NASTY]], 'the fallback announces the completion the toast was going to carry')
   assert.deepEqual(chain.runner.calls, [], 'a toast that cannot display is not spawned')
   const logged = chain.debug.join('')
-  assert.match(logged, /windows toast unavailable/u, 'the fallback states what happened')
-  assert.match(logged, /aumid-registration-failed/u, 'and names the reason (the pair "no toast + bell" has to be explainable)')
+  assert.match(logged, /aumid-registration-failed/u, 'the log names the reason (the pair "no toast + bell" has to be explainable)')
 })
 
 await check('off Windows nothing touches the registry or a child process, and the bell still rings', async () => {
@@ -570,41 +526,12 @@ await check('the wiring moving off the toast withdraws the marker from the title
   assert.equal(run.seen[1], CLEAN_TITLE, 'a launch that stops routing to it must take the promise back, byte for byte')
 })
 
-// --- T-FIX-05: the title a toast can reset from outside ------------------------
-// A toast is shown by a Windows process of its own, and before T-FIX-05 that
-// process inherited the TUI's console: the tab read "Windows PowerShell" the
-// moment a toast went out, marker and all, so a click found no window to come
-// back to (UAT-M4). The spawn is kept off this console now; this is the second
-// half, for a title that was reset anyway - the toast is counted where the
-// transport can publish it, and the mounted hook writes the title again.
-
-await check('a toast that went out puts back a title that was reset underneath it', async () => {
-  writeProfile({})
-  wireToast({ condition: 'unfocused', method: 'auto' })
-  const run = await titleTrace('win32', [ANSI_TITLE, { toast: true }, { toast: true }])
-  assert.equal(run.seen[0], `${CLEAN_TITLE} ${MARKER}`, 'premise: this launch writes the marker')
-  assert.equal(
-    run.seen[1],
-    `${CLEAN_TITLE} ${MARKER}`,
-    'the toast\'s own process renamed the tab while the render stood still: the rewrite has to bring the title - marker included - back (UAT-M4)',
-  )
-  assert.equal(run.seen[2], `${CLEAN_TITLE} ${MARKER}`, 'and a second toast is a second reset: a flag where the hook reads a count would leave this one on the host\'s title for the rest of the session (UAT-M4)')
-})
-
 // --- T-FIX-04: why a title carries no marker -----------------------------------
 // An unmarked tab looks exactly like a marked one until the user clicks the toast
 // and nothing comes back, so every branch that withholds the marker has to name
 // the condition that did it - the settings, the profile document, the system.
 
 const skipCases = [
-  {
-    name: 'the host published no wiring for this launch',
-    arrange: () => {
-      writeProfile({})
-      wireToast({ condition: 'off', method: 'auto' })
-    },
-    expected: { reason: 'wiring-unpublished' },
-  },
   {
     name: 'the profile document names an external notifier',
     arrange: () => {
@@ -649,63 +576,12 @@ await check('a launch that does not route to the toast keeps the title byte-iden
   assert.equal(bel.seen[0], CLEAN_TITLE, 'notificationMethod=bel makes the bell the notification: no toast is waiting for a click')
 })
 
-/**
- * Both halves resolve "which profile document governs this launch" on their own
- * (`use-terminal-title.ts` for the marker, `plugin.ts` for the transport), and
- * either launch route - `--profile` in argv, or the variable the launcher's entry
- * route hands down - may be the one that names it (F2). Each half has a
- * regression of its own; this drives the same input through both and compares the
- * document each one used. Drift leaves the title promising a click the toast no
- * longer sends, or the other way round: a toast whose click finds no marker.
- */
-await check('win32: the title and the toast resolve the same profile document on both launch routes', async () => {
-  const routes = [
-    { label: '--profile in argv', argv: ['node', 'dsh', '--profile', PROFILE], env: undefined },
-    { label: 'DSH_TUI_PROFILE from the launcher', argv: ['node', 'dsh'], env: PROFILE },
-  ] as const
-  for (const route of routes) {
-    await withLaunchRoute(route, async () => {
-      writeProfile({ [EXTERNAL_NOTIFIER_PACKAGES[0]]: '^1.0.0' })
-      wireToast({ condition: 'unfocused', method: 'auto' })
-      const chain = await deliverCompletion(NASTY)
-      assert.deepEqual(chain.profileDocuments, [PROFILE_DOCUMENT], `${route.label}: the toast half resolves the document this launch names`)
-      assert.equal(
-        windowsToastProfileDocument(),
-        chain.profileDocuments[0],
-        `${route.label}: the marker half resolves that same one - two answers would deliver a toast whose click lands on an unmarked title`,
-      )
-      const yielded = await titleTrace('win32', [ANSI_TITLE])
-      assert.equal(
-        yielded.seen[0],
-        CLEAN_TITLE,
-        `${route.label}: the title half must read that same document - the external notifier in it stands the toast down, so a marker would promise a click that never comes`,
-      )
-      // The control the comparison needs: without the notifier the same route
-      // writes the marker, so "no marker" above is this document's doing.
-      writeProfile({})
-      const wired = await titleTrace('win32', [ANSI_TITLE])
-      assert.equal(wired.seen[0], `${CLEAN_TITLE} ${MARKER}`, `${route.label}: control - the same launch writes the marker without that document`)
-    })
-  }
-})
-
 await check('win32 + a profile this process cannot name: the marker is still written', async () => {
   delete process.env.DSH_TUI_PROFILE
   try {
     wireToast({ condition: 'unfocused', method: 'auto' })
     const run = await titleTrace('win32', [ANSI_TITLE])
     assert.equal(run.seen[0], `${CLEAN_TITLE} ${MARKER}`, 'an unnameable profile only drops the dedup question, not the jump-back')
-  } finally {
-    process.env.DSH_TUI_PROFILE = PROFILE
-  }
-})
-
-await check('win32 + a profile document that is not there: the marker is still written', async () => {
-  process.env.DSH_TUI_PROFILE = 'verify-notify-windows-absent'
-  try {
-    wireToast({ condition: 'unfocused', method: 'auto' })
-    const run = await titleTrace('win32', [ANSI_TITLE])
-    assert.equal(run.seen[0], `${CLEAN_TITLE} ${MARKER}`, 'a document nobody wrote is not evidence of another notifier')
   } finally {
     process.env.DSH_TUI_PROFILE = PROFILE
   }

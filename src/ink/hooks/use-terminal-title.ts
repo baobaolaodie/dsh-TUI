@@ -3,7 +3,7 @@ import { useContext, useEffect, useSyncExternalStore } from 'react'
 import stripAnsi from 'strip-ansi'
 import { OSC, osc } from '../termio/osc.js'
 import { TerminalWriteContext } from '../useTerminalNotification.js'
-import { subscribeWindowsToastShown, subscribeWindowsToastWiring, windowsToastProfileDocument, windowsToastShownVersion, windowsToastWired } from '../notification-wiring-state.js'
+import { subscribeWindowsToastWiring, windowsToastProfileDocument, windowsToastWired } from '../notification-wiring-state.js'
 import { logForDebugging } from '../../utils/debug.js'
 
 /**
@@ -29,12 +29,6 @@ export function useTerminalTitle(title: string | null): void {
   // wakeup the marker would never be added, and a click on the toast would find
   // no tab (T-FIX-04).
   const wired = useSyncExternalStore(subscribeWindowsToastWiring, windowsToastWired)
-  // And subscribed to the toasts that were shown: showing one runs a Windows
-  // process of its own, which can reset this title from outside the renderer -
-  // the reset that takes the marker off the tab (UAT-M4). A count, so a title
-  // that nothing in the render moved is still written again once per toast; only
-  // then, because rewriting per frame would fight the terminal for no reason.
-  const toastsShown = useSyncExternalStore(subscribeWindowsToastShown, windowsToastShownVersion)
 
   useEffect(() => {
     if (title === null || !writeRaw) return
@@ -47,7 +41,7 @@ export function useTerminalTitle(title: string | null): void {
     } else {
       writeRaw(osc(OSC.SET_TITLE_AND_ICON, clean))
     }
-  }, [title, writeRaw, wired, toastsShown])
+  }, [title, writeRaw, wired])
 }
 
 /**

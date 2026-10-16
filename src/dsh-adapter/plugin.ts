@@ -1,5 +1,4 @@
 import { randomUUID } from 'node:crypto'
-import { join } from 'node:path'
 import React from 'react'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import type { Agent, AgentHandle } from '@deepseek-ai/dsh-agent'
@@ -31,12 +30,11 @@ import { registerTuiChannel } from '../adapter/channel/host-registry.js'
 import { createChildStderrReporter, installChildStderrGuard } from './childStderr.js'
 import { removeClipboardImageDir } from '../utils/clipboard.js'
 import { appendCrashLog, serializeCrashDetail, unserializableCrashDetail, type CrashDetail } from '../utils/crashDetail.js'
-import { dshHomeDir } from '../utils/credentials.js'
 import { logForDebugging } from '../utils/debug.js'
 import { createTerminalNotifier, type NotificationMethod, type TaskNotifications } from '../ink/terminal-notification.js'
 import type { WindowsToastInput, WindowsToastResult } from '../ink/terminal-notification-windows.js'
 import { getTerminalFocused } from '../ink/terminal-focus-state.js'
-import { setWindowsToastWiring } from '../ink/notification-wiring-state.js'
+import { setWindowsToastWiring, windowsToastProfileDocument } from '../ink/notification-wiring-state.js'
 import { resolveNotificationMethod } from '../ink/terminal.js'
 import { isEnvTruthy } from '../utils/envUtils.js'
 import { QuestionStore, bindQuestionStore } from './questions.js'
@@ -347,7 +345,7 @@ export async function deliverTaskCompletionOnWindows(
   const result = await delivery.toast({
     title,
     message,
-    profilePackageJsonPath: taskCompletionProfileDocument(),
+    profilePackageJsonPath: windowsToastProfileDocument(),
   })
   if (result.status !== 'unavailable') return
   // AC-5 wants the bell, not a silent loss - and the reason is what makes the
@@ -376,25 +374,6 @@ async function showWindowsToast(input: WindowsToastInput): Promise<WindowsToastR
     logForDebugging(`windows toast transport failed to load (${detail})`)
     return { status: 'unavailable', reason: 'unexpected', detail }
   }
-}
-
-/**
- * `<dshHome>/profiles/<profile>/package.json` — the document the transport
- * reads to decide whether an external notifier already owns task completions
- * (D8). The title hook resolves the same document for the same reason
- * (`src/ink/hooks/use-terminal-title.ts`).
- *
- * Both launch routes have to be read: `dsh --profile <name>` keeps the name in
- * argv, while the launcher's entry route consumes the flag and hands it down as
- * `DSH_TUI_PROFILE` — the variable the entry itself reads (`src/hostEntryRoute.ts`),
- * and the same two-source read `install/pnpm-profile-add.ts` does. A launch
- * that names no profile leaves the question unasked, which the transport
- * answers "not yielded": guessing there would drop a notification.
- * @returns The path, or undefined when this launch names no profile.
- */
-function taskCompletionProfileDocument(): string | undefined {
-  const profile = resolveDshProfileName() ?? (process.env.DSH_TUI_PROFILE?.trim() || undefined)
-  return profile === undefined ? undefined : join(dshHomeDir(), 'profiles', profile, 'package.json')
 }
 
 export async function apply(ctx: Context, runtimeConfig: RuntimeConfig<Config>, configOwner: Context = ctx, runtimeOptions: RuntimeApplyOptions = {}): Promise<void> {

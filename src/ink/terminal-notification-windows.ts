@@ -32,7 +32,6 @@ import { fileURLToPath } from 'node:url'
 import { logForDebugging } from '../utils/debug.js'
 import { execFileNoThrow } from '../utils/execFileNoThrow.js'
 import type { ExecFileNoThrowOptions, ExecFileNoThrowResult } from '../utils/execFileNoThrow.js'
-import { noteWindowsToastShown } from './notification-wiring-state.js'
 import { ensureActivateHelper } from './notify-helper/compile.js'
 import type { ActivateHelperResult, EnsureActivateHelperOptions, RunCommand } from './notify-helper/compile.js'
 import { stringWidth } from './stringWidth.js'
@@ -562,10 +561,6 @@ export function createWindowsToastTransport(options: WindowsToastTransportOption
       log('windows toast failed to appear', { detail })
       return unavailable('toast-failed', detail)
     }
-    // A shown toast is a Windows process of its own, and one that reaches the
-    // console can reset the title the click comes back through - the rewrite is
-    // the renderer's, so the fact is published where it already watches.
-    noteWindowsToastShown()
     log('windows toast shown', { ms: now() - started, jumpBack: marker !== null })
     return { status: 'shown', marker }
   }
