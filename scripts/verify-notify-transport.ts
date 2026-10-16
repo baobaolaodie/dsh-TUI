@@ -1,11 +1,12 @@
 /**
- * Windows toast transport contract (T03): the toast XML layer, the lazy AUMID
- * registration state machine, and the external-notifier dedup - all driven
- * through injected ports.
+ * Windows toast transport contract (T03): the toast XML/URI layer, the lazy
+ * AUMID + URI-protocol registration state machine, and the external-notifier
+ * dedup - all driven through injected ports.
  *
  * Nothing here touches the machine: the registry port records instead of
- * writing, the runner records instead of spawning, and the environment is
- * redirected to a throwaway home before the import. Popping a real toast and
+ * writing, the runner records instead of spawning, and the module is imported
+ * only after HOME/USERPROFILE point at a throwaway directory, because the data
+ * directory is a module-level constant (L-049). Popping a real toast and
  * registering the real AUMID are the machine pass (UAT).
  *
  * Run: node --import tsx/esm scripts/verify-notify-transport.ts
@@ -15,7 +16,7 @@ import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { isAbsolute, join } from 'node:path'
 import { stringWidth } from '../src/ink/stringWidth.js'
-import type { ExecFileNoThrowOptions, ExecFileNoThrowResult } from '../src/utils/execFileNoThrow.js'
+import type { ActivateHelperResult, EnsureActivateHelperOptions, RunCommand } from '../src/ink/notify-helper/compile.js'
 import type { RegistryPort, WindowsToastTransport, WindowsToastTransportOptions } from '../src/ink/terminal-notification-windows.js'
 
 const tempDirs: string[] = []
@@ -31,9 +32,8 @@ function tempDir(): string {
   return dir
 }
 
-// The environment is redirected before the import so that a production default
-// this suite does not inject - a data directory, a home - resolves inside a
-// throwaway tree rather than in the user's.
+// Data-directory isolation has to precede the import: `DATA_DIR` is fixed when
+// `src/utils/paths.ts` is evaluated (L-049). Check 20 proves it took effect.
 const fakeHome = tempDir()
 process.env.HOME = fakeHome
 process.env.USERPROFILE = fakeHome
@@ -42,11 +42,16 @@ process.env.DSH_HOME = join(fakeHome, '.dsh')
 const {
   AUMID_REGISTRY_KEY,
   EXTERNAL_NOTIFIER_PACKAGES,
+  PROTOCOL_REGISTRY_KEY,
+  activationUri,
   createWindowsToastTransport,
   escapeXmlText,
+  markerFor,
+  protocolCommand,
   shouldYieldToExternalNotifier,
   toastHostSpawnOptions,
   toastXml,
+  windowsToastAvailability,
 } = await import('../src/ink/terminal-notification-windows.js')
 
 /** The title the renderer passes today (`src/i18n.ts`, AC-1). */
@@ -65,13 +70,6 @@ const WINDIR = 'C:\\WINDOWS'
 const REG_PATH = join(WINDIR, 'System32', 'reg.exe')
 const POWERSHELL_PATH = join(WINDIR, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe')
 const FAILURE = 'ERROR: Access is denied.'
-
-/** The process runner the ports are given, as `execFileNoThrow` provides it. */
-type RunCommand = (
-  file: string,
-  args: readonly string[],
-  options?: ExecFileNoThrowOptions,
-) => Promise<ExecFileNoThrowResult>
 
 type RunCall = { file: string, args: readonly string[], input: string | undefined, timeout: number | undefined }
 type RegistryWrite = { key: string, name: string | null, value: string }
@@ -101,16 +99,32 @@ function recordingRegistry(failOn?: (name: string | null) => string | undefined)
   return { writes, registry }
 }
 
+/** Stands in for compile.ts's ensureActivateHelper: no compiler, no cache. */
+function helperStub(result: ActivateHelperResult) {
+  const calls: EnsureActivateHelperOptions[] = []
+  return {
+    calls,
+    ensureHelper: async (options: EnsureActivateHelperOptions): Promise<ActivateHelperResult> => {
+      calls.push(options)
+      return result
+    },
+  }
+}
+
 interface Harness {
   registry: ReturnType<typeof recordingRegistry>
+  helper: ReturnType<typeof helperStub>
   runner: ReturnType<typeof recordingRunner>
   logged: LogLine[]
+  dataDir: string
   transport: WindowsToastTransport
 }
 
 /** One construction point for the whole suite: every port is a stub. */
 function harness(options: {
   registry?: ReturnType<typeof recordingRegistry>
+  helperResult?: ActivateHelperResult
+  helper?: ReturnType<typeof helperStub>
   runner?: ReturnType<typeof recordingRunner>
   env?: Record<string, string | undefined>
   platform?: NodeJS.Platform
@@ -118,12 +132,21 @@ function harness(options: {
   iconPath?: () => string | undefined
 } = {}): Harness {
   const registry = options.registry ?? recordingRegistry()
+  const dataDir = join(tempDir(), 'data')
+  // The stub mirrors compile.ts's product layout, so the registered command is
+  // checked against the path the helper really reports.
+  const helper = options.helper ?? helperStub(
+    options.helperResult ?? { ok: true, exePath: join(dataDir, 'notify', 'activate.exe'), sourcePath: 'stub.cs', reused: true },
+  )
   const runner = options.runner ?? recordingRunner()
   const logged: LogLine[] = []
   const transportOptions: WindowsToastTransportOptions = {
+    dataDir,
+    pid: 2718,
     platform: options.platform ?? 'win32',
     env: options.env ?? { windir: WINDIR },
     registry: registry.registry,
+    ensureHelper: helper.ensureHelper,
     run: runner.run,
     // One recorder for both runners: no case here is about the split, and the one
     // that is ("the toast host runs on its own runner") builds its own transport.
@@ -132,7 +155,7 @@ function harness(options: {
     log: (message, fields) => logged.push([message, fields]),
     iconPath: options.iconPath,
   }
-  return { registry, runner, logged, transport: createWindowsToastTransport(transportOptions) }
+  return { registry, helper, runner, logged, dataDir, transport: createWindowsToastTransport(transportOptions) }
 }
 
 /** A profile document with (or without) a `dependencies` block. */
@@ -151,22 +174,30 @@ async function check(name: string, body: () => void | Promise<void>): Promise<vo
 
 // --- the pure layer (D10/AC-8) -------------------------------------------------
 
+await check('the marker has one construction site and the URI percent-encodes it', () => {
+  assert.equal(markerFor(2718), '[dsh-tui:2718]')
+  // The exact spelling the helper's smoke test used; `Uri.UnescapeDataString`
+  // on the C# side reverses it (activate.cs:168).
+  assert.equal(activationUri(markerFor(2718)), 'dsh-tui:activate?m=%5Bdsh-tui%3A2718%5D')
+})
+
 await check('text escaping covers exactly the characters AC-8 names', () => {
   assert.equal(escapeXmlText(NASTY), NASTY_ESCAPED)
   assert.equal(escapeXmlText('plain · 🐋'), 'plain · 🐋', 'escaping must leave ordinary text - emoji included - alone')
   assert.equal(escapeXmlText('&amp;'), '&amp;amp;', 'already-escaped input is text, not markup')
 })
 
-await check('the toast XML carries the title and the summary, and nothing else', () => {
-  const xml = toastXml({ title: TITLE, message: '摘要一行' })
+await check('the toast XML carries the title, the summary and the protocol activation', () => {
+  const xml = toastXml({ title: TITLE, message: '摘要一行', marker: markerFor(2718) })
   assert.ok(xml.startsWith('<toast'), 'the document root is a toast')
+  assert.ok(xml.includes('activationType="protocol"'), 'D4: the click comes back as a protocol activation')
+  assert.ok(xml.includes(`launch="${activationUri(markerFor(2718))}"`), 'the launch URI carries the session marker')
   assert.ok(xml.includes('<binding template="ToastGeneric">'), 'the generic template is what desktop toasts render')
   assert.deepEqual(textNodes(xml), [TITLE, '摘要一行'], 'title first, summary second - AC-1')
-  assert.deepEqual(textNodes(toastXml({ title: TITLE })), [TITLE], 'an empty summary shows the title alone')
 })
 
 await check('the toast XML escapes both text nodes and leaves no raw markup in them', () => {
-  const xml = toastXml({ title: NASTY, message: NASTY })
+  const xml = toastXml({ title: NASTY, message: NASTY, marker: markerFor(1) })
   assert.deepEqual(textNodes(xml), [NASTY_ESCAPED, NASTY_ESCAPED])
   for (const node of textNodes(xml)) {
     assert.doesNotMatch(node, /[<>]/u, 'a text node must not carry raw markup')
@@ -190,6 +221,22 @@ await check('an over-long summary is clipped to the two lines the toast can show
   assert.ok(message.startsWith(body.slice(0, -1)), 'the clip keeps the opening - it is a cut, not a rewrite')
 })
 
+await check('a toast without a marker has no activation, so a click cannot dead-end', () => {
+  const xml = toastXml({ title: TITLE })
+  assert.deepEqual(textNodes(xml), [TITLE], 'an empty summary shows the title alone')
+  assert.ok(!xml.includes('launch='), 'no handler means no launch URI')
+  assert.ok(!xml.includes('activationType'), 'and no protocol activation either')
+})
+
+await check('the protocol handler command quotes the exe, the URI and the data directory', () => {
+  assert.equal(
+    protocolCommand('C:\\data\\notify\\activate.exe', 'C:\\data'),
+    '"C:\\data\\notify\\activate.exe" "%1" -DataDir "C:\\data"',
+  )
+  // T01's smoke wired the helper without -DataDir and the helper then logged
+  // into the real %USERPROFILE%\.dsh-tui during an isolated UAT.
+})
+
 // --- the dedup decision (D8/AC-6) ---------------------------------------------
 
 await check('a profile that depends on an external notifier yields', () => {
@@ -205,17 +252,19 @@ await check('a profile without one does not yield, and an unreadable profile nev
   assert.equal(shouldYieldToExternalNotifier(join(tempDir(), 'absent', 'package.json')), false, 'an unreadable profile must not silence the notification')
 })
 
-// --- the registration state machine (D11/AC-5) ---------------------------------
+// --- the registration state machine (D11/D4/AC-5) ------------------------------
 
-await check('the first notification registers the AUMID', async () => {
+await check('the first notification registers the AUMID and the URI handler', async () => {
   const h = harness()
   const result = await h.transport.notify({ title: TITLE, message: '摘要' })
-  assert.deepEqual(result, { status: 'shown' })
+  assert.deepEqual(result, { status: 'shown', marker: markerFor(2718) })
   assert.deepEqual(
     h.registry.writes.map(write => [write.key, write.name]),
     [
       [AUMID_REGISTRY_KEY, 'DisplayName'],
       [AUMID_REGISTRY_KEY, 'IconUri'],
+      [PROTOCOL_REGISTRY_KEY, 'URL Protocol'],
+      [`${PROTOCOL_REGISTRY_KEY}\\shell\\open\\command`, null],
     ],
     'the AUMID comes first: without it Show() succeeds silently (E2)',
   )
@@ -235,13 +284,23 @@ await check('an icon the package cannot supply is left unregistered instead of g
   // shell renders nothing for a path it cannot read either, and leaving the
   // value out is the one outcome that cannot poison the AUMID entry.
   const h = harness({ iconPath: () => undefined })
-  assert.deepEqual(await h.transport.notify({ title: TITLE, message: '摘要' }), { status: 'shown' })
+  assert.deepEqual(await h.transport.notify({ title: TITLE, message: '摘要' }), { status: 'shown', marker: markerFor(2718) })
   assert.deepEqual(
     h.registry.writes.map(write => write.name),
-    ['DisplayName'],
+    ['DisplayName', 'URL Protocol', null],
     'DisplayName still creates the key first, and no IconUri is written at all',
   )
   assert.match(JSON.stringify(h.logged), /icon/, 'and the missing icon is reported, not silently dropped')
+})
+
+await check('the registered handler runs the compiled helper with this data directory', async () => {
+  const h = harness()
+  await h.transport.notify({ title: TITLE })
+  const command = h.registry.writes.find(write => write.name === null)
+  assert.ok(command !== undefined, 'the protocol command is the key\'s default value')
+  assert.equal(command.value, protocolCommand(join(h.dataDir, 'notify', 'activate.exe'), h.dataDir))
+  assert.equal(h.helper.calls.length, 1, 'the handler is only registered once the helper exists')
+  assert.equal(h.helper.calls[0].dataDir, h.dataDir, 'the helper is built into the data directory the command names')
 })
 
 await check('registration happens once and is reused by later notifications', async () => {
@@ -251,10 +310,11 @@ await check('registration happens once and is reused by later notifications', as
   const spawns = h.runner.calls.length
   await h.transport.notify({ title: TITLE, message: 'second' })
   assert.equal(h.registry.writes.length, writes, 'the second toast must not rewrite the registry')
+  assert.equal(h.helper.calls.length, 1, 'and must not look at the helper cache again')
   assert.equal(h.runner.calls.length, spawns + 1, 'but it does show a toast')
 })
 
-await check('a refused AUMID write is reported, not retried', async () => {
+await check('a refused AUMID write is reported, not retried, and stops before the helper', async () => {
   const registry = recordingRegistry(name => (name === 'DisplayName' ? FAILURE : undefined))
   const h = harness({ registry })
   const first = await h.transport.notify({ title: TITLE })
@@ -262,10 +322,21 @@ await check('a refused AUMID write is reported, not retried', async () => {
   assert.equal(first.reason, 'aumid-registration-failed')
   assert.match(first.detail ?? '', /Access is denied/, 'the registry error is the only clue for R2')
   assert.equal(h.registry.writes.length, 1, 'a policy refusal is not retried on the next notification')
+  assert.equal(h.helper.calls.length, 0, 'nothing else is attempted once the toast cannot display')
   const second = await h.transport.notify({ title: TITLE })
   assert.deepEqual(second, first)
   assert.equal(h.registry.writes.length, 1, 'the unavailable state is cached for the process (D11)')
   assert.equal(h.runner.calls.length, 0, 'a toast that cannot display must not be spawned (AC-5: the caller rings the bell)')
+})
+
+await check('a helper that cannot be built still shows the toast, without a jump-back', async () => {
+  const h = harness({ helperResult: { ok: false, reason: 'compile-failed', detail: 'error CS0246' } })
+  const result = await h.transport.notify({ title: TITLE, message: '摘要' })
+  assert.deepEqual(result, { status: 'shown', marker: null })
+  assert.equal(h.registry.writes.length, 2, 'only the AUMID is written: a handler pointing at nothing would be worse')
+  const xml = h.runner.calls[0].input ?? ''
+  assert.ok(!xml.includes('launch='), 'no launch URI without a registered handler')
+  assert.match(JSON.stringify(h.logged), /compile-failed/, 'R3 wants the cause in the log')
 })
 
 await check('the toast is spawned by in-box PowerShell with the XML on stdin, never in argv', async () => {
@@ -275,7 +346,7 @@ await check('the toast is spawned by in-box PowerShell with the XML on stdin, ne
   assert.equal(call.file, POWERSHELL_PATH, 'the in-box host, resolved from %WINDIR% rather than PATH')
   assert.ok(call.args[0] === '-NoProfile', 'the profile is what makes the cold start 3.1-3.4 s worse')
   assert.ok(call.args.includes('-Command'), 'the script itself travels as one argument')
-  assert.equal(call.input, toastXml({ title: TITLE, message: NASTY }))
+  assert.equal(call.input, toastXml({ title: TITLE, message: NASTY, marker: markerFor(2718) }))
   assert.ok(!/[<>·🐋]/u.test(call.args.join(' ')), 'user text must never reach the command line (security)')
   assert.ok(typeof call.timeout === 'number' && call.timeout > 0, 'a stuck PowerShell must not hold the caller forever')
   assert.equal(h.logged.filter(([, fields]) => fields?.ms !== undefined).length, 1, 'R1: the log records how long the spawn took')
@@ -303,33 +374,38 @@ await check('the script body carries the two things the real host needs', async 
 })
 
 await check('the toast host is spawned with no console of its own, so it cannot retitle ours', () => {
-  // The defect this pins (UAT-M4): the in-box host inherits the TUI's console and
-  // sets its title as it starts. Measured on a real machine (2026-10-16): the
+  // The defect this pins (UAT-M4): the in-box host inherits the TUI's console,
+  // sets its title as it starts, and the `[dsh-tui:<pid>]` marker is gone - so a
+  // click on the toast finds no tab. Measured on a real machine (2026-10-16): the
   // title went to "Windows PowerShell" with the previous options and stayed put
   // with these.
   const options = toastHostSpawnOptions()
   assert.equal(options.windowsHide, true, 'CREATE_NO_WINDOW is what leaves the host without a console to retitle')
   assert.deepEqual(options.stdio, ['pipe', 'pipe', 'pipe'], 'the XML and the failure text still travel on pipes')
-  assert.equal(options.detached, undefined, 'DETACHED_PROCESS also leaves the title alone, but measured 2026-10-16 it skipped the script entirely: a toast that never appears is worse than a renamed tab')
+  assert.equal(options.detached, undefined, 'DETACHED_PROCESS also leaves the title alone, but measured 2026-10-16 it skipped the script entirely: a toast that never appears is worse than a dead click')
 })
 
 await check('the toast host runs on its own runner, never on the one that keeps this console', async () => {
-  // Where the toast is spawned is the half a test can see: handing it back to
-  // `run` - the runner `reg.exe` uses, which `execFileNoThrow` spawns with the
-  // console inherited - leaves the isolated runner empty, and that is the shape
-  // that produced UAT-M4. Every port but the registry is stubbed, so the two
-  // runners are told apart by what they carried.
+  // Where the toast is spawned is the other half of the fix, and the half a test
+  // can see: handing it back to `run` - the runner `reg.exe` uses, which
+  // `execFileNoThrow` spawns with the console inherited - leaves the isolated
+  // runner empty, and that is the shape that produced UAT-M4. Every port but the
+  // registry is stubbed, so the two runners are told apart by what they carried.
   const shared = recordingRunner()
   const toast = recordingRunner()
+  const helper = helperStub({ ok: true, exePath: 'stub.exe', sourcePath: 'stub.cs', reused: true })
   const transport = createWindowsToastTransport({
+    dataDir: join(tempDir(), 'data'),
+    pid: 2718,
     platform: 'win32',
     env: { windir: WINDIR },
+    ensureHelper: helper.ensureHelper,
     run: shared.run,
     runToastHost: toast.run,
     log: () => {},
   })
   await transport.notify({ title: TITLE, message: '摘要' })
-  assert.deepEqual(shared.calls.map(call => call.file), [REG_PATH, REG_PATH], 'the registry writes keep the shared runner')
+  assert.deepEqual(shared.calls.map(call => call.file), [REG_PATH, REG_PATH, REG_PATH, REG_PATH], 'the registry writes keep the shared runner')
   assert.deepEqual(toast.calls.map(call => call.file), [POWERSHELL_PATH], 'and the toast host is the one spawn that must not inherit this console')
 })
 
@@ -354,10 +430,12 @@ await check('a toast host that cannot be started is unavailable, not an uncaught
   // that holds no host, which is how the child fails to start. Without the
   // 'error' listener that failure is an uncaught exception in the process
   // rendering the TUI, which no caller can catch or fall back from.
+  const helper = helperStub({ ok: true, exePath: 'stub.exe', sourcePath: 'stub.cs', reused: true })
   const transport = createWindowsToastTransport({
     platform: 'win32',
     env: { windir: tempDir() },
     registry: recordingRegistry().registry,
+    ensureHelper: helper.ensureHelper,
     run: recordingRunner().run,
     log: () => {},
   })
@@ -367,8 +445,8 @@ await check('a toast host that cannot be started is unavailable, not an uncaught
 })
 
 // The refusal itself is what this layer owns; that a refusal leaves no registry
-// write or child process behind is asserted end to end, where the real caller
-// drives the real ports (verify-task-notifications-windows.ts).
+// write, helper build or child process behind is asserted end to end, where the
+// real caller drives the real ports (verify-task-notifications-windows.ts).
 await check('a non-win32 platform is refused by notify', async () => {
   const h = harness({ platform: 'darwin' })
   assert.deepEqual(await h.transport.notify({ title: TITLE }), { status: 'unavailable', reason: 'not-win32' })
@@ -388,25 +466,56 @@ await check('every registry write targets this module\'s own HKCU keys', async (
   await h.transport.notify({ title: TITLE })
   for (const write of h.registry.writes) {
     assert.ok(write.key.startsWith('HKCU\\Software\\Classes\\'), `${write.key} is outside the user's own classes hive`)
-    assert.equal(write.key, AUMID_REGISTRY_KEY, `${write.key} is not one of the documented keys`)
+    assert.ok(
+      [AUMID_REGISTRY_KEY, PROTOCOL_REGISTRY_KEY, `${PROTOCOL_REGISTRY_KEY}\\shell\\open\\command`].includes(write.key),
+      `${write.key} is not one of the documented keys`,
+    )
   }
+})
+
+await check('the caller can ask whether the transport is usable without side effects', () => {
+  // The shared entry point is what a caller without ports reaches; only its
+  // platform gate is asserted through it, because its environment is the host's
+  // (a missing %WINDIR% is a real answer since F5, so the two cases that need
+  // in-box tools come from an injected environment).
+  assert.deepEqual(windowsToastAvailability({ platform: 'darwin' }), { available: false, reason: 'not-win32' })
+  // The marker is withheld on this answer: a "yes" without an in-box host promises
+  // a click that comes back to nothing (UAT-M3), and ensure() only covered it indirectly.
+  const noHost = harness({ env: {} })
+  assert.deepEqual(
+    noHost.transport.available(),
+    { available: false, reason: 'system-root-missing', detail: '%WINDIR% is not set, so reg.exe and powershell.exe cannot be located' },
+    'the title marker must not be written where no in-box host can render the toast it promises (UAT-M3)',
+  )
+  const h = harness()
+  assert.deepEqual(
+    h.transport.available({ profilePackageJsonPath: profileWith({ [EXTERNAL_NOTIFIER_PACKAGES[0]]: '^1.0.0' }) }),
+    { available: false, reason: 'yielded' },
+    'the title marker must not be written while an external notifier owns the notification',
+  )
+  assert.deepEqual(h.transport.available({ profilePackageJsonPath: profileWith(undefined) }), { available: true })
 })
 
 await check('the default registry port drives in-box reg.exe against our own key', async () => {
   // Every port but the registry is stubbed, so this is the production writer
   // path - `reg.exe add` argv included - with nothing actually written.
   const runner = recordingRunner()
+  const helper = helperStub({ ok: true, exePath: 'stub.exe', sourcePath: 'stub.cs', reused: true })
+  const dataDir = join(tempDir(), 'data')
   const transport = createWindowsToastTransport({
+    dataDir,
+    pid: 2718,
     platform: 'win32',
     env: { windir: WINDIR },
+    ensureHelper: helper.ensureHelper,
     run: runner.run,
     runToastHost: runner.run,
     log: () => {},
   })
   const result = await transport.notify({ title: TITLE })
-  assert.deepEqual(result, { status: 'shown' })
-  assert.deepEqual(runner.calls.map(call => call.file), [REG_PATH, REG_PATH, POWERSHELL_PATH])
-  const [display, icon, toast] = runner.calls
+  assert.deepEqual(result, { status: 'shown', marker: markerFor(2718) })
+  assert.deepEqual(runner.calls.map(call => call.file), [REG_PATH, REG_PATH, REG_PATH, REG_PATH, POWERSHELL_PATH])
+  const [display, icon, mark, command] = runner.calls
   assert.deepEqual(display.args.slice(0, 2), ['add', AUMID_REGISTRY_KEY])
   assert.deepEqual(display.args.slice(2, 7), ['/v', 'DisplayName', '/t', 'REG_SZ', '/d'])
   assert.equal(display.args[7], 'dsh-TUI')
@@ -414,10 +523,15 @@ await check('the default registry port drives in-box reg.exe against our own key
   assert.deepEqual(icon.args.slice(2, 7), ['/v', 'IconUri', '/t', 'REG_SZ', '/d'], 'the icon is a named value')
   const registeredIcon = icon.args[7]
   assert.ok(isAbsolute(registeredIcon) && registeredIcon.endsWith('.png'), `the icon is a shipped image file: ${registeredIcon}`)
-  for (const call of [display, icon]) {
+  assert.deepEqual(mark.args.slice(0, 2), ['add', PROTOCOL_REGISTRY_KEY])
+  assert.deepEqual(mark.args.slice(2, 6), ['/v', 'URL Protocol', '/t', 'REG_SZ'], 'the marker is a named value')
+  assert.equal(mark.args[mark.args.indexOf('/d') + 1], '', 'the marker\'s data is empty: Windows checks that it exists')
+  assert.equal(command.args[1], `${PROTOCOL_REGISTRY_KEY}\\shell\\open\\command`)
+  assert.ok(command.args.includes('/ve'), 'the handler command is the key\'s default value')
+  assert.equal(command.args[command.args.indexOf('/d') + 1], protocolCommand('stub.exe', dataDir))
+  for (const call of runner.calls.slice(0, 4)) {
     assert.ok(typeof call.timeout === 'number' && call.timeout > 0, 'a stuck reg.exe must not hold the caller forever')
   }
-  assert.equal(toast.file, POWERSHELL_PATH, 'and the toast follows the registration')
 })
 
 // --- the assembled contract ----------------------------------------------------
@@ -429,8 +543,30 @@ await check('the default registry port drives in-box reg.exe against our own key
 await check('dedup misses still deliver the notification', async () => {
   const h = harness()
   const result = await h.transport.notify({ title: TITLE, profilePackageJsonPath: profileWith({ 'dsh-ops': '^0.3.0' }) })
-  assert.deepEqual(result, { status: 'shown' })
+  assert.deepEqual(result, { status: 'shown', marker: markerFor(2718) })
   assert.equal(h.runner.calls.length, 1)
+})
+
+await check('the default data directory is the redirected home\'s ~/.dsh-tui', async () => {
+  const runner = recordingRunner()
+  const helper = helperStub({ ok: true, exePath: 'stub.exe', sourcePath: 'stub.cs', reused: true })
+  const registry = recordingRegistry()
+  // No `dataDir` here: the module has to resolve the default itself, which is
+  // what proves the pre-import environment redirection took effect (L-049).
+  const transport = createWindowsToastTransport({
+    platform: 'win32',
+    env: { windir: WINDIR },
+    registry: registry.registry,
+    ensureHelper: helper.ensureHelper,
+    run: runner.run,
+    runToastHost: runner.run,
+    log: () => {},
+  })
+  const result = await transport.notify({ title: TITLE })
+  assert.deepEqual(result, { status: 'shown', marker: markerFor(process.pid) })
+  assert.equal(helper.calls.length, 1)
+  assert.equal(helper.calls[0].dataDir, join(fakeHome, '.dsh-tui'), 'D9: the helper cache lives in the TUI data directory')
+  assert.equal(runner.calls.length, 1)
 })
 
 for (const dir of tempDirs) rmSync(dir, { recursive: true, force: true })

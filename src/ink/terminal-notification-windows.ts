@@ -2,22 +2,26 @@
  * The Windows toast transport (DESIGN D3/D4/D8/D10/D11/D12): the only place the
  * renderer talks to the Windows shell about task-completion notifications.
  *
- * It answers two questions, and a caller should not need anything else:
+ * It answers three questions, and a caller should not need anything else:
+ *   - can this process show a native toast?      {@link windowsToastAvailability}
  *   - show one                                  {@link notifyWindowsToast}
  *   - is an external notifier already doing it? {@link shouldYieldToExternalNotifier}
  *
  * Every system side effect sits behind the win32 guard and behind the injected
  * ports, so a POSIX process that reaches this module anyway neither writes the
- * registry nor spawns anything (AC-7/D12). Reaching it is the unusual case:
- * nothing imports it at load time - the host loads it for the first toast - so a
- * POSIX process does not load it at all.
+ * registry nor builds the helper nor spawns anything (AC-7/D12). Reaching it is
+ * the unusual case: nothing imports it at load time - the host loads it for the
+ * first toast and the title hook for the first Windows title - so a POSIX process
+ * does not load it at all.
  *
  * Showing is in-box PowerShell 5.1 + WinRT, one process per notification (D3):
  * the ~3 s cold start of `powershell.exe` is the accepted cost of adding no
  * resident helper (R1). That process is started without a console of this one's
  * ({@link toastHostSpawnOptions}), because a PowerShell host renames the console
- * it runs on. Nothing here waits for the user either: `Show()` hands the
- * notification to the shell and the process exits.
+ * it runs on, and the session's tab title is how a click finds its way back
+ * (UAT-M4). The process is not kept alive for the click either -
+ * Windows activates the `dsh-tui:` URI handler instead (D4), so nothing here
+ * waits for the user.
  */
 
 import { spawn } from 'node:child_process'
@@ -28,18 +32,18 @@ import { fileURLToPath } from 'node:url'
 import { logForDebugging } from '../utils/debug.js'
 import { execFileNoThrow } from '../utils/execFileNoThrow.js'
 import type { ExecFileNoThrowOptions, ExecFileNoThrowResult } from '../utils/execFileNoThrow.js'
+import { noteWindowsToastShown } from './notification-wiring-state.js'
+import { ensureActivateHelper } from './notify-helper/compile.js'
+import type { ActivateHelperResult, EnsureActivateHelperOptions, RunCommand } from './notify-helper/compile.js'
 import { stringWidth } from './stringWidth.js'
 import { truncateToWidth } from './truncateToWidth.js'
-
-/** The process runner the ports below drive, as `execFileNoThrow` provides it. */
-type RunCommand = (
-  file: string,
-  args: readonly string[],
-  options?: ExecFileNoThrowOptions,
-) => Promise<ExecFileNoThrowResult>
+import { DATA_DIR } from '../utils/paths.js'
 
 /** The AppUserModelID the toast is shown under (spike H, 2026-10-16). */
 export const TOAST_AUMID = 'dsh-tui'
+
+/** The URI scheme a clicked toast activates (D4). */
+export const NOTIFY_SCHEME = 'dsh-tui'
 
 /**
  * The AUMID key. Writing it is what makes the toast display at all: an
@@ -76,6 +80,12 @@ function shippedToastIcon(): string | undefined {
     .map(relative => fileURLToPath(new URL(relative, import.meta.url)))
     .find(candidate => existsSync(candidate))
 }
+
+/** The protocol handler key; the `shell\open\command` under it runs the helper. */
+export const PROTOCOL_REGISTRY_KEY = `HKCU\\Software\\Classes\\${NOTIFY_SCHEME}`
+
+/** Marks the key as a protocol handler. Windows checks that it exists, not what it holds. */
+const URL_PROTOCOL_VALUE = 'URL Protocol'
 
 /**
  * The packages whose presence in a profile's `dependencies` means another
@@ -133,7 +143,8 @@ const MAX_CAPTURE_BYTES = 64 * 1024
  * Showing a toast means running in-box `powershell.exe` (D3), and a PowerShell
  * host sets the console title as it starts. A child that inherits this process's
  * console therefore renames the session's tab - measured 2026-10-16, before and
- * after one toast: `✦ 🐋 [dsh-tui:42672]` became `Windows PowerShell` (UAT-M4).
+ * after one toast: `✦ 🐋 [dsh-tui:42672]` became `Windows PowerShell` - and a
+ * click on the toast then finds no tab carrying the marker (UAT-M4).
  *
  * `windowsHide` is what keeps that console away: Windows starts the child with
  * CREATE_NO_WINDOW, so it has none of its own to retitle, while the pipes below
@@ -162,9 +173,9 @@ export function toastHostSpawnOptions(): SpawnOptions {
  * host could not be started at all.
  *
  * A spawn of its own rather than that helper, because the console has to be kept
- * from this one child: `reg.exe` shares the caller's console with no
- * consequence, and `execFileNoThrow` - which it uses - inherits it, with no
- * option to say otherwise.
+ * from this one child: `reg.exe` and the helper compiler share the caller's
+ * console with no consequence, and `execFileNoThrow` - which they use - inherits
+ * it, with no option to say otherwise.
  * @param file - The in-box host to run.
  * @param args - Its argv.
  * @param options - The stdin payload and the timeout, as `execFileNoThrow` takes them.
@@ -212,10 +223,34 @@ function spawnConsoleLess(file: string, args: readonly string[], options?: ExecF
 // --- the pure layer (D10) ------------------------------------------------------
 
 /**
- * Escape the four characters that would otherwise end a text node (AC-8). A
- * summary is arbitrary model output, so nothing may reach the XML unescaped.
+ * The session marker `[dsh-tui:<pid>]` and its ONE construction site: the title
+ * hook appends it to the terminal title, and `notify-helper/activate.cs` matches
+ * it as an opaque substring of a Windows Terminal tab name. Both depend on this
+ * format - formatting it a second time anywhere would break the click.
+ * @param pid The TUI process whose window a click should come back to.
+ * @returns The marker as it appears in the title.
+ */
+export function markerFor(pid: number): string {
+  return `[dsh-tui:${pid}]`
+}
+
+/**
+ * The URI a clicked toast activates (D4). The marker is percent-encoded, so
+ * `[dsh-tui:2718]` travels as `%5Bdsh-tui%3A2718%5D`; the helper reverses it
+ * with `Uri.UnescapeDataString`.
+ * @param marker A marker from {@link markerFor}.
+ * @returns The `launch` URI for the toast.
+ */
+export function activationUri(marker: string): string {
+  return `${NOTIFY_SCHEME}:activate?m=${encodeURIComponent(marker)}`
+}
+
+/**
+ * Escape the four characters that would otherwise end a text node or an
+ * attribute value (AC-8). A summary is arbitrary model output, so nothing may
+ * reach the XML unescaped.
  * @param text Raw text from the renderer.
- * @returns The same text, safe inside an XML text node.
+ * @returns The same text, safe inside XML text and double-quoted attributes.
  */
 export function escapeXmlText(text: string): string {
   // `&` first: escaping it after `&lt;` would double-escape the entities.
@@ -232,6 +267,8 @@ export interface ToastContent {
   title: string
   /** Second line: the single-line summary. Omitted when empty, clipped by {@link clampSummary}. */
   message?: string
+  /** Session marker for the click; without it the toast has no activation. */
+  marker?: string
 }
 
 /**
@@ -260,16 +297,33 @@ function clampSummary(message: string): string {
 }
 
 /**
- * Build the ToastGeneric document (D10).
- * @param content Title and summary.
+ * Build the ToastGeneric document (D10). The activation is `protocol` with a
+ * `launch` URI, because PowerShell cannot receive the click in-process (E3).
+ * @param content Title, summary and the marker to come back to.
  * @returns The XML handed to `XmlDocument.LoadXml` on the PowerShell side.
  */
 export function toastXml(content: ToastContent): string {
+  const activation = content.marker === undefined
+    ? ''
+    : ` activationType="protocol" launch="${escapeXmlText(activationUri(content.marker))}"`
   const texts = [`<text>${escapeXmlText(content.title)}</text>`]
   if (content.message !== undefined && content.message !== '') {
     texts.push(`<text>${escapeXmlText(clampSummary(content.message))}</text>`)
   }
-  return `<toast><visual><binding template="ToastGeneric">${texts.join('')}</binding></visual></toast>`
+  return `<toast${activation}><visual><binding template="ToastGeneric">${texts.join('')}</binding></visual></toast>`
+}
+
+/**
+ * The command line Windows runs for a `dsh-tui:...` activation. `-DataDir` is
+ * not optional: the shell starts the handler without this process's
+ * environment, so a handler without it logs into the user's real
+ * `%USERPROFILE%\.dsh-tui` even during an isolated run.
+ * @param exePath The compiled activation helper's product.
+ * @param dataDir The data directory the handler must use.
+ * @returns The command line for `shell\open\command`.
+ */
+export function protocolCommand(exePath: string, dataDir: string): string {
+  return `"${exePath}" "%1" -DataDir "${dataDir}"`
 }
 
 // --- the port types -----------------------------------------------------------
@@ -297,6 +351,10 @@ interface NotifyTools {
 
 /** Every port is injectable so the regression never writes the registry or spawns. */
 export interface WindowsToastTransportOptions {
+  /** Where the helper and its cache live; defaults to `~/.dsh-tui` (D9). */
+  dataDir?: string
+  /** The pid the title marker carries; defaults to this process (D7). */
+  pid?: number
   /** Platform override for the regression; production is `process.platform`. */
   platform?: NodeJS.Platform
   /** Environment for the `%WINDIR%` lookups; defaults to `process.env`. */
@@ -309,17 +367,19 @@ export interface WindowsToastTransportOptions {
    * at all rather than a path the shell cannot read.
    */
   iconPath?: () => string | undefined
+  /** Helper build port; defaults to compile.ts's `ensureActivateHelper`. */
+  ensureHelper?: (options: EnsureActivateHelperOptions) => Promise<ActivateHelperResult>
   /**
-   * Process runner for `reg.exe`; defaults to `execFileNoThrow`. Not the toast
-   * host's: that one must not inherit this console, so it has
-   * {@link WindowsToastTransportOptions.runToastHost}.
+   * Process runner for `reg.exe` and the helper compiler; defaults to
+   * `execFileNoThrow`. Not the toast host's: that one must not inherit this
+   * console, so it has {@link WindowsToastTransportOptions.runToastHost}.
    */
   run?: RunCommand
   /**
    * Process runner for the toast host; defaults to the console-less spawn
    * ({@link toastHostSpawnOptions}). A port of its own because "which runner"
-   * is exactly the difference between a session whose tab keeps its title and
-   * one whose tab a PowerShell host renames (UAT-M4).
+   * is exactly the difference between a session whose tab keeps its marker and
+   * one whose click lands nowhere (UAT-M4).
    */
   runToastHost?: RunCommand
   /** Clock, so the log can report how long the toast spawn took (R1); defaults to `Date.now`. */
@@ -343,7 +403,7 @@ export type WindowsToastAvailability =
   | { available: false, reason: 'yielded' | WindowsToastFailure, detail?: string }
 
 export type WindowsToastResult =
-  | { status: 'shown' }
+  | { status: 'shown', marker: string | null }
   /** An external notifier owns task completions: no toast and no bell (AC-6). */
   | { status: 'yielded' }
   /** Nothing was delivered: the caller falls back to the bell, never to silence. */
@@ -367,6 +427,8 @@ export interface WindowsToastAvailabilityQuery {
 }
 
 export interface WindowsToastTransport {
+  /** Side-effect free: registration stays lazy, so this never touches the registry. */
+  available(query?: WindowsToastAvailabilityQuery): WindowsToastAvailability
   /** Dedup, register, show. Never rejects: the caller treats this as fire-and-forget. */
   notify(input: WindowsToastInput): Promise<WindowsToastResult>
 }
@@ -401,13 +463,13 @@ export function shouldYieldToExternalNotifier(profilePackageJsonPath: string): b
 
 /** A registration that succeeded, plus the tool a toast is spawned from. */
 type Registration =
-  | { ok: true, tools: NotifyTools }
+  | { ok: true, jumpBack: boolean, tools: NotifyTools }
   | { ok: false, reason: WindowsToastFailure, detail?: string }
 
 /**
  * Create a transport with its own registration state. Production shares one
- * instance through {@link notifyWindowsToast}, because "the AUMID is registered"
- * is a per-process fact (D11).
+ * instance through {@link windowsToastAvailability}/{@link notifyWindowsToast},
+ * because "the AUMID is registered" is a per-process fact (D11).
  * @param options Ports and paths; every one of them has a production default.
  * @returns The transport.
  */
@@ -418,9 +480,12 @@ export function createWindowsToastTransport(options: WindowsToastTransportOption
   const toastHost = options.runToastHost ?? spawnConsoleLess
   const log = options.log ?? logForDebugging
   const now = options.now ?? Date.now
+  const pid = options.pid ?? process.pid
   const tools = toolsFor(env)
   const registry = options.registry ?? regExeRegistry(run, tools)
   const icon = options.iconPath ?? shippedToastIcon
+  const ensureHelper = options.ensureHelper ?? ensureActivateHelper
+  const dataDir = (): string => options.dataDir ?? DATA_DIR
 
   let settled: Registration | undefined
   let pending: Promise<Registration> | undefined
@@ -439,9 +504,11 @@ export function createWindowsToastTransport(options: WindowsToastTransportOption
       return { available: false, reason: 'yielded' }
     }
     // The same two refusals `register()` makes, in the same order: without an
-    // in-box host to render the toast there is nothing to register.
+    // in-box host to render the toast there is nothing to register, so a caller
+    // asking for the title marker must not be told the toast is possible.
     if (tools === null) return { available: false, reason: 'system-root-missing', detail: SYSTEM_ROOT_MISSING_DETAIL }
-    // Once a registration has failed it is final for this process (D11).
+    // Once a registration has failed it is final for this process (D11), and a
+    // caller asking for the title marker has to see that too.
     if (settled !== undefined && !settled.ok) {
       return settled.detail === undefined
         ? { available: false, reason: settled.reason }
@@ -464,16 +531,28 @@ export function createWindowsToastTransport(options: WindowsToastTransportOption
 
   async function register(): Promise<Registration> {
     // D12: the platform gate comes before every other check, so a POSIX process
-    // that reached this module still cannot write a key.
+    // that reached this module still cannot write a key or build the helper.
     if (platform !== 'win32') return fail('not-win32')
     if (tools === null) return fail('system-root-missing', SYSTEM_ROOT_MISSING_DETAIL)
     const aumidFailure = await registerAumid(registry, icon(), log)
     if (aumidFailure !== undefined) return fail('aumid-registration-failed', aumidFailure)
-    return { ok: true, tools }
+
+    const helper = await ensureHelper({ dataDir: dataDir(), platform, env, run, log })
+    if (!helper.ok) {
+      // R3: the toast is still worth showing - only the jump-back is lost.
+      log('windows toast: no jump-back handler, the toast still shows', { reason: helper.reason, detail: helper.detail })
+      return { ok: true, jumpBack: false, tools }
+    }
+    const protocolFailure = await registerProtocol(registry, helper.exePath, dataDir())
+    if (protocolFailure !== undefined) {
+      log('windows toast: the URI handler was not registered, a click cannot come back', { detail: protocolFailure })
+      return { ok: true, jumpBack: false, tools }
+    }
+    return { ok: true, jumpBack: true, tools }
   }
 
-  async function show(input: WindowsToastInput, powershell: string): Promise<WindowsToastResult> {
-    const xml = toastXml({ title: input.title, message: input.message })
+  async function show(input: WindowsToastInput, marker: string | null, powershell: string): Promise<WindowsToastResult> {
+    const xml = toastXml({ title: input.title, message: input.message, marker: marker ?? undefined })
     const started = now()
     const result = await toastHost(powershell, ['-NoProfile', '-Command', TOAST_SCRIPT], { input: xml, timeout: TOAST_TIMEOUT_MS })
     if (result.code !== 0) {
@@ -483,11 +562,16 @@ export function createWindowsToastTransport(options: WindowsToastTransportOption
       log('windows toast failed to appear', { detail })
       return unavailable('toast-failed', detail)
     }
-    log('windows toast shown', { ms: now() - started })
-    return { status: 'shown' }
+    // A shown toast is a Windows process of its own, and one that reaches the
+    // console can reset the title the click comes back through - the rewrite is
+    // the renderer's, so the fact is published where it already watches.
+    noteWindowsToastShown()
+    log('windows toast shown', { ms: now() - started, jumpBack: marker !== null })
+    return { status: 'shown', marker }
   }
 
   return {
+    available,
     async notify(input: WindowsToastInput): Promise<WindowsToastResult> {
       try {
         const judgement = available({ profilePackageJsonPath: input.profilePackageJsonPath })
@@ -497,7 +581,8 @@ export function createWindowsToastTransport(options: WindowsToastTransportOption
         }
         const registration = await resolve()
         if (!registration.ok) return unavailable(registration.reason, registration.detail)
-        return await show(input, registration.tools.powershell)
+        const marker = registration.jumpBack ? markerFor(pid) : null
+        return await show(input, marker, registration.tools.powershell)
       } catch (error) {
         // The caller's path is fire-and-forget (the renderer cannot await a
         // notification), so a rejection here would surface as an unhandled one.
@@ -561,6 +646,17 @@ async function registerAumid(
 }
 
 /**
+ * Point the `dsh-tui:` scheme at the compiled helper (D4).
+ * @returns Why the handler could not be registered, or undefined on success.
+ */
+async function registerProtocol(registry: RegistryPort, exePath: string, dataDir: string): Promise<string | undefined> {
+  const mark = await registry.setValue(PROTOCOL_REGISTRY_KEY, URL_PROTOCOL_VALUE, '')
+  if (!mark.ok) return `${URL_PROTOCOL_VALUE}: ${mark.detail}`
+  const handler = await registry.setValue(`${PROTOCOL_REGISTRY_KEY}\\shell\\open\\command`, null, protocolCommand(exePath, dataDir))
+  return handler.ok ? undefined : `command: ${handler.detail}`
+}
+
+/**
  * The production registry port: one `reg.exe add` per value, always against the
  * key it is given - which is always one of this module's own HKCU keys.
  */
@@ -592,6 +688,17 @@ function describe(error: unknown): string {
 // --- the shared instance ------------------------------------------------------
 
 let shared: WindowsToastTransport | undefined
+
+/**
+ * Ask whether a native toast is possible, without any side effect. The title
+ * hook reads this before it writes the `[dsh-tui:<pid>]` marker: a marker that
+ * promises a jump-back must not appear while the transport cannot deliver.
+ * @param query Platform override and/or the profile document (D8).
+ * @returns Whether a toast can be attempted, and why not when it cannot.
+ */
+export function windowsToastAvailability(query: WindowsToastAvailabilityQuery = {}): WindowsToastAvailability {
+  return (shared ??= createWindowsToastTransport()).available(query)
+}
 
 /**
  * Show one task-completion toast: stand down for an external notifier, register

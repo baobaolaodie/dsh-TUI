@@ -36,6 +36,7 @@ import { logForDebugging } from '../utils/debug.js'
 import { createTerminalNotifier, type NotificationMethod, type TaskNotifications } from '../ink/terminal-notification.js'
 import type { WindowsToastInput, WindowsToastResult } from '../ink/terminal-notification-windows.js'
 import { getTerminalFocused } from '../ink/terminal-focus-state.js'
+import { setWindowsToastWiring } from '../ink/notification-wiring-state.js'
 import { resolveNotificationMethod } from '../ink/terminal.js'
 import { isEnvTruthy } from '../utils/envUtils.js'
 import { QuestionStore, bindQuestionStore } from './questions.js'
@@ -238,13 +239,31 @@ export interface TaskNotificationSettings {
 /** The terminal notifier the host configures, as `createTerminalNotifier` returns it. */
 export type TerminalNotifier = ReturnType<typeof createTerminalNotifier>
 
+/**
+ * Publish whether this launch delivers task completions through the native
+ * toast, so the title hook can ask the same question this branch answers (R5).
+ *
+ * The hook writes the `[dsh-tui:<pid>]` marker from the renderer and never sees
+ * the settings; the host resolves them here, wherever it configures them, and a
+ * live `/settings` edit re-publishes. The marker is the toast's promise that a
+ * click comes back, so it may only be written while this launch really routes to
+ * the toast: a launch set to `off`, or pointed at the bell or OSC 9, has no
+ * toast to click.
+ * @param settings - The condition and method the toast branch resolves.
+ * @param platform - What `resolveNotificationMethod` probes; production passes `process.platform`.
+ */
+export function publishWindowsToastWiring(settings: TaskNotificationSettings, platform: NodeJS.Platform = process.platform): void {
+  setWindowsToastWiring(settings.condition !== 'off' && resolveNotificationMethod(settings.method, platform) === 'windows')
+}
+
 /** The live task-notification settings and their one writer. */
 export interface TaskNotificationSettingsHandle {
   /** The current values; the toast branch and the terminal fallback read these. */
   readonly settings: TaskNotificationSettings
   /**
-   * Adopt a new condition/method: the terminal notifier and the toast branch
-   * both read these, so one writer keeps them in step.
+   * Adopt a new condition/method: the terminal notifier and the published wiring
+   * both move, so a live `/settings` edit cannot leave the title promising a
+   * toast the delivery path no longer sends.
    * @param condition - The new condition, or undefined for the default.
    * @param method - The new method, or undefined for the default.
    */
@@ -254,10 +273,11 @@ export interface TaskNotificationSettingsHandle {
 /**
  * Create the live task-notification settings around a notifier.
  *
- * The notifier holds the values for the terminal path, and the Windows branch
- * needs the same two before it can decide whether to spawn anything. One writer
- * keeps them in step - `applyDisplay` is the second caller, for a live /settings
- * edit.
+ * The notifier holds the values for the terminal path; the Windows branch needs
+ * the same two before it can decide whether to spawn anything; and the title
+ * hook cannot see them at all, so the answer is published (`notification-wiring-state.ts`).
+ * One writer keeps all three in step - `applyDisplay` is the second caller, for
+ * a live /settings edit.
  * @param notifier - The terminal notifier to configure.
  * @param initial - The values this launch starts with.
  * @returns The settings and the single function that changes them.
@@ -273,6 +293,7 @@ export function createTaskNotificationSettings(
       settings.condition = condition ?? 'unfocused'
       settings.method = method ?? 'auto'
       notifier.configure(condition, method)
+      publishWindowsToastWiring(settings)
     },
   }
 }
@@ -281,11 +302,11 @@ export function createTaskNotificationSettings(
  * Ring the terminal for a completion the host's gate already approved.
  *
  * The gate asks whether the terminal is focused; this port runs after the toast's
- * await, which is up to 30 s of PowerShell. Asking the focus question a second
- * time here would drop the bell for a user who came back to the terminal in that
- * window - while the log had already reported it rung (AC-5). The decision
- * travels in instead. `notify()` is synchronous, so the override covers exactly
- * this call.
+ * await, which is up to 30 s of PowerShell plus 30 s of helper work. Asking the
+ * focus question a second time here would drop the bell for a user who came back
+ * to the terminal in that window - while the log had already reported it rung
+ * (AC-5). The decision travels in instead. `notify()` is synchronous, so the
+ * override covers exactly this call.
  * @param notifier - The terminal notifier the host configured.
  * @param settings - The live settings the decision was taken from.
  * @param title - The localized title.
@@ -342,9 +363,9 @@ export async function deliverTaskCompletionOnWindows(
 /**
  * The production toast port. The Windows module is imported on first use and
  * never at load time, so this path does not pull it in on a host that never
- * delivers a toast. A load that fails answers like any other unavailable
- * transport instead of throwing: this path is fire-and-forget, and the caller
- * still has the bell.
+ * delivers a toast; the title hook loads it the same way (`use-terminal-title.ts`).
+ * A load that fails answers like any other unavailable transport instead of
+ * throwing: this path is fire-and-forget, and the caller still has the bell.
  */
 async function showWindowsToast(input: WindowsToastInput): Promise<WindowsToastResult> {
   try {
@@ -360,7 +381,8 @@ async function showWindowsToast(input: WindowsToastInput): Promise<WindowsToastR
 /**
  * `<dshHome>/profiles/<profile>/package.json` — the document the transport
  * reads to decide whether an external notifier already owns task completions
- * (D8).
+ * (D8). The title hook resolves the same document for the same reason
+ * (`src/ink/hooks/use-terminal-title.ts`).
  *
  * Both launch routes have to be read: `dsh --profile <name>` keeps the name in
  * argv, while the launcher's entry route consumes the flag and hands it down as
