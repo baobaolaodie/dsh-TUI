@@ -31,18 +31,21 @@
  * never take down a session screen. Only the deciding reader refuses.
  *
  * Plus the refusal's way out: a ledger that exists but is not a ledger document
- * refuses as `damaged` — one form per branch that sets the flag — and the
- * sentence the interactive surfaces show has to name the file to delete and when
- * deleting it is safe, in both languages. The counter-examples are what keep
- * that flag honest: a MISSING file is a genuine first run, an UNREADABLE one (a
- * directory in its place) is not damage, and a good ledger this process may not
- * write is a permission problem — sending a user to delete a file that may be a
- * peer's only claim would be the wrong repair.
+ * refuses as `damaged` — one form per branch of the strict read that sets the
+ * flag — and the sentence the interactive surfaces show has to name the file to
+ * delete and when deleting it is safe, in both languages. The counter-examples
+ * are what keep that flag honest: a MISSING file is a genuine first run, an
+ * UNREADABLE one (a directory in its place) is not damage, and a good ledger this
+ * process may not write is a permission problem — sending a user to delete a file
+ * that may be a peer's only claim would be the wrong repair.
  *
- * Every branch that sets the flag has a row in group 8, and each row was checked
- * the only way that counts: take that branch's `damaged: true` away, re-run this
- * script, watch that row go red. A row whose branch can be dropped without a red
- * is decoration — re-run the check when extending the table.
+ * Every branch of `readMountLedgerStrict` that sets the flag has a row in group 8,
+ * and each row was checked the only way that counts: take that branch's
+ * `damaged: true` away, re-run this script, watch that row go red. A row whose
+ * branch can be dropped without a red is decoration — re-run the check when
+ * extending the table. Note that group 8 is not full coverage of the flag:
+ * `writeLedger()` forwards it too (src/sessionMounts.ts:491-493) and has no row
+ * here — a gap adjudicated and accepted, recorded in this change's KNOWN-ISSUES.
  *
  * Ownership is pid-only, so the foreign holder is a REAL second process that
  * PUBLISHES through this same module in the same fake HOME — a staged JSON
@@ -451,24 +454,33 @@ clearOwnMounts()
 // Denying the write takes two moves, because the platforms deny it differently:
 // Windows refuses to replace a read-only FILE, while POSIX replaces that happily
 // and instead refuses to create anything (the lock, the temp file) in a
-// directory that lost its write bit.
+// directory that lost its write bit. Neither move denies anything to ROOT: the
+// bits are advisory for uid 0, `claimMount` would simply succeed, and both checks
+// below would then fail over the environment rather than the behaviour. So where
+// the deny is not real they are skipped instead — loudly, so a root run reads as
+// "not covered here" and never as "this contract holds here".
+const modeBitsDenyWrites = process.getuid?.() !== 0 // no getuid at all (Windows) = not root
 const LEDGER_DIR = join(tmpHome, '.dsh-tui')
 rmSync(LEDGER, { force: true })
 rmSync(LOCK, { force: true }) // a leftover lock would refuse as `busy` before the denial is reached
 writeRaw([])
-chmodSync(LEDGER, 0o444)
-chmodSync(LEDGER_DIR, 0o555)
-const protectedRead = readMountLedgerStrict()
-check('a write-protected ledger still reads as a good ledger', protectedRead.ok === true)
-const blockedByPermissions = claimMount('read-only-sess')
-check('so its refusal is a permission problem, never damage',
-  blockedByPermissions.ok === false && blockedByPermissions.reason === 'unavailable'
-  && blockedByPermissions.damaged !== true)
-// The deny is lifted again — 0o700 because that is the mode the module creates
-// its data directory with — since every block below writes into it.
-chmodSync(LEDGER, 0o644)
-chmodSync(LEDGER_DIR, 0o700)
-clearOwnMounts()
+if (modeBitsDenyWrites) {
+  chmodSync(LEDGER, 0o444)
+  chmodSync(LEDGER_DIR, 0o555)
+  const protectedRead = readMountLedgerStrict()
+  check('a write-protected ledger still reads as a good ledger', protectedRead.ok === true)
+  const blockedByPermissions = claimMount('read-only-sess')
+  check('so its refusal is a permission problem, never damage',
+    blockedByPermissions.ok === false && blockedByPermissions.reason === 'unavailable'
+    && blockedByPermissions.damaged !== true)
+  // The deny is lifted again — 0o700 because that is the mode the module creates
+  // its data directory with — since every block below writes into it.
+  chmodSync(LEDGER, 0o644)
+  chmodSync(LEDGER_DIR, 0o700)
+  clearOwnMounts()
+} else {
+  console.log('  skip: running as root — mode bits do not deny writes')
+}
 
 // A directory in the ledger's place is the read failure the flag must NOT
 // swallow: there is no document to repair, and the path may be somebody's data.
@@ -495,9 +507,15 @@ check('and neither language sends the user off to delete anything',
 // of advice does not. The branch's adjacent string literals are joined the way
 // the runtime would, so the match survives a reflow; a moved anchor reads as an
 // empty branch and fails loudly instead of passing on some other sentence.
+//
+// The window is the resume claim block: it opens at the `reserveMount` call and
+// closes at the `ctx.agents.resume` call that block guards, so both boundaries are
+// API calls rather than local bindings or comments — renaming a variable (or
+// compressing a comment) can no longer blank the window while the advice it
+// guards is still there.
 const pluginSource = readFileSync(new URL('../src/dsh-adapter/plugin.ts', import.meta.url), 'utf8')
-const refusalStart = pluginSource.indexOf('const reserved = await reserveMount(')
-const refusalEnd = pluginSource.indexOf('// The reservation spans the awaits below', refusalStart)
+const refusalStart = pluginSource.indexOf('await reserveMount(')
+const refusalEnd = pluginSource.indexOf('await ctx.agents.resume(', refusalStart)
 const resumeRefusal = refusalStart < 0 || refusalEnd < 0
   ? ''
   : pluginSource.slice(refusalStart, refusalEnd)
