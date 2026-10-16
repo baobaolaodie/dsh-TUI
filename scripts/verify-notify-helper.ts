@@ -306,9 +306,11 @@ await check('a changed package source invalidates an otherwise fresh exe', async
   const paths = helperPaths(dir)
   mkdirSync(paths.dir, { recursive: true })
   writeFileSync(paths.sourceCopyPath, '// helper from the previous version\n')
-  utimesSync(paths.sourceCopyPath, (now - 60_000) / 1000, (now - 60_000) / 1000)
+  utimesSync(paths.sourceCopyPath, (now - 120_000) / 1000, (now - 120_000) / 1000)
   writeFileSync(paths.exePath, 'MZ-old')
-  utimesSync(paths.exePath, now / 1000, now / 1000)
+  // A minute apart, because the rewrite below is stamped by the filesystem's
+  // own clock and can land on or before an exe stamped `now`.
+  utimesSync(paths.exePath, (now - 60_000) / 1000, (now - 60_000) / 1000)
   const upgradedDir = tempDataDir()
   const upgradedSource = join(upgradedDir, 'activate.cs')
   writeFileSync(upgradedSource, `${sourceText}\n// upgraded\n`)
