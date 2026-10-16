@@ -30,6 +30,14 @@
  * as an empty ledger through the DISPLAY reader, because a corrupt cache must
  * never take down a session screen. Only the deciding reader refuses.
  *
+ * Plus the refusal's way out: a ledger that exists but is not a ledger document
+ * refuses as `damaged`, and the sentence the interactive surfaces show has to
+ * name the file to delete and when deleting it is safe — in both languages. The
+ * counter-examples are what keep that flag honest: a MISSING file is a genuine
+ * first run, and an UNREADABLE one (a directory in its place) is not damage —
+ * sending a user to delete a file that may be a peer's only claim would be the
+ * wrong repair.
+ *
  * Ownership is pid-only, so the foreign holder is a REAL second process that
  * PUBLISHES through this same module in the same fake HOME — a staged JSON
  * record written by this process would not prove the cross-process guarantee,
@@ -63,6 +71,13 @@ const {
   releaseMount,
   reserveMount,
 } = await import('../src/sessionMounts.ts')
+
+// What the refusal SAYS is part of this contract too (issue #1579): the text
+// sink the interactive surfaces share, and the dictionary behind it. Both are
+// imported under the redirected HOME above, because the language module reads
+// its saved choice out of that data directory at import time.
+const { mountFailureText } = await import('../src/sessions/resumeFailure.ts')
+const { i18nDict, setLang } = await import('../src/i18n.ts')
 
 const LEDGER = join(tmpHome, '.dsh-tui', 'session-mounts.json')
 const LOCK = join(tmpHome, '.dsh-tui', 'session-mounts.lock')
@@ -301,6 +316,126 @@ check('and the ledger still records us as its holder', readMountLedger().some(
 ))
 releaseMount('shared-sess')
 clearOwnMounts()
+
+// ── 8. Damaged ledger: the refusal has to come with a way out ──────────────
+// #1579: an all-zero (or half-written) ledger refuses EVERY mount, and the
+// refusal used to stop at "occupancy could not be verified" — a dead end for a
+// user who cannot read the file's mind. The strict read can tell which kind of
+// "could not read" this is, and the sentence a user sees has to turn that into
+// an action: this is the file to delete, and this is when that is safe.
+console.log('damaged ledger:')
+
+const REPAIR_KEY = 'resume-mount-ledger-repair'
+// What the repair sentence has to get across, as keywords: the thing to delete,
+// and the "nothing else is running" precondition. Keyword-level on purpose — the
+// dictionary owns the wording, so pinning the exact sentence here would fail a
+// harmless reword without judging anything more.
+const REPAIR_POINTS = { zh: ['删除', '其他'], en: ['remove', 'no other'] }
+
+/** Whether the repair sentence itself carries both halves of the action. */
+function repairSaysWhatToDo(lang) {
+  const sentence = i18nDict[REPAIR_KEY]?.[lang]
+  return typeof sentence === 'string'
+    && REPAIR_POINTS[lang].every(point => sentence.toLowerCase().includes(point))
+}
+
+/** Whether a rendered refusal names the ledger AND carries that sentence. */
+function namesFileAndRepair(text, lang) {
+  const sentence = i18nDict[REPAIR_KEY]?.[lang]
+  return typeof sentence === 'string' && text.includes(LEDGER) && text.includes(sentence)
+}
+
+check('the zh repair sentence tells the user to delete and when it is safe', repairSaysWhatToDo('zh'))
+check('the en repair sentence tells the user to delete and when it is safe', repairSaysWhatToDo('en'))
+
+// Two forms of the same accident: storage that handed back zeroes (the length
+// #1579 reported), and a write cut off mid-document.
+const DAMAGE_FORMS = [
+  { label: 'all-zero bytes', write: () => writeFileSync(LEDGER, Buffer.alloc(468)) },
+  { label: 'a truncated document', write: () => writeFileSync(LEDGER, '{"version":1,"owners":[{', 'utf8') },
+]
+
+for (const form of DAMAGE_FORMS) {
+  rmSync(LEDGER, { force: true })
+  form.write()
+
+  const read = readMountLedgerStrict()
+  check(`${form.label}: the strict read reports damage, not emptiness`,
+    read.ok === false && read.damaged === true)
+  check(`${form.label}: and names the file the user has to repair`,
+    read.ok === false && read.detail.includes(LEDGER))
+
+  const beforeClaim = readFileSync(LEDGER)
+  const claim = claimMount('damaged-sess')
+  check(`${form.label}: the claim refuses as unavailable, flagged damaged`,
+    claim.ok === false && claim.reason === 'unavailable' && claim.damaged === true)
+  check(`${form.label}: and the refused claim leaves the file byte-for-byte as it was`,
+    readFileSync(LEDGER).equals(beforeClaim))
+
+  setLang('en')
+  check(`${form.label}: the en notice names the file and how to repair it`,
+    namesFileAndRepair(mountFailureText(claim), 'en'))
+  setLang('zh')
+  check(`${form.label}: the zh notice names the file and how to repair it`,
+    namesFileAndRepair(mountFailureText(claim), 'zh'))
+
+  const beforePublish = readFileSync(LEDGER)
+  check(`${form.label}: publishing still writes nothing`, publishMounts(['ours']) === false)
+  check(`${form.label}: and leaves the file byte-for-byte as it was`,
+    readFileSync(LEDGER).equals(beforePublish))
+  clearOwnMounts()
+}
+
+// The counter-examples are what keep the flag honest. Without them it drifts
+// into "anything that stopped a read", and the sentence starts sending users to
+// delete files that are either absent or perfectly good.
+rmSync(LEDGER, { force: true })
+const absent = readMountLedgerStrict()
+check('a MISSING ledger is a first run, not damage', absent.ok === true && absent.owners.length === 0)
+const firstRun = claimMount('first-run-sess')
+check('so the first-run claim still goes through', firstRun.ok === true)
+check('and neither verdict is flagged as damage', absent.damaged !== true && firstRun.damaged !== true)
+clearOwnMounts()
+
+// A directory in the ledger's place is the read failure the flag must NOT
+// swallow: there is no document to repair, and the path may be somebody's data.
+// This pair is what gives the flag its discriminating power.
+rmSync(LEDGER, { force: true })
+mkdirSync(LEDGER, { recursive: true })
+const unreadable = readMountLedgerStrict()
+check('a directory where the ledger belongs reads as unavailable', unreadable.ok === false)
+check('but "cannot read it" is NOT reported as damage', unreadable.damaged !== true)
+const blockedByDirectory = claimMount('unreadable-sess')
+check('so that claim refuses without calling itself damaged',
+  blockedByDirectory.ok === false && blockedByDirectory.reason === 'unavailable'
+  && blockedByDirectory.damaged !== true)
+setLang('en')
+const unreadableEn = mountFailureText(blockedByDirectory)
+setLang('zh')
+const unreadableZh = mountFailureText(blockedByDirectory)
+check('and neither language sends the user off to delete anything',
+  !namesFileAndRepair(unreadableEn, 'en') && !namesFileAndRepair(unreadableZh, 'zh'))
+
+// AC-3's machine half: the CLI keeps its own English sentence (the two surfaces
+// are worded separately on purpose), so the only thing worth pinning there is
+// the ACTION — loosely, so that a reworded sentence passes and a dropped piece
+// of advice does not. The branch's adjacent string literals are joined the way
+// the runtime would, so the match survives a reflow; a moved anchor reads as an
+// empty branch and fails loudly instead of passing on some other sentence.
+const pluginSource = readFileSync(new URL('../src/dsh-adapter/plugin.ts', import.meta.url), 'utf8')
+const refusalStart = pluginSource.indexOf('const reserved = await reserveMount(')
+const refusalEnd = pluginSource.indexOf('// The reservation spans the awaits below', refusalStart)
+const resumeRefusal = refusalStart < 0 || refusalEnd < 0
+  ? ''
+  : pluginSource.slice(refusalStart, refusalEnd)
+    .replace(/['"`]\s*\+\s*['"`]/g, ' ')
+    .replace(/\s+/g, ' ')
+check('the --resume refusal still says to remove the file with nothing else running',
+  /(remove|delete)\b.{0,120}?\bno other\b.{0,40}?\brunning\b/i.test(resumeRefusal))
+
+// Leave the path free of the directory: every other group starts from
+// `rmSync(LEDGER, { force: true })`, which throws on one.
+rmSync(LEDGER, { recursive: true, force: true })
 
 if (failures > 0) {
   console.error(`\n${failures} check(s) failed`)
