@@ -13,6 +13,12 @@
  *    clipped, and the expanded body stays inside its 400-visual-row window
  *
  * Exits non-zero on the first failed assertion (CI convention).
+ *
+ * Each covered fix has a one-line negative control rather than an in-suite
+ * switch (restore the line with `git checkout` afterwards): dropping the
+ * `<= budget` guard in SplitDiffView's clippedGraphemes turns the 54- and
+ * 55-cell cases red; `take = height` in its paint loop turns both giant-line
+ * cases red. Either revert gives 2 FAILED / 50 PASS.
  */
 process.env.FORCE_COLOR = '3'
 // This script asserts English UI copy; pin the language before any
@@ -279,6 +285,20 @@ const diffTool = (oldText, newText, path) => ({
   check('折叠态未截断时无 folded/chars 提示', !s.includes('folded') && !s.includes('chars'))
 }
 
+// The hint must report what the renderer actually dropped: `truncate` paints a
+// line that fits its budget whole and only cuts past it, keeping `budget - 1`
+// cells. The pane text budgets at 120 cols are 55 (old) and 54 (new) cells, so
+// 53- and 54-cell lines are painted whole — reporting a 54-cell line as folded
+// was the review finding — while 55 and 56 lose 2 and 5 cells between the two
+// panes.
+for (const [cells, expected] of [[53, 0], [54, 0], [55, 2], [56, 5]] as const) {
+  const line = 'a'.repeat(cells)
+  const s = (await renderAt(120, diffTool(line, line, '/tmp/full.py'))).screen()
+  const hint = s.split('\n').find(row => row.includes('folded'))?.trim() ?? 'no hint'
+  check(`折叠态折叠计数：${cells} cell 行 → ${expected === 0 ? '无提示' : `folded ${expected} chars`}`,
+    expected === 0 ? !s.includes('folded') : s.includes(`folded ${expected} chars`), hint)
+}
+
 // AC-3: one logical row is max(left, right) visual rows tall, so the next
 // logical row starts right after it — neither pane can run ahead.
 {
@@ -298,10 +318,9 @@ const diffTool = (oldText, newText, path) => ({
 }
 
 // AC-4: the expanded body walks a bounded VISUAL-row window (400, the same
-// constant the unified body uses). The window stops at a logical-row
-// boundary — a source line is never cut in half — so the rendered body can
-// overshoot by at most one row's own height: 400 + 2 here, where every
-// logical row of the fixture is 2 visual rows tall.
+// constant the unified body uses). The bound keeps one logical row of slack so
+// it does not pin how the window edge is cut; the giant-line case below pins
+// that the row crossing the edge is clipped rather than admitted whole.
 {
   const EXPANDED_WINDOW = 400
   const TALLEST_ROW_VISUAL_ROWS = 2
@@ -318,6 +337,18 @@ const diffTool = (oldText, newText, path) => ({
   check('展开态视觉行窗口：正文行数不超过 400 + 单行最大视觉行数',
     bodyRows <= EXPANDED_WINDOW + TALLEST_ROW_VISUAL_ROWS, `bodyRows=${bodyRows}`)
   check('展开态视觉行窗口：出现 showing the first 提示', screen().includes('showing the first'))
+}
+
+// A single logical line carries no height bound of its own: 40000 cells wrap
+// into ~740 visual rows. The window edge has to cut that row instead of
+// admitting it whole — pre-fix the body painted all 742 rows and, since they
+// all counted as painted, said nothing about it.
+{
+  const huge = `const blob = '${'z'.repeat(40000)}' ENDOFHUGE`
+  const { lines, screen } = await renderAt(120, diffTool(huge, `${huge}_B`, '/tmp/huge.py'), 'auto', 'none', { verbose: true, rows: 900, settleMs: 3000 })
+  const bodyRows = lines.filter(line => line.includes('│')).length
+  check('展开态巨型单行：正文行数不超过 400 视觉行', bodyRows > 0 && bodyRows <= 400, `bodyRows=${bodyRows}`)
+  check('展开态巨型单行：出现 showing the first 提示', screen().includes('showing the first'))
 }
 
 // AC-7: wrapping counts DISPLAY CELLS, so a CJK + emoji line breaks between

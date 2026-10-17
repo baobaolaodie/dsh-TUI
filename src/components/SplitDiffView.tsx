@@ -50,7 +50,9 @@ import { isPatchDiff, parseFilePatch, patchHeader, patchHeaderText, type ParsedP
  *   renderer's `truncate`. Wrapping here would make a card's height depend on
  *   the window width, while the owning card's row budget and its fold hint
  *   count source lines — so the view reports how many characters it clipped
- *   and leaves reading the rest to the expanded state.
+ *   and leaves reading the rest to the expanded state. So the collapsed height
+ *   only moves with the width in whether that hint row appears at all: at most
+ *   `maxRows + 2` rows, the row fold hint and the character fold hint.
  * - Expanded (`verbose`): each pane pre-wraps its line into as many visual
  *   rows as the pane's text budget needs, and both panes paint
  *   `max(left, right)` rows (the shorter side pads with blank rows). The next
@@ -329,9 +331,10 @@ function alignPatchFile(fileIndex: number, parsed: ParsedPatch): { rows: (DiffRo
 // --- visual rows ------------------------------------------------------------
 
 /** Expanded bodies walk a bounded VISUAL-row window — the two-pane twin of the
- *  unified body's 400-line window. The window closes at a logical-row
- *  boundary (a source line is never cut in half), so a painted body can
- *  overshoot by at most one logical row's own height. */
+ *  unified body's 400-line window. It bounds PAINTED rows, not the work: every
+ *  shown line is still wrapped on each frame (O(body) per render). The row
+ *  that crosses the window edge is cut there, so the painted body never
+ *  exceeds the window; the rows above that edge are painted whole. */
 const VERBOSE_VISUAL_ROW_WINDOW = 400
 
 /** One styled grapheme: the smallest unit a wrap may cut between. */
@@ -406,17 +409,22 @@ function wrapSegments(segments: readonly Segment[], budget: number): Segment[][]
   return rows
 }
 
-/** How many graphemes of a pane line the renderer's `truncate` drops. That
- *  mode reserves one cell for its `…` marker, so only `budget - 1` cells of
- *  text ever reach the screen and everything past them is countably hidden. */
+/** How many graphemes of a pane line the renderer's `truncate` drops. It cuts
+ *  only a line WIDER than the columns it is handed (`src/ink/wrap-text.ts`
+ *  returns the text untouched when it fits); once it does cut, it spends one
+ *  of those columns on `…` and keeps `budget - 1` cells of text. That "-1" is
+ *  the renderer's, not this file's — so a line that fits its budget whole
+ *  loses nothing. */
 function clippedGraphemes(segments: readonly Segment[] | undefined, budget: number): number {
   if (segments === undefined) return 0
   const all = graphemes(segments)
+  const widths = all.map(grapheme => stringWidth(grapheme.text))
+  if (widths.reduce((total, width) => total + width, 0) <= budget) return 0
   const fits = budget - 1
   let width = 0
   let visible = 0
   while (visible < all.length) {
-    const next = width + stringWidth(all[visible]!.text)
+    const next = width + widths[visible]!
     if (next > fits) break
     width = next
     visible += 1
@@ -677,8 +685,21 @@ export function SplitDiffView({
     const height = Math.max(leftRows.length, rightRows.length, 1)
     totalVisualRows += height
     if (paintedRows < windowLimit) {
-      paint.push({ leftPrefix, rightPrefix, leftRows, rightRows, leftKind, rightKind, height })
-      paintedRows += height
+      // One logical line has no height bound of its own (a single 40k-cell
+      // line wraps into ~740 rows), so the row that crosses the window edge is
+      // cut to the rows left in it. Only that last row is ever cut; leaving
+      // paintedRows short of totalVisualRows is what shows the window notice.
+      const take = Math.min(height, windowLimit - paintedRows)
+      paint.push({
+        leftPrefix,
+        rightPrefix,
+        leftRows: take < height ? leftRows.slice(0, take) : leftRows,
+        rightRows: take < height ? rightRows.slice(0, take) : rightRows,
+        leftKind,
+        rightKind,
+        height: take,
+      })
+      paintedRows += take
     }
   }
 
