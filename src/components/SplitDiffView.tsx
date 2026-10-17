@@ -4,6 +4,7 @@ import * as JsDiff from 'diff'
 import { extname } from 'node:path'
 import type { ToolFileDiff } from '../dsh-adapter/channel.js'
 import type { Color } from '../ink/styles.js'
+import { stringWidth } from '../ink/stringWidth.js'
 import { getCliHighlightPromise, type CliHighlight } from '../terminal-utils/cliHighlight.js'
 import { chalkFromToken } from '../terminal-utils/syntaxTheme.js'
 import { highlightLines, syntaxThemeSignature, type SyntaxRun } from '../terminal-utils/syntaxRuns.js'
@@ -16,6 +17,7 @@ import { t } from '../i18n.js'
 import { useTheme } from './design-system/ThemeProvider.js'
 import type { ToolBackground } from '../tuiDisplayPrefs.js'
 import { revealLinesOf } from './smoothReveal.js'
+import { getGraphemeSegmenter } from '../utils/intl.js'
 import { primaryComboString } from '../utils/keymap.js'
 import { isPatchDiff, parseFilePatch, patchHeader, patchHeaderText, type ParsedPatch, type PatchLine } from './diffPatch.js'
 
@@ -41,8 +43,20 @@ import { isPatchDiff, parseFilePatch, patchHeader, patchHeaderText, type ParsedP
  * with colors from the theme's syntax* tokens. Changed words always win
  * over syntax colors — diff semantics outrank decoration.
  *
- * One source line = one terminal row (truncate, never wrap): the two panes
- * must stay row-aligned, and a wrapped long line would tear the pairing.
+ * The alignment contract is "a logical line starts on the same screen row in
+ * both panes"; the two modes keep it two different ways:
+ *
+ * - Collapsed: one source line = one terminal row, overflow clipped by the
+ *   renderer's `truncate`. Wrapping here would make a card's height depend on
+ *   the window width, while the owning card's row budget and its fold hint
+ *   count source lines — so the view reports how many characters it clipped
+ *   and leaves reading the rest to the expanded state.
+ * - Expanded (`verbose`): each pane pre-wraps its line into as many visual
+ *   rows as the pane's text budget needs, and both panes paint
+ *   `max(left, right)` rows (the shorter side pads with blank rows). The next
+ *   logical line still starts at the same row in both panes, and the content
+ *   that the collapse clipped is now reachable.
+ *
  * Tabs become 3 spaces so column math holds.
  */
 
@@ -312,28 +326,160 @@ function alignPatchFile(fileIndex: number, parsed: ParsedPatch): { rows: (DiffRo
   return { rows, oldSide, newSide }
 }
 
+// --- visual rows ------------------------------------------------------------
+
+/** Expanded bodies walk a bounded VISUAL-row window — the two-pane twin of the
+ *  unified body's 400-line window. The window closes at a logical-row
+ *  boundary (a source line is never cut in half), so a painted body can
+ *  overshoot by at most one logical row's own height. */
+const VERBOSE_VISUAL_ROW_WINDOW = 400
+
+/** One styled grapheme: the smallest unit a wrap may cut between. */
+interface StyledGrapheme {
+  readonly text: string
+  readonly changed: boolean
+  readonly color?: string
+}
+
+/** Flatten styled runs into styled graphemes. Cutting a run by code unit would
+ *  split a surrogate pair (CJK-adjacent emoji) or a combining sequence, so the
+ *  wrap walks graphemes instead. Both run sources (the syntax lexer and the
+ *  word diff) split on lexical boundaries, so a grapheme never straddles two
+ *  runs. */
+function graphemes(segments: readonly Segment[]): StyledGrapheme[] {
+  const out: StyledGrapheme[] = []
+  for (const segment of segments) {
+    for (const { segment: grapheme } of getGraphemeSegmenter().segment(segment.text)) {
+      out.push({ text: grapheme, changed: segment.changed, color: segment.color })
+    }
+  }
+  return out
+}
+
+/** Join graphemes back into runs, merging neighbours that share a style so a
+ *  wrapped row paints the same runs it would have painted unwrapped. */
+function toSegments(line: readonly StyledGrapheme[]): Segment[] {
+  const out: Segment[] = []
+  for (const grapheme of line) {
+    const last = out[out.length - 1]
+    if (last !== undefined && last.changed === grapheme.changed && last.color === grapheme.color) {
+      out[out.length - 1] = { text: last.text + grapheme.text, changed: last.changed, color: last.color }
+    } else {
+      out.push({ text: grapheme.text, changed: grapheme.changed, color: grapheme.color })
+    }
+  }
+  return out
+}
+
+/**
+ * Split one logical line into visual rows no wider than `budget` display
+ * cells. A row prefers to end at the last space that fits, so prose breaks
+ * between words and only an unbroken run (a URL, a minified line) is cut
+ * mid-word. The space a break lands on stays at the end of the row it closes,
+ * so joining the rows reproduces the input exactly.
+ *
+ * Empty text yields no rows: the caller paints the blank pane itself.
+ */
+function wrapSegments(segments: readonly Segment[], budget: number): Segment[][] {
+  const all = graphemes(segments)
+  const rows: Segment[][] = []
+  let start = 0
+  while (start < all.length) {
+    let width = 0
+    let end = start
+    /** Exclusive index just past the last space that fits on this row. */
+    let breakAt = -1
+    while (end < all.length) {
+      const grapheme = all[end]!
+      const graphemeWidth = stringWidth(grapheme.text)
+      // A single grapheme wider than the whole budget still has to land
+      // somewhere: it keeps a row of its own instead of disappearing.
+      if (width + graphemeWidth > budget && end > start) break
+      width += graphemeWidth
+      end += 1
+      if (/^\s+$/u.test(grapheme.text) && end < all.length) breakAt = end
+    }
+    if (end < all.length && breakAt > start) end = breakAt
+    rows.push(toSegments(all.slice(start, end)))
+    start = end
+  }
+  return rows
+}
+
+/** How many graphemes of a pane line the renderer's `truncate` drops. That
+ *  mode reserves one cell for its `…` marker, so only `budget - 1` cells of
+ *  text ever reach the screen and everything past them is countably hidden. */
+function clippedGraphemes(segments: readonly Segment[] | undefined, budget: number): number {
+  if (segments === undefined) return 0
+  const all = graphemes(segments)
+  const fits = budget - 1
+  let width = 0
+  let visible = 0
+  while (visible < all.length) {
+    const next = width + stringWidth(all[visible]!.text)
+    if (next > fits) break
+    width = next
+    visible += 1
+  }
+  return all.length - visible
+}
+
+/** One painted group of terminal rows: a separator, or one logical row with
+ *  the visual rows both panes paint for it (`height` = the taller pane, so
+ *  neither can run ahead). */
+type PaintPlan =
+  | { readonly separator: string }
+  | {
+      readonly leftPrefix: string
+      readonly rightPrefix: string
+      readonly leftRows: readonly (readonly Segment[])[]
+      readonly rightRows: readonly (readonly Segment[])[]
+      readonly leftKind: DiffRow['kind']
+      readonly rightKind: DiffRow['kind']
+      readonly height: number
+    }
+
 // --- rendering --------------------------------------------------------------
 
+/** Gutter text of one painted row: the status marker alone, or a right-aligned
+ *  real line number plus the marker (patch diffs). The new pane keeps the
+ *  leading cell the old pane spends on nothing, so the two text columns start
+ *  the same distance from their divider; the one-cell gap between gutter and
+ *  text is the caller's. */
+function gutterText(
+  kind: DiffRow['kind'],
+  tone: 'old' | 'new',
+  lineNo: number | undefined,
+  hasContent: boolean,
+  lineNoWidth: number,
+): string {
+  // Status gutter instead of line numbers: ToolFileDiff has no file
+  // offsets, and an invented number misleads (issue #250, P2-3).
+  const marker = kind === 'context' ? ' ' : tone === 'old' ? '−' : '+'
+  const numbered = lineNoWidth > 0
+    ? `${(lineNo === undefined || !hasContent ? '' : String(lineNo)).padStart(lineNoWidth)} ${marker}`
+    : marker
+  return tone === 'new' ? ` ${numbered}` : numbered
+}
+
+/** One pane of one terminal row. `prefix` is the gutter already padded to its
+ *  final width — a continuation row of a wrapped line repeats that width in
+ *  spaces so its text lines up with the row above. `segments` is undefined
+ *  when this pane has nothing to paint here (blank side, or a shorter wrap). */
 function PaneLine({
-  side,
+  segments,
+  prefix,
   kind,
   width,
   tone,
   toolBackground,
-  padLeft = false,
-  lineNo,
-  lineNoWidth = 0,
 }: {
-  readonly side: { readonly segments: readonly Segment[] } | undefined
+  readonly segments: readonly Segment[] | undefined
+  readonly prefix: string
   readonly kind: DiffRow['kind']
   readonly width: number
   readonly tone: 'old' | 'new'
   readonly toolBackground: ToolBackground
-  readonly padLeft?: boolean
-  /** The real line number (patch diffs); shown when `lineNoWidth` > 0. */
-  readonly lineNo?: number
-  /** Gutter width of the file's line numbers; 0 = status gutter only. */
-  readonly lineNoWidth?: number
 }): React.ReactNode {
   const ordinaryBackground = toolBackground === 'subtle'
     ? 'toolCardBackgroundDim'
@@ -349,19 +495,17 @@ function PaneLine({
         ? 'diffRemovedDimmed'
         : 'diffAddedDimmed'
   const wordColor = tone === 'old' ? 'diffRemovedWord' : 'diffAddedWord'
-  // Status gutter instead of line numbers: ToolFileDiff has no file
-  // offsets, and an invented number misleads (issue #250, P2-3).
-  const marker = kind === 'context' ? ' ' : tone === 'old' ? '−' : '+'
-  const numbered = lineNoWidth > 0 ? `${(lineNo === undefined || side === undefined ? '' : String(lineNo)).padStart(lineNoWidth)} ${marker}` : marker
-  const prefix = padLeft ? ` ${numbered}` : numbered
   return (
     <Box width={width} flexShrink={0} backgroundColor={backgroundColor}>
-      <Text dimColor backgroundColor={backgroundColor}>{`${prefix} `}</Text>
-      {side === undefined ? (
+      <Text dimColor backgroundColor={backgroundColor}>{prefix}</Text>
+      {segments === undefined ? (
         <Text backgroundColor={backgroundColor}> </Text>
       ) : (
+        // Every painted row is pre-measured against the pane's text budget, so
+        // this truncate never fires — it only guarantees the row stays one
+        // terminal row if the budget and the renderer ever disagree.
         <Text wrap="truncate" backgroundColor={backgroundColor}>
-          {side.segments.map((segment, index) =>
+          {segments.map((segment, index) =>
             segment.changed ? (
               <Text key={index} color={wordColor} bold backgroundColor={backgroundColor}>
                 {segment.text}
@@ -479,40 +623,97 @@ export function SplitDiffView({
     }
   })
 
+  // Resolve the shown rows into paint plans. Collapsed paints one terminal row
+  // per logical row (#245's height contract); expanded pre-wraps each pane and
+  // both panes paint the taller column's row count.
+  const windowLimit = verbose ? VERBOSE_VISUAL_ROW_WINDOW : Number.POSITIVE_INFINITY
+  const paint: PaintPlan[] = []
+  /** Collapsed: graphemes the renderer clipped on the painted rows of both
+   *  panes (0 = nothing was clipped, so no hint). */
+  let clippedChars = 0
+  let paintedRows = 0
+  /** Visual rows the whole shown body needs — what the window reports. */
+  let totalVisualRows = 0
+
+  for (const row of shown) {
+    if ('separator' in row) {
+      totalVisualRows += 1
+      if (paintedRows < windowLimit) {
+        paint.push({ separator: row.separator })
+        paintedRows += 1
+      }
+      continue
+    }
+    const syntax = fileSyntax[row.fileIndex]
+    const oldRuns = row.oldIndex !== undefined ? syntax?.old?.[row.oldIndex] : undefined
+    const newRuns = row.newIndex !== undefined ? syntax?.next?.[row.newIndex] : undefined
+    const oldSegments = row.oldWords === undefined
+      ? undefined
+      : oldRuns !== undefined ? mergeRuns(oldRuns, row.oldWords) : row.oldWords
+    const newSegments = row.newWords === undefined
+      ? undefined
+      : newRuns !== undefined ? mergeRuns(newRuns, row.newWords) : row.newWords
+    const lineNoWidth = patchFiles.get(row.fileIndex)?.lineNoWidth ?? 0
+    // An add row leaves the old pane blank and vice versa, so the blank side
+    // paints the "context" tone there — and, being empty, no line number.
+    const leftKind = row.kind === 'add' ? 'context' : row.kind
+    const rightKind = row.kind === 'del' ? 'context' : row.kind
+    const leftPrefix = `${gutterText(leftKind, 'old', row.oldNo, oldSegments !== undefined, lineNoWidth)} `
+    const rightPrefix = `${gutterText(rightKind, 'new', row.newNo, newSegments !== undefined, lineNoWidth)} `
+    const leftBudget = paneWidth - stringWidth(leftPrefix)
+    const rightBudget = paneWidth - stringWidth(rightPrefix)
+    if (!verbose) {
+      clippedChars += clippedGraphemes(oldSegments, leftBudget)
+      clippedChars += clippedGraphemes(newSegments, rightBudget)
+    }
+    const leftRows = oldSegments === undefined
+      ? []
+      : verbose ? wrapSegments(oldSegments, leftBudget) : [oldSegments]
+    const rightRows = newSegments === undefined
+      ? []
+      : verbose ? wrapSegments(newSegments, rightBudget) : [newSegments]
+    // Neither pane can run ahead: the next logical row starts below the
+    // taller column. A row with no content on either side still paints one.
+    const height = Math.max(leftRows.length, rightRows.length, 1)
+    totalVisualRows += height
+    if (paintedRows < windowLimit) {
+      paint.push({ leftPrefix, rightPrefix, leftRows, rightRows, leftKind, rightKind, height })
+      paintedRows += height
+    }
+  }
+
   return (
     <Box flexDirection="column" width={paneWidth * 2 + 1}>
-      {shown.map((row, index) => {
-        if ('separator' in row) {
+      {paint.map((plan, index) => {
+        if ('separator' in plan) {
           return (
             <Box key={index} width={paneWidth * 2 + 1}>
               <Text dimColor wrap="truncate">
-                {row.separator === '⋯' ? '⋯' : `  ${row.separator}`}
+                {plan.separator === '⋯' ? '⋯' : `  ${plan.separator}`}
               </Text>
             </Box>
           )
         }
-        const syntax = fileSyntax[row.fileIndex]
-        const oldRuns = row.oldIndex !== undefined ? syntax?.old?.[row.oldIndex] : undefined
-        const newRuns = row.newIndex !== undefined ? syntax?.next?.[row.newIndex] : undefined
-        const oldSide = row.oldWords === undefined
-          ? undefined
-          : { segments: oldRuns !== undefined ? mergeRuns(oldRuns, row.oldWords) : row.oldWords }
-        const newSide = row.newWords === undefined
-          ? undefined
-          : { segments: newRuns !== undefined ? mergeRuns(newRuns, row.newWords) : row.newWords }
-        const lineNoWidth = patchFiles.get(row.fileIndex)?.lineNoWidth ?? 0
-        return (
-          <Box key={index} flexDirection="row">
-            <PaneLine side={oldSide} kind={row.kind === 'add' ? 'context' : row.kind} tone="old" width={paneWidth} toolBackground={toolBackground} lineNo={row.oldNo} lineNoWidth={lineNoWidth} />
+        const leftPad = ' '.repeat(stringWidth(plan.leftPrefix))
+        const rightPad = ' '.repeat(stringWidth(plan.rightPrefix))
+        return Array.from({ length: plan.height }, (_, visual) => (
+          <Box key={`${index}-${visual}`} flexDirection="row">
+            <PaneLine segments={plan.leftRows[visual]} prefix={visual === 0 ? plan.leftPrefix : leftPad} kind={plan.leftKind} tone="old" width={paneWidth} toolBackground={toolBackground} />
             <Box width={1} flexShrink={0}>
               <Text dimColor>│</Text>
             </Box>
-            <PaneLine side={newSide} kind={row.kind === 'del' ? 'context' : row.kind} tone="new" width={paneWidth} toolBackground={toolBackground} padLeft lineNo={row.newNo} lineNoWidth={lineNoWidth} />
+            <PaneLine segments={plan.rightRows[visual]} prefix={visual === 0 ? plan.rightPrefix : rightPad} kind={plan.rightKind} tone="new" width={paneWidth} toolBackground={toolBackground} />
           </Box>
-        )
+        ))
       })}
       {hidden > 0 && (
         <Text dimColor>{t('lines-folded-expand', { n: hidden, key: primaryComboString('transcript') })}</Text>
+      )}
+      {clippedChars > 0 && (
+        <Text dimColor>{t('tool-card-lines-hidden', { parts: t('tool-card-chars-unit', { n: clippedChars }), key: primaryComboString('transcript') })}</Text>
+      )}
+      {paintedRows < totalVisualRows && (
+        <Text dimColor>{t('tool-card-window-shown', { shown: paintedRows, total: totalVisualRows })}</Text>
       )}
     </Box>
   )
