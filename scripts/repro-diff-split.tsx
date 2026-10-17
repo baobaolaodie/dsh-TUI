@@ -8,6 +8,9 @@
  * 3. 70 cols (below SPLIT_DIFF_MIN_COLS): the card falls back to the
  *    unified view
  * 4. a new-file Write (oldText null) fills only the right pane
+ * 5. expanded (Ctrl+O / verbose) long lines wrap inside each pane instead of
+ *    being clipped, the collapsed card reports how many characters it
+ *    clipped, and the expanded body stays inside its 400-visual-row window
  *
  * Exits non-zero on the first failed assertion (CI convention).
  */
@@ -16,7 +19,7 @@ process.env.FORCE_COLOR = '3'
 // module import resolves the startup lang (env > persisted > locale).
 process.env.DSH_TUI_LANG = 'en'
 
-const [{ Writable }, React, { Terminal: XTerm }, { render }, { AssistantToolUseMessage }, { getCliHighlightPromise }, { parseAnsiRuns, chalkFromToken, highlightLines }, { sleep }] = await Promise.all([
+const [{ Writable }, React, { Terminal: XTerm }, { render }, { AssistantToolUseMessage }, { getCliHighlightPromise }, { parseAnsiRuns, chalkFromToken, highlightLines }, { sleep }, { stringWidth }] = await Promise.all([
   import('node:stream'),
   import('react'),
   import('@xterm/headless'),
@@ -25,6 +28,7 @@ const [{ Writable }, React, { Terminal: XTerm }, { render }, { AssistantToolUseM
   import('../src/terminal-utils/cliHighlight.js'),
   import('../src/components/SplitDiffView.js'),
   import('./lib/term-test.mjs'),
+  import('../src/ink/stringWidth.js'),
 ])
 
 let failures = 0
@@ -51,9 +55,13 @@ const editTool = {
   },
 }
 
-/** Boot one headless terminal at the given width and render the card. */
-async function renderAt(cols, tool, diffLayout = 'auto', toolBackground = 'none') {
-  const rows = 30
+/** Boot one headless terminal at the given width and render the card.
+ *  `verbose` is the Ctrl+O / click-to-expand state the card receives; `rows`
+ *  grows the viewport for the expanded visual-row window (the default 30
+ *  would clip it); `settleMs` widens the fixed window for frames far larger
+ *  than an ordinary card. */
+async function renderAt(cols, tool, diffLayout = 'auto', toolBackground = 'none', options = {}) {
+  const { verbose = false, rows = 30, settleMs = 900 } = options
   const term = new XTerm({ cols, rows, scrollback: 0, allowProposedApi: true })
   class FakeStdout extends Writable {
     columns = cols
@@ -62,12 +70,12 @@ async function renderAt(cols, tool, diffLayout = 'auto', toolBackground = 'none'
     _write(chunk, _e, cb) { term.write(String(chunk), cb) }
   }
   const app = await render(
-    React.createElement(AssistantToolUseMessage, { tool, marginTopOnTurn: false, verbose: false, diffLayout, toolBackground }),
+    React.createElement(AssistantToolUseMessage, { tool, marginTopOnTurn: false, verbose, diffLayout, toolBackground }),
     { stdout: new FakeStdout(), debug: true, exitOnCtrlC: false },
   )
   // 固定窗:pacing cli-highlight 首次使用才懒加载，其后的补色重绘没有
   // 调用方可观测的完成条件，只能留出落地时间再读色。
-  await sleep(900)
+  await sleep(settleMs)
   const buf = term.buffer.active
   const lines = []
   for (let y = 0; y < rows; y++) lines.push(buf.getLine(y)?.translateToString(true) ?? '')
@@ -224,6 +232,106 @@ async function renderAt(cols, tool, diffLayout = 'auto', toolBackground = 'none'
   const lightColor = lightRuns?.[0]?.find(run => run.text === 'def')?.color
   check('主题签名不同缓存不串色', darkColor !== undefined && lightColor !== undefined && darkColor !== lightColor,
     `dark=${darkColor} light=${lightColor}`)
+}
+
+// ---- 7. Expanded two-pane wrapping: long lines become readable without
+//          losing the row alignment the two panes depend on.
+// Geometry at 120 cols, as this fixture measures it: the card hands
+// SplitDiffView `columns - 4` = 116, which splits into two
+// floor((116 - 1) / 2) = 57-cell panes around a 1-cell divider; after the
+// status gutter the left pane holds 55 cells of text and the right 54. The
+// fixture lengths below are chosen against those two budgets.
+const diffTool = (oldText, newText, path) => ({
+  ...editTool,
+  callId: `c-${path}`,
+  callView: { card: 'diff', title: `Edit ${path}`, diffs: [{ path, oldText, newText }] },
+})
+
+// AC-1 + AC-2 on the same 200-char change pair: expanded, both tails are
+// readable and still separated by │ on one visual row; collapsed, the tail
+// stays clipped but the card says how much it clipped.
+{
+  const longTool = diffTool(`${'o'.repeat(188)}TAIL_OLD_ZZZ`, `${'n'.repeat(188)}TAIL_NEW_ZZZ`, '/tmp/long.py')
+  const foldedScreen = (await renderAt(120, longTool)).screen()
+  // Collapsed keeps 1 logical line = 1 terminal row (#245). Without this the
+  // expanded assertion below could pass on a card that never clipped.
+  check('折叠态长行仍截断（两栏 tail 都不可见）',
+    !foldedScreen.includes('TAIL_OLD_ZZZ') && !foldedScreen.includes('TAIL_NEW_ZZZ'))
+  // The hint reuses the existing fold copy (tool-card-lines-hidden +
+  // tool-card-chars-unit); the counts are the implementation's business.
+  check('折叠态截断提示：出现 folded … chars 计数',
+    foldedScreen.includes('folded') && foldedScreen.includes('chars'))
+  const { lines, screen } = await renderAt(120, longTool, 'auto', 'none', { verbose: true })
+  const expanded = screen()
+  check('展开态长行：左栏尾部可读', expanded.includes('TAIL_OLD_ZZZ'))
+  check('展开态长行：右栏尾部可读', expanded.includes('TAIL_NEW_ZZZ'))
+  const tailRow = lines.findIndex(line => line.includes('TAIL_OLD_ZZZ'))
+  check('展开态长行：尾部视觉行仍以 │ 分隔两栏',
+    tailRow >= 0 && lines[tailRow]!.includes('TAIL_NEW_ZZZ') && lines[tailRow]!.includes('│'),
+    `tailRow=${tailRow}`)
+}
+
+// Negative control for that hint: nothing was clipped, so no hint may show.
+// Without this the assertion above also passes on a hint that is always on.
+{
+  const shortTool = diffTool('a = 1\nb = 2\n# tail', 'a = 1\nb = 22\n# tail', '/tmp/short.py')
+  const s = (await renderAt(120, shortTool)).screen()
+  check('折叠态未截断时无 folded/chars 提示', !s.includes('folded') && !s.includes('chars'))
+}
+
+// AC-3: one logical row is max(left, right) visual rows tall, so the next
+// logical row starts right after it — neither pane can run ahead.
+{
+  // Left: one visual row. Right: 123 cells in ONE unbroken token, which wraps
+  // into exactly 3 visual rows for any pane budget in [41, 61] cells (both
+  // budgets sit in that band), so no word boundary can shift the count.
+  const alignTool = diffTool('LEFT_ANCHOR\n# tail', `${'r'.repeat(123)}\n# tail`, '/tmp/align.py')
+  const { lines } = await renderAt(120, alignTool, 'auto', 'none', { verbose: true })
+  const pairY = lines.findIndex(line => line.includes('LEFT_ANCHOR'))
+  const ctxY = lines.findIndex(line => line.includes('# tail'))
+  check('展开态换行：改动对与上下文行都定位到', pairY >= 0 && ctxY >= 0, `pairY=${pairY} ctxY=${ctxY}`)
+  check('展开态换行：上下文行落在改动对首行 + 3',
+    pairY >= 0 && ctxY >= 0 && ctxY === pairY + 3, `pairY=${pairY} ctxY=${ctxY}`)
+  const pairRows = pairY >= 0 ? lines.slice(pairY, pairY + 3) : []
+  check('展开态换行：改动对的 3 个视觉行都带 │ 分隔',
+    pairRows.length === 3 && pairRows.every(line => line.includes('│')), `rows=${pairRows.length}`)
+}
+
+// AC-4: the expanded body walks a bounded VISUAL-row window (400, the same
+// constant the unified body uses). The window stops at a logical-row
+// boundary — a source line is never cut in half — so the rendered body can
+// overshoot by at most one row's own height: 400 + 2 here, where every
+// logical row of the fixture is 2 visual rows tall.
+{
+  const EXPANDED_WINDOW = 400
+  const TALLEST_ROW_VISUAL_ROWS = 2
+  // 300 logical rows x 2 visual rows = 600, comfortably past the window.
+  const many = side => Array.from(
+    { length: 300 },
+    (_, index) => `${side}${String(index).padStart(3, '0')}${side.repeat(95)}`,
+  ).join('\n')
+  const bigTool = diffTool(many('o'), many('n'), '/tmp/big.py')
+  // A ~400-row frame measured ~950ms to settle here; 3000 keeps that margin
+  // on a loaded CI runner without paying it on the ordinary cards above.
+  const { lines, screen } = await renderAt(120, bigTool, 'auto', 'none', { verbose: true, rows: 460, settleMs: 3000 })
+  const bodyRows = lines.filter(line => line.includes('│')).length
+  check('展开态视觉行窗口：正文行数不超过 400 + 单行最大视觉行数',
+    bodyRows <= EXPANDED_WINDOW + TALLEST_ROW_VISUAL_ROWS, `bodyRows=${bodyRows}`)
+  check('展开态视觉行窗口：出现 showing the first 提示', screen().includes('showing the first'))
+}
+
+// AC-7: wrapping counts DISPLAY CELLS, so a CJK + emoji line breaks between
+// graphemes instead of splitting one (U+FFFD on screen is the tell).
+{
+  const cjkTool = diffTool(`${'旧'.repeat(40)}🚀TAIL_CJK_OLD`, `${'新'.repeat(40)}🚀TAIL_CJK_NEW`, '/tmp/wide.py')
+  const { lines } = await renderAt(120, cjkTool, 'auto', 'none', { verbose: true })
+  const s = lines.join('\n')
+  check('宽字符：屏幕不出现 U+FFFD（未把宽字符切半）', !s.includes('\uFFFD'))
+  // Cheap upper bound only — the exact pane budget belongs to the unit-level
+  // surface; 120 is this fixture's terminal width.
+  const overflowing = lines.filter(line => stringWidth(line) > 120)
+  check('宽字符：每行屏幕文本不超过终端物理列数', overflowing.length === 0, `over=${overflowing.length}`)
+  check('宽字符：展开态两栏尾部标记可读', s.includes('TAIL_CJK_OLD') && s.includes('TAIL_CJK_NEW'))
 }
 
 console.log(failures === 0 ? 'repro-diff-split: all assertions passed' : `repro-diff-split: ${failures} FAILED`)
