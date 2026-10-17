@@ -14,7 +14,9 @@
  *     (wrapped / clipped by the existing helpers), the collapsed 8-row cap;
  *  3. the two-pane view (forced split at 80, auto at 120): each pane
  *     numbers its own side, paired change rows, the header separator, `⋯`
- *     between hunks, a move / new-file header;
+ *     between hunks, a move / new-file header, and — expanded — the wrapped
+ *     rows that keep the divider in one column while both panes reach the
+ *     tail the collapsed view clips;
  *  4. the old/new-text branch is untouched: a mixed card renders the old
  *     file exactly as a card holding it alone does (byte-identical frames).
  *
@@ -190,6 +192,40 @@ for (const [cols, layout] of [[80, 'split'], [120, 'auto']] as const) {
   await card.show([patch('src/a.ts', CODEX, { movePath: 'src/b.ts' }), patch('src/n.ts', '@@ -0,0 +1,1 @@\n+fresh\n', { change: 'add' })], layout, () => card.text().includes('fresh'))
   const moved = card.lines()
   check(`3${at} several files: move and new-file headers`, row(moved, 'src/a.ts → src/b.ts').includes('(+1 -1)') && row(moved, 'src/n.ts').includes(`${t('diff-patch-added')} (+1 -0)`), card.text())
+
+  // Expanded: the collapsed view clips a wide row, so the wrap is the only
+  // thing that can make its tail readable — and the wrapped rows must still
+  // line up on the divider and under one gutter number. The changed pair is
+  // line 11 on both sides (the hunk opens at 10 with one context line above).
+  const wide = 'lorem ipsum dolor sit amet consectetur adipiscing elit sed do eiusmod tempor'.repeat(2)
+  await card.show([patch('a.ts', `@@ -10,3 +10,3 @@\n shared context\n-${wide} OLD_TAIL\n+${wide} NEW_TAIL\n trailing context\n`)], layout, () => card.text().includes('trailing context'), true)
+  const expanded = card.lines()
+  const dividers = expanded.map(line => line.indexOf('│')).filter(col => col >= 0)
+  const divider = dividers[0] ?? -1
+  /** Column of `needle` on row `y`; -1 when the row or the needle is missing. */
+  const colOf = (y: number, needle: string): number => y < 0 ? -1 : expanded[y]!.indexOf(needle)
+  /** First non-blank cell in [from, to); -1 when that span is blank. */
+  const textCol = (line: string, from: number, to: number): number => {
+    const found = line.slice(from, to).search(/\S/u)
+    return found < 0 ? -1 : from + found
+  }
+  const leftTail = expanded.findIndex(line => line.includes('OLD_TAIL'))
+  const rightTail = expanded.findIndex(line => line.includes('NEW_TAIL'))
+  const firstRow = expanded.findIndex(line => line.includes('11 −') && line.includes('11 +'))
+  const lastRow = Math.max(leftTail, rightTail)
+  /** Rows carrying the given gutter number (one per logical line, not per visual row). */
+  const gutterRows = (needle: string): number => expanded.filter(line => line.includes(needle)).length
+  const leftAt = colOf(leftTail, 'OLD_TAIL')
+  const rightAt = colOf(rightTail, 'NEW_TAIL')
+  const leftText = colOf(firstRow, 'lorem')
+  const rightText = firstRow < 0 ? -1 : expanded[firstRow]!.indexOf('lorem', divider + 1)
+  check(`3${at} expanded: each pane reaches the tail the collapse clips`, leftAt >= 0 && leftAt < divider && rightAt > divider, card.text())
+  check(`3${at} expanded: every wrapped row keeps │ in one column`, divider >= 0 && dividers.every(col => col === divider), `${dividers.join(',')}\n${card.text()}`)
+  check(`3${at} expanded: the wide row wraps, numbers once, continuations indented to the text column`, firstRow >= 0 && lastRow > firstRow && gutterRows('11 −') === 1 && gutterRows('11 +') === 1 && expanded.slice(firstRow + 1, lastRow + 1).every(line => {
+    const left = textCol(line, 0, divider)
+    const right = textCol(line, divider + 1, line.length)
+    return (left < 0 || left === leftText) && (right < 0 || right === rightText)
+  }), card.text())
   await card.app.unmount()
 }
 
