@@ -364,5 +364,41 @@ for (const [cells, expected] of [[53, 0], [54, 0], [55, 2], [56, 5]] as const) {
   check('宽字符：展开态两栏尾部标记可读', s.includes('TAIL_CJK_OLD') && s.includes('TAIL_CJK_NEW'))
 }
 
+// Grapheme clusters must survive the word diff's run boundaries. jsdiff
+// tokenizes non-Latin text per code point, so an edited family emoji leaves a
+// run ending on a bare ZWJ and an edited combining mark leaves the accent in
+// the next run; segmenting each run on its own would let the wrap split the
+// cluster across two rows.
+{
+  // 53 padding cells + a 2-cell cluster: the left pane's 55-cell budget ends
+  // right after the cluster, which is where a per-run segmentation tears it.
+  const familyOld = `${'a'.repeat(53)}👨‍👩‍👧`
+  const familyNew = `${'a'.repeat(53)}👨‍👩‍👦`
+  const { lines } = await renderAt(120, diffTool(familyOld, familyNew, '/tmp/family.txt'), 'auto', 'none', { verbose: true, rows: 20 })
+  const body = lines.filter(line => line.includes('│'))
+  const joined = lines.join('\n')
+  check('组合字符簇：家族 emoji 不被 run 边界拆开（两栏各自完整成形）',
+    joined.includes('👨‍👩‍👧') && joined.includes('👨‍👩‍👦'))
+  const danglingZwij = body.find(line => line.trimEnd().endsWith('\u200D'))
+  check('组合字符簇：没有视觉行以悬空 ZWJ 收尾', danglingZwij === undefined, danglingZwij ?? '')
+}
+
+// Same hazard with a combining mark: editing only the accent makes the word
+// diff hand the base letter and the mark to different runs. The collapsed hint
+// counts what the renderer drops, so a per-run segmentation would report three
+// characters where two cells were cut.
+{
+  const accentOld = `${'b'.repeat(54)}e\u0301`
+  const accentNew = `${'b'.repeat(54)}e\u0302`
+  const { lines } = await renderAt(120, diffTool(accentOld, accentNew, '/tmp/accent.txt'), 'auto', 'none', { verbose: true, rows: 20 })
+  const body = lines.filter(line => line.includes('│'))
+  const leadingMark = body.find(line => /^\s*[\u0300-\u036F]/u.test(line))
+  check('组合字符簇：视觉行不以组合附标开头', leadingMark === undefined, leadingMark ?? '')
+  const folded = (await renderAt(120, diffTool(accentOld, accentNew, '/tmp/accent.txt'))).screen()
+  check('组合字符簇：折叠态计数按簇而不是按码点（NFD 行）',
+    folded.includes('folded 2 chars'), folded.split('\n').find(line => line.includes('folded')) ?? 'no hint')
+}
+
+
 console.log(failures === 0 ? 'repro-diff-split: all assertions passed' : `repro-diff-split: ${failures} FAILED`)
 process.exit(failures === 0 ? 0 : 1)

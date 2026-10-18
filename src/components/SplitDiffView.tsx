@@ -344,17 +344,31 @@ interface StyledGrapheme {
   readonly color?: string
 }
 
-/** Flatten styled runs into styled graphemes. Cutting a run by code unit would
- *  split a surrogate pair (CJK-adjacent emoji) or a combining sequence, so the
- *  wrap walks graphemes instead. Both run sources (the syntax lexer and the
- *  word diff) split on lexical boundaries, so a grapheme never straddles two
- *  runs. */
+/** Flatten styled runs into styled graphemes, segmenting the JOINED line.
+ *
+ *  Cutting a run by code unit would split a surrogate pair or a combining
+ *  sequence, so the wrap walks graphemes instead. Segmenting each run on its
+ *  own is not enough either: the word diff tokenizes non-Latin text per code
+ *  point (jsdiff's `extendedWordChars` only covers Latin-1 / Latin Extended),
+ *  so a changed family emoji or an edited combining mark leaves runs that end
+ *  inside one grapheme cluster — the ZWJ or the accent lands in the next run.
+ *  Segmenting the flattened text reunites the cluster; each grapheme keeps the
+ *  style of the run its first code unit came from. */
 function graphemes(segments: readonly Segment[]): StyledGrapheme[] {
-  const out: StyledGrapheme[] = []
+  if (segments.length === 0) return []
+  const text = segments.map(segment => segment.text).join('')
+  // One style slot per UTF-16 code unit: Intl.Segmenter reports code-unit
+  // indices, so this maps a cluster back to the run it starts in.
+  const styles = new Array<Segment>(text.length)
+  let at = 0
   for (const segment of segments) {
-    for (const { segment: grapheme } of getGraphemeSegmenter().segment(segment.text)) {
-      out.push({ text: grapheme, changed: segment.changed, color: segment.color })
-    }
+    for (let index = 0; index < segment.text.length; index++) styles[at + index] = segment
+    at += segment.text.length
+  }
+  const out: StyledGrapheme[] = []
+  for (const { segment, index } of getGraphemeSegmenter().segment(text)) {
+    const style = styles[index]!
+    out.push({ text: segment, changed: style.changed, color: style.color })
   }
   return out
 }
