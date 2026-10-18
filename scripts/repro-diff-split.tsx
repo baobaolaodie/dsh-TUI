@@ -253,7 +253,7 @@ const diffTool = (oldText, newText, path) => ({
   callView: { card: 'diff', title: `Edit ${path}`, diffs: [{ path, oldText, newText }] },
 })
 
-// AC-1 + AC-2 on the same 200-char change pair: expanded, both tails are
+// Both states of one 200-char change pair: expanded, both tails are
 // readable and still separated by │ on one visual row; collapsed, the tail
 // stays clipped but the card says how much it clipped.
 {
@@ -288,9 +288,9 @@ const diffTool = (oldText, newText, path) => ({
 // The hint must report what the renderer actually dropped: `truncate` paints a
 // line that fits its budget whole and only cuts past it, keeping `budget - 1`
 // cells. The pane text budgets at 120 cols are 55 (old) and 54 (new) cells, so
-// 53- and 54-cell lines are painted whole — reporting a 54-cell line as folded
-// was the review finding — while 55 and 56 lose 2 and 5 cells between the two
-// panes.
+// 53- and 54-cell lines are painted whole — a 54-cell line exactly fills the
+// right pane's budget, so it must not be reported as folded — while 55 and 56
+// lose 2 and 5 cells between the two panes.
 for (const [cells, expected] of [[53, 0], [54, 0], [55, 2], [56, 5]] as const) {
   const line = 'a'.repeat(cells)
   const s = (await renderAt(120, diffTool(line, line, '/tmp/full.py'))).screen()
@@ -299,7 +299,7 @@ for (const [cells, expected] of [[53, 0], [54, 0], [55, 2], [56, 5]] as const) {
     expected === 0 ? !s.includes('folded') : s.includes(`folded ${expected} chars`), hint)
 }
 
-// AC-3: one logical row is max(left, right) visual rows tall, so the next
+// Alignment: one logical row is max(left, right) visual rows tall, so the next
 // logical row starts right after it — neither pane can run ahead.
 {
   // Left: one visual row. Right: 123 cells in ONE unbroken token, which wraps
@@ -317,7 +317,7 @@ for (const [cells, expected] of [[53, 0], [54, 0], [55, 2], [56, 5]] as const) {
     pairRows.length === 3 && pairRows.every(line => line.includes('│')), `rows=${pairRows.length}`)
 }
 
-// AC-4: the expanded body walks a bounded VISUAL-row window (400, the same
+// The expanded body walks a bounded VISUAL-row window (400, the same
 // constant the unified body uses). The bound keeps one logical row of slack so
 // it does not pin how the window edge is cut; the giant-line case below pins
 // that the row crossing the edge is clipped rather than admitted whole.
@@ -351,7 +351,7 @@ for (const [cells, expected] of [[53, 0], [54, 0], [55, 2], [56, 5]] as const) {
   check('展开态巨型单行：出现 showing the first 提示', screen().includes('showing the first'))
 }
 
-// AC-7: wrapping counts DISPLAY CELLS, so a CJK + emoji line breaks between
+// Width: wrapping counts DISPLAY CELLS, so a CJK + emoji line breaks between
 // graphemes instead of splitting one (U+FFFD on screen is the tell).
 {
   const cjkTool = diffTool(`${'旧'.repeat(40)}🚀TAIL_CJK_OLD`, `${'新'.repeat(40)}🚀TAIL_CJK_NEW`, '/tmp/wide.py')
