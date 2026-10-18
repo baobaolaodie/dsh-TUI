@@ -748,7 +748,7 @@ export function SplitDiffView({
         <Text dimColor>{t('tool-card-lines-hidden', { parts: t('tool-card-chars-unit', { n: clippedChars }), key: primaryComboString('transcript') })}</Text>
       )}
       {paintedRows < totalVisualRows && (
-        <Text dimColor>{t('tool-card-window-shown', { shown: paintedRows, total: totalVisualRows })}</Text>
+        <Text dimColor>{t('tool-card-window-shown-wrapped', { shown: paintedRows, total: totalVisualRows })}</Text>
       )}
     </Box>
   )

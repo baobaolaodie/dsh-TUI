@@ -1075,6 +1075,9 @@ const dict = {
   'tool-card-source-truncated': { zh: '原始数据已折叠：以上是预览，全文保留在会话日志里', en: 'Source folded: the above is a preview; the session log keeps the full text' },
   'tool-card-full-unavailable': { zh: '以上是整理后的视图，没有保留可展开的原始全文', en: 'Formatted view above; no raw full text was kept to expand' },
   'tool-card-window-shown': { zh: '… 只显示前 {{shown}}/{{total}} 行（全文仍保留）', en: '… showing the first {{shown}}/{{total}} lines (the full text is kept)' },
+  // 双栏展开态的窗口按「换行后的屏幕行」计（一条源行可能占多行），与上面按源行计
+  // 的 unified 卡不是同一个单位，故单独一条文案，避免「N/M 行」被读成源行数。
+  'tool-card-window-shown-wrapped': { zh: '… 只显示前 {{shown}}/{{total}} 个换行后的行', en: '… showing the first {{shown}}/{{total}} wrapped rows' },
   // 单回合用量行（/tokens、/cost、底栏 hover）。缓存段只在后端上报了缓存
   // token 时显示，未上报不当作 0。
   'usage-turn-summary': { zh: '本轮', en: 'turn' },
