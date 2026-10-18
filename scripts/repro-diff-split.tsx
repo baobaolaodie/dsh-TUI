@@ -318,12 +318,11 @@ for (const [cells, expected] of [[53, 0], [54, 0], [55, 2], [56, 5]] as const) {
 }
 
 // The expanded body walks a bounded VISUAL-row window (400, the same
-// constant the unified body uses). The bound keeps one logical row of slack so
-// it does not pin how the window edge is cut; the giant-line case below pins
-// that the row crossing the edge is clipped rather than admitted whole.
+// constant the unified body uses). A row that would cross the edge is clipped
+// to the rows left rather than admitted whole, so the painted count is the
+// window itself — the giant-line case below covers that clipping.
 {
   const EXPANDED_WINDOW = 400
-  const TALLEST_ROW_VISUAL_ROWS = 2
   // 300 logical rows x 2 visual rows = 600, comfortably past the window.
   const many = side => Array.from(
     { length: 300 },
@@ -334,8 +333,8 @@ for (const [cells, expected] of [[53, 0], [54, 0], [55, 2], [56, 5]] as const) {
   // on a loaded CI runner without paying it on the ordinary cards above.
   const { lines, screen } = await renderAt(120, bigTool, 'auto', 'none', { verbose: true, rows: 460, settleMs: 3000 })
   const bodyRows = lines.filter(line => line.includes('│')).length
-  check('展开态视觉行窗口：正文行数不超过 400 + 单行最大视觉行数',
-    bodyRows <= EXPANDED_WINDOW + TALLEST_ROW_VISUAL_ROWS, `bodyRows=${bodyRows}`)
+  check('展开态视觉行窗口：正文行数不超过 400',
+    bodyRows > 0 && bodyRows <= EXPANDED_WINDOW, `bodyRows=${bodyRows}`)
   check('展开态视觉行窗口：出现 showing the first 提示', screen().includes('showing the first'))
 }
 
