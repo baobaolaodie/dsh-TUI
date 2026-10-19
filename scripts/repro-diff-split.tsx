@@ -15,10 +15,15 @@
  * Exits non-zero on the first failed assertion (CI convention).
  *
  * Each covered fix has a one-line negative control rather than an in-suite
- * switch (restore the line with `git checkout` afterwards): dropping the
- * `<= budget` guard in SplitDiffView's clippedGraphemes turns the 54- and
- * 55-cell cases red; `take = height` in its paint loop turns both giant-line
- * cases red. Either revert gives 2 FAILED / 50 PASS.
+ * switch (restore the line with `git checkout` afterwards); every revert turns
+ * only its own cases red, out of 56 assertions:
+ * - dropping the `<= budget` guard in clippedGraphemes → 3 FAILED (the 54- and
+ *   55-cell counts and the NFD cluster count);
+ * - `take = height` in its paint loop → 2 FAILED (the giant single line, which
+ *   then paints all 742 visual rows);
+ * - segmenting each run on its own instead of the joined line → 3 FAILED (the
+ *   cluster cases, including the folded count reading code points);
+ * - the window notice back on `tool-card-window-shown` → 2 FAILED (its unit).
  */
 process.env.FORCE_COLOR = '3'
 // This script asserts English UI copy; pin the language before any
@@ -335,7 +340,10 @@ for (const [cells, expected] of [[53, 0], [54, 0], [55, 2], [56, 5]] as const) {
   const bodyRows = lines.filter(line => line.includes('│')).length
   check('展开态视觉行窗口：正文行数不超过 400',
     bodyRows > 0 && bodyRows <= EXPANDED_WINDOW, `bodyRows=${bodyRows}`)
-  check('展开态视觉行窗口：出现 showing the first 提示', screen().includes('showing the first'))
+  // The unit is the point: the split view counts WRAPPED rows, so a source
+  // line that wraps into many screen rows must not read as "N lines".
+  check('展开态视觉行窗口：提示按换行后的屏幕行计，400 起',
+    screen().includes('showing the first 400/') && screen().includes('wrapped rows'))
 }
 
 // A single logical line carries no height bound of its own: 40000 cells wrap
@@ -347,7 +355,8 @@ for (const [cells, expected] of [[53, 0], [54, 0], [55, 2], [56, 5]] as const) {
   const { lines, screen } = await renderAt(120, diffTool(huge, `${huge}_B`, '/tmp/huge.py'), 'auto', 'none', { verbose: true, rows: 900, settleMs: 3000 })
   const bodyRows = lines.filter(line => line.includes('│')).length
   check('展开态巨型单行：正文行数不超过 400 视觉行', bodyRows > 0 && bodyRows <= 400, `bodyRows=${bodyRows}`)
-  check('展开态巨型单行：出现 showing the first 提示', screen().includes('showing the first'))
+  check('展开态巨型单行：提示按换行后的屏幕行计，400 起',
+    screen().includes('showing the first 400/') && screen().includes('wrapped rows'))
 }
 
 // Width: wrapping counts DISPLAY CELLS, so a CJK + emoji line breaks between
