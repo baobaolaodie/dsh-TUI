@@ -47,7 +47,7 @@ const { DATA_DIR } = await import('../src/utils/paths.js')
 const { createJumpBack, JUMP_BACK_PROTOCOL_KEY } = await import('../src/ink/jumpback.js')
 const { getJumpBackState, setJumpBackEnabled, subscribeJumpBack } = await import('../src/ink/jumpback-state.js')
 const { jumpBackTitleSuffix } = await import('../src/ink/hooks/use-terminal-title.js')
-const { deliverTaskCompletionOnWindows } = await import('../src/dsh-adapter/plugin.js')
+const { applyJumpBackSetting, deliverTaskCompletionOnWindows } = await import('../src/dsh-adapter/plugin.js')
 
 /** The title the renderer passes today (`src/i18n.ts`). */
 const TITLE = 'dsh-TUI · 任务已完成'
@@ -499,6 +499,38 @@ await check('off Windows the sweep deletes nothing', () => {
   assert.equal(existsSync(gone), true)
 })
 
+/** Stands in for the orchestration's lifecycle side: a setting flip calls exactly these. */
+function recordingLifecycle() {
+  const steps: string[] = []
+  return {
+    steps,
+    jumpback: {
+      sweepStale(): void { steps.push('sweepStale') },
+      async cleanup(): Promise<void> { steps.push('cleanup') },
+    },
+  }
+}
+
+await check('flipping the setting cleans up on disable and sweeps once on enable', () => {
+  const marker = enableJumpBack()
+  const port = recordingLifecycle()
+  applyJumpBackSetting(port.jumpback, false)
+  assert.deepEqual(
+    port.steps,
+    ['cleanup'],
+    'on→off is a cleanup point of its own: the key and marker files this process left must go (AC-1/AC-9)',
+  )
+  assert.equal(getJumpBackState().enabled, false)
+  applyJumpBackSetting(port.jumpback, false)
+  assert.deepEqual(port.steps, ['cleanup'], 'republishing off publishes nothing and cleans up nothing twice')
+
+  applyJumpBackSetting(port.jumpback, true)
+  assert.deepEqual(port.steps, ['cleanup', 'sweepStale'], 'off→on sweeps stale marker files once (D8)')
+  assert.equal(getJumpBackState().marker, marker, 'the flip keeps this pane\'s identity (AC-2)')
+  applyJumpBackSetting(port.jumpback, true)
+  assert.deepEqual(port.steps, ['cleanup', 'sweepStale'], 'republishing on does not sweep again')
+})
+
 // --- the toast wiring (T07, D4/D7/D8, AC-3/AC-7/AC-10) -----------------------
 
 type Step = { name: string, args: string[] }
@@ -509,23 +541,29 @@ function recordingJumpBack(options: {
   register?: boolean
   markerPath?: string
   throwOn?: 'writeMarker' | 'probe' | 'ensureProtocol'
+  /** Also reports each step into a shared log, so ordering against another port is assertable. */
+  onStep?: (name: string) => void
 } = {}) {
   const steps: Step[] = []
+  const record = (name: string, args: string[]): void => {
+    steps.push({ name, args })
+    options.onStep?.(name)
+  }
   const probeAnswer = options.probe ?? { capable: true, helperPath: HELPER }
   const jumpback: TaskCompletionJumpBack = {
     writeMarker(sessionId, marker) {
       if (options.throwOn === 'writeMarker') throw new Error('marker port exploded')
-      steps.push({ name: 'writeMarker', args: [sessionId, marker] })
+      record('writeMarker', [sessionId, marker])
       return options.markerPath
     },
     async probe(marker) {
       if (options.throwOn === 'probe') throw new Error('probe port exploded')
-      steps.push({ name: 'probe', args: [marker] })
+      record('probe', [marker])
       return typeof probeAnswer === 'function' ? await probeAnswer() : probeAnswer
     },
     async ensureProtocol(helper) {
       if (options.throwOn === 'ensureProtocol') throw new Error('registry port exploded')
-      steps.push({ name: 'ensureProtocol', args: [helper] })
+      record('ensureProtocol', [helper])
       return options.register ?? true
     },
   }
@@ -552,6 +590,8 @@ async function deliver(options: {
   sessionId?: string
   plugins?: PluginRow[]
   toast?: WindowsToastResult
+  /** Reports the inventory read into a shared log, for ordering against the ports. */
+  onInventory?: () => void
 }): Promise<{ toastInputs: WindowsToastInput[], terminal: [string, string][] }> {
   const toastInputs: WindowsToastInput[] = []
   const terminal: [string, string][] = []
@@ -564,7 +604,12 @@ async function deliver(options: {
     jumpback: options.jumpback,
     sessionId: options.sessionId,
     platform: options.platform,
-    pluginManager: options.plugins === undefined ? undefined : { listPlugins: async () => options.plugins ?? [] },
+    pluginManager: options.plugins === undefined ? undefined : {
+      listPlugins: async () => {
+        options.onInventory?.()
+        return options.plugins ?? []
+      },
+    },
   }
   await deliverTaskCompletionOnWindows(TITLE, '摘要一行', 'dsh', delivery)
   return { toastInputs, terminal }
@@ -635,13 +680,32 @@ await check('a throwing port costs the jump-back promise, not the notification',
   }
 })
 
-await check('an external notifier owns the completion: nothing is probed or written', async () => {
-  enableJumpBack()
-  const recorder = recordingJumpBack()
-  const delivery = await deliver({ jumpback: recorder.jumpback, platform: 'win32', plugins: [notifierRow()] })
-  assert.deepEqual(recorder.steps, [], 'that toast comes from another plugin, so this process\'s URI would never be clicked (D4)')
+await check('an external notifier still gets the seam refreshed, but is never probed or registered', async () => {
+  const marker = enableJumpBack()
+  // One ordered log across the jump-back ports and the inventory read: the
+  // refresh has to happen before the ownership question, or an external plugin
+  // reading the seam at completion time may see the previous session (D8/AC-9).
+  const order: string[] = []
+  const recorder = recordingJumpBack({ onStep: name => order.push(name) })
+  const delivery = await deliver({
+    jumpback: recorder.jumpback,
+    platform: 'win32',
+    sessionId: 'session-external',
+    plugins: [notifierRow()],
+    onInventory: () => order.push('inventory'),
+  })
+  assert.deepEqual(
+    order,
+    ['writeMarker', 'inventory'],
+    'the documented file is refreshed first and exactly once; the yielded completion is never probed and never registered',
+  )
+  assert.deepEqual(
+    recorder.steps,
+    [{ name: 'writeMarker', args: ['session-external', marker] }],
+    'the seam names the session that completed, and this process promises nothing else',
+  )
   assert.equal(delivery.toastInputs[0].externalNotifierActive, true)
-  assert.equal(delivery.toastInputs[0].launch, undefined)
+  assert.equal(delivery.toastInputs[0].launch, undefined, 'that toast belongs to the other plugin, so this process may not promise a click (D4)')
 })
 
 await check('the marker file is named for the session, or for this process when the id is unusable', async () => {
