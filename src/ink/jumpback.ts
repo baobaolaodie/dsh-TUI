@@ -84,6 +84,8 @@ export interface JumpBackPorts {
   now?: () => number
   /** Data directory (`~/.dsh-tui` normally); defaults to {@link DATA_DIR}. */
   dataDir?: string
+  /** Liveness for marker owners; defaults to {@link pidAlive} (D8 sweep and R4 cleanup). */
+  pidAlive?: (pid: number) => boolean
   /** Resolves the compiled helper; defaults to {@link ensureHelper}, the only compiler. */
   helperPath?: () => Promise<string | undefined>
 }
@@ -92,13 +94,13 @@ export interface JumpBackPorts {
 export interface JumpBack {
   /** Decide before a toast whether a click can be promised to land on this pane (D4). */
   probe(marker: string): Promise<JumpBackProbe>
-  /** Lazily register the protocol key once per process (D7). */
+  /** Register the protocol key, or prove the cached registration is still ours (D7/R4). */
   ensureProtocol(helperPath: string): Promise<boolean>
   /** Remove the protocol key; a missing key is not an error (D7). */
   unregisterProtocol(): Promise<void>
   /** Write the documented read-only marker file for one session (D8). */
   writeMarker(sessionId: string, marker: string): string | undefined
-  /** Remove what this process left behind: the key if it registered it, and its marker files. */
+  /** Remove its marker files, and the key unless another live instance still needs it (D7/R4). */
   cleanup(): Promise<void>
   /** Remove marker files whose owner is gone or older than a week (D8 startup cleanup). */
   sweepStale(): void
@@ -117,13 +119,14 @@ export function createJumpBack(ports: JumpBackPorts = {}): JumpBack {
   const now = ports.now ?? Date.now
   const dataDir = ports.dataDir ?? DATA_DIR
   const markerDir = join(dataDir, 'notify', 'jumpback')
+  const alive = ports.pidAlive ?? pidAlive
 
   /** Marker files this process wrote; the only ones cleanup may remove. */
   const written = new Set<string>()
-  /** Whether this process registered the key, so cleanup only removes its own. */
+  /** Whether this process registered the key; re-checked before every later promise (D7/R4). */
   let registered = false
-  /** The one registration in flight, so concurrent notifications share it. */
-  let pendingRegistration: Promise<boolean> | undefined
+  /** The one registration or re-check in flight, so concurrent notifications share it. */
+  let pendingEnsure: Promise<boolean> | undefined
 
   const unavailable = (stage: JumpBackProbeStage, reason: string): JumpBackProbe => {
     logForDebugging('jumpback: probe unavailable', { stage, reason })
@@ -170,21 +173,16 @@ export function createJumpBack(ports: JumpBackPorts = {}): JumpBack {
       })
       return false
     }
-    const command = `"${helper}" --activate "%1" -DataDir "${dataDir}"`
     // Windows needs both halves of the registration: the empty `URL Protocol`
     // marker on the root, and the command below it. Either refusal means no
     // click can be promised, and a half-written key is never remembered as
     // registered, so the next notification retries both (D7/F-1).
-    const writes = [
-      { key: JUMP_BACK_PROTOCOL_KEY, name: URL_PROTOCOL_VALUE, data: '' },
-      { key: JUMP_BACK_PROTOCOL_COMMAND_KEY, name: null, data: command },
-    ] as const
-    for (const write of writes) {
-      const detail = await addRegistryValue(run, reg, write)
+    for (const value of registrationValues(helper, dataDir)) {
+      const detail = await addRegistryValue(run, reg, value)
       if (detail !== undefined) {
         logForDebugging('jumpback: protocol registration failed', {
-          key: write.key,
-          value: write.name ?? '(default)',
+          key: value.key,
+          value: value.name ?? '(default)',
           detail,
         })
         return false
@@ -196,19 +194,35 @@ export function createJumpBack(ports: JumpBackPorts = {}): JumpBack {
   }
 
   function ensureProtocol(helper: string): Promise<boolean> {
-    if (registered) return Promise.resolve(true)
-    if (pendingRegistration !== undefined) return pendingRegistration
-    // A failed attempt is not cached: the next notification retries, which is
-    // the recovery path DESIGN D7 asks for after a transient policy refusal.
-    pendingRegistration = register(helper)
+    if (pendingEnsure !== undefined) return pendingEnsure
+    // A write that succeeded earlier is not proof the key is still there: the
+    // user, another instance or a crash may have deleted or rewritten it since.
+    // Every later notification re-checks the pair and rewrites it when the check
+    // fails (D7/R4). A failed attempt is not cached: the next notification
+    // retries, which is the recovery path after a transient policy refusal.
+    pendingEnsure = ensureCurrent(helper)
       .catch((error: unknown) => {
         logForDebugging('jumpback: protocol registration threw', { detail: describe(error) })
         return false
       })
       .finally(() => {
-        pendingRegistration = undefined
+        pendingEnsure = undefined
       })
-    return pendingRegistration
+    return pendingEnsure
+  }
+
+  /**
+   * Answer "is the promise still backed by the key?", writing the pair when it
+   * is not. The first notification pays for two writes; later ones pay for two
+   * `reg query` calls unless the key changed (D7/R4).
+   * @param helper - The helper path this process would register.
+   * @returns Whether both values now hold this process's template.
+   */
+  async function ensureCurrent(helper: string): Promise<boolean> {
+    if (!registered) return register(helper)
+    const reg = regExe(env)
+    if (reg !== undefined && await registrationMatches(run, reg, helper, dataDir)) return true
+    return register(helper)
   }
 
   async function unregisterProtocol(): Promise<void> {
@@ -274,8 +288,22 @@ export function createJumpBack(ports: JumpBackPorts = {}): JumpBack {
   async function cleanup(): Promise<void> {
     // A registration still in flight may land after this check; waiting for it
     // makes "we do not leave a key behind" true even on a fast exit.
-    if (pendingRegistration !== undefined) await pendingRegistration
-    if (registered) await unregisterProtocol()
+    if (pendingEnsure !== undefined) await pendingEnsure
+    if (registered) {
+      if (hasOtherLiveInstance()) {
+        // The key is shared by every instance under this profile: removing it
+        // here would turn another live instance's next toast clicks into dead
+        // ones. Its own next notification re-checks and rewrites the pair if
+        // needed (D7/R4).
+        registered = false
+        logForDebugging('jumpback: left the protocol key for a live instance', {
+          key: JUMP_BACK_PROTOCOL_KEY,
+          reason: 'another process still owns a marker file',
+        })
+      } else {
+        await unregisterProtocol()
+      }
+    }
     for (const path of written) {
       try {
         rmSync(path, { force: true })
@@ -284,6 +312,43 @@ export function createJumpBack(ports: JumpBackPorts = {}): JumpBack {
       }
     }
     written.clear()
+  }
+
+  /**
+   * List the marker directory, or undefined when there is nothing to read yet.
+   * The startup sweep and the cleanup yield check share this one read (D8/R4).
+   * @returns The directory entries, or undefined when the directory is absent.
+   */
+  function markerEntries() {
+    try {
+      return readdirSync(markerDir, { withFileTypes: true })
+    } catch (error) {
+      // No directory yet is the normal first run; anything else is worth a line.
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+        logForDebugging('jumpback: marker directory unreadable', { dir: markerDir, detail: describe(error) })
+      }
+      return undefined
+    }
+  }
+
+  /**
+   * Whether a marker file belongs to another process that is still alive (R4).
+   * Such an instance still needs the shared key, so cleanup must not remove it.
+   * Files this process wrote, unreadable files and dead pids do not block the
+   * removal; the stale sweep owns whatever is left behind.
+   * @returns True when at least one other live pid owns a marker file.
+   */
+  function hasOtherLiveInstance(): boolean {
+    const entries = markerEntries()
+    if (entries === undefined) return false
+    for (const entry of entries) {
+      if (!entry.isFile() || !entry.name.endsWith('.json')) continue
+      const record = readMarkerRecord(join(markerDir, entry.name))
+      const pid = record?.pid
+      if (typeof pid !== 'number' || !Number.isSafeInteger(pid) || pid <= 0 || pid === process.pid) continue
+      if (alive(pid)) return true
+    }
+    return false
   }
 
   function sweepStale(): void {
@@ -297,16 +362,8 @@ export function createJumpBack(ports: JumpBackPorts = {}): JumpBack {
   }
 
   function removeStaleMarkers(): void {
-    let entries
-    try {
-      entries = readdirSync(markerDir, { withFileTypes: true })
-    } catch (error) {
-      // No directory yet is the normal first run; anything else is worth a line.
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
-        logForDebugging('jumpback: marker directory unreadable', { dir: markerDir, detail: describe(error) })
-      }
-      return
-    }
+    const entries = markerEntries()
+    if (entries === undefined) return
     for (const entry of entries) {
       if (!entry.isFile() || !entry.name.endsWith('.json')) continue
       const path = join(markerDir, entry.name)
@@ -317,7 +374,7 @@ export function createJumpBack(ports: JumpBackPorts = {}): JumpBack {
         logForDebugging('jumpback: marker file left in place', { path, reason: 'no usable pid' })
         continue
       }
-      if (!pidAlive(pid)) {
+      if (!alive(pid)) {
         removeStale(path, 'the owning process is gone')
         continue
       }
@@ -340,6 +397,91 @@ export function createJumpBack(ports: JumpBackPorts = {}): JumpBack {
   }
 }
 
+/** One `REG_SZ` value of the two-value registration contract (D7). */
+interface RegistryValue {
+  readonly key: string
+  readonly name: string | null
+  readonly data: string
+}
+
+/**
+ * The two values a full registration writes (D7/F-1), each with the data this
+ * process would leave behind. The pair doubles as the template every later
+ * notification checks against (R4).
+ * @param helper - The helper path the command launches.
+ * @param dataDir - The data directory the command passes on (L-077).
+ * @returns The root marker and the command, in the order they are written.
+ */
+function registrationValues(helper: string, dataDir: string): readonly RegistryValue[] {
+  return [
+    { key: JUMP_BACK_PROTOCOL_KEY, name: URL_PROTOCOL_VALUE, data: '' },
+    { key: JUMP_BACK_PROTOCOL_COMMAND_KEY, name: null, data: `"${helper}" --activate "%1" -DataDir "${dataDir}"` },
+  ]
+}
+
+/**
+ * Whether both values still hold this process's template. A missing value, a
+ * command rewritten to another helper, half a root key or output this parser
+ * cannot read all answer false, so the caller rewrites the pair instead of
+ * trusting the cache (D7/R4).
+ * @param run - The injected process runner.
+ * @param reg - The absolute `reg.exe` path.
+ * @param helper - The helper path this process would register.
+ * @param dataDir - The data directory this process would pass on.
+ * @returns True only when both values match the template exactly.
+ */
+async function registrationMatches(
+  run: typeof execFileNoThrow,
+  reg: string,
+  helper: string,
+  dataDir: string,
+): Promise<boolean> {
+  for (const value of registrationValues(helper, dataDir)) {
+    if (await readRegistryValue(run, reg, value) !== value.data) return false
+  }
+  return true
+}
+
+/**
+ * Read one value back with `reg query`. A value that is gone (non-zero exit) or
+ * whose output this parser cannot read answers undefined; both mean "not
+ * provably ours", never "probably fine" (D7/R4).
+ * @param run - The injected process runner.
+ * @param reg - The absolute `reg.exe` path.
+ * @param value - The key and value name to read.
+ * @returns The data string, or undefined when the value is not provably there.
+ */
+async function readRegistryValue(
+  run: typeof execFileNoThrow,
+  reg: string,
+  value: RegistryValue,
+): Promise<string | undefined> {
+  const nameArgs = value.name === null ? ['/ve'] : ['/v', value.name]
+  const result = await run(reg, ['query', value.key, ...nameArgs], { timeout: REGISTRY_TIMEOUT_MS })
+  if (result.code !== 0) return undefined
+  return parseRegistryValue(result.stdout, value.name)
+}
+
+/**
+ * The data of one value from `reg query` output. The line carries the type
+ * token, so the label before it is skipped for the default value (Windows
+ * localises `(Default)`) and compared exactly for the named root marker (so a
+ * data line cannot be mistaken for the value).
+ * @param stdout - The query's standard output.
+ * @param name - The value name, or null for the key's default value.
+ * @returns The data string, or undefined when no value line is present.
+ */
+function parseRegistryValue(stdout: string, name: string | null): string | undefined {
+  for (const line of stdout.split(/\r?\n/u)) {
+    const trimmed = line.trim()
+    const typeAt = trimmed.indexOf('REG_SZ')
+    if (typeAt === -1) continue
+    if (name !== null && trimmed.slice(0, typeAt).trim() !== name) continue
+    return trimmed.slice(typeAt + 'REG_SZ'.length).trimStart()
+  }
+  return undefined
+}
+
 /**
  * Write one `REG_SZ` value with `reg.exe add`. The named value and the key's
  * default value share one argv shape; `name === null` means the default value
@@ -352,10 +494,10 @@ export function createJumpBack(ports: JumpBackPorts = {}): JumpBack {
 async function addRegistryValue(
   run: typeof execFileNoThrow,
   reg: string,
-  write: { readonly key: string, readonly name: string | null, readonly data: string },
+  value: RegistryValue,
 ): Promise<string | undefined> {
-  const nameArgs = write.name === null ? ['/ve'] : ['/v', write.name]
-  const result = await run(reg, ['add', write.key, ...nameArgs, '/t', 'REG_SZ', '/d', write.data, '/f'], {
+  const nameArgs = value.name === null ? ['/ve'] : ['/v', value.name]
+  const result = await run(reg, ['add', value.key, ...nameArgs, '/t', 'REG_SZ', '/d', value.data, '/f'], {
     timeout: REGISTRY_TIMEOUT_MS,
   })
   if (result.code === 0) return undefined

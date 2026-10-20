@@ -74,6 +74,15 @@ const HELPER = join(sandbox, 'helper', 'activate.exe')
 /** The per-orchestration data directory; the suite never lets it default. */
 const PROFILE = join(sandbox, 'profile')
 const MARKER_DIR = join(PROFILE, 'notify', 'jumpback')
+/**
+ * The two argv rows a full registration writes (D7/F-1). A fresh write and a
+ * rewrite after an external change share them, so the self-heal expectations
+ * cannot drift from the registration contract.
+ */
+const REGISTRATION_WRITES = [
+  ['add', PROTOCOL_KEY, '/v', 'URL Protocol', '/t', 'REG_SZ', '/d', '', '/f'],
+  ['add', PROTOCOL_COMMAND_KEY, '/ve', '/t', 'REG_SZ', '/d', `"${HELPER}" --activate "%1" -DataDir "${PROFILE}"`, '/f'],
+] as const
 
 /** The process runner the ports are given, as `execFileNoThrow` provides it. */
 type RunCommand = (
@@ -84,18 +93,65 @@ type RunCommand = (
 type RunCall = { file: string, args: readonly string[], timeout: number | undefined }
 type RunOutcome = { code: number | null, stdout?: string, stderr?: string }
 
-/** Stands in for execFileNoThrow: records the invocation, spawns nothing. */
+/** The map key for one registry value, so a case can delete or rewrite it. */
+function registryValueId(key: string, name: string | null): string {
+  return `${key}\u0000${name ?? ''}`
+}
+
+/**
+ * Stands in for execFileNoThrow: records the invocation, spawns nothing. The
+ * default applies the `reg.exe` verbs this suite uses to an in-memory value map,
+ * so a later `reg query` answers what earlier `reg add` calls wrote. A case can
+ * delete or rewrite a value between notifications, which is how an external
+ * change (another instance, the user's registry tool) reaches the orchestration
+ * without touching HKCU (R4).
+ * @param outcome - Overrides the default answers for the `reg.exe` calls.
+ */
 function recordingRunner(
-  outcome: (call: { file: string, args: readonly string[] }, index: number) => RunOutcome | Promise<RunOutcome> = () => ({ code: 0 }),
+  outcome?: (call: { file: string, args: readonly string[] }, index: number) => RunOutcome | Promise<RunOutcome>,
 ) {
   const calls: RunCall[] = []
+  const values = new Map<string, string>()
+
+  /** Apply the verb to the value map, or answer a helper run with success. */
+  const applyRegistryVerb = (call: { file: string, args: readonly string[] }): RunOutcome => {
+    const [verb, key, ...rest] = call.args
+    if (key === undefined) return { code: 1 }
+    if (verb === 'add') {
+      const name = rest[0] === '/ve' ? null : rest[0] === '/v' ? rest[1] ?? null : null
+      const dataAt = rest.indexOf('/d')
+      values.set(registryValueId(key, name), dataAt === -1 ? '' : rest[dataAt + 1] ?? '')
+      return { code: 0 }
+    }
+    if (verb === 'delete') {
+      for (const id of [...values.keys()]) {
+        const existing = id.slice(0, id.indexOf('\u0000'))
+        if (existing === key || existing.startsWith(`${key}\\`)) values.delete(id)
+      }
+      return { code: 0 }
+    }
+    if (verb === 'query') {
+      const name = rest[0] === '/ve' ? null : rest[1] ?? null
+      const data = values.get(registryValueId(key, name))
+      if (data === undefined) {
+        return { code: 1, stderr: 'ERROR: The system was unable to find the specified registry key or value.' }
+      }
+      return {
+        code: 0,
+        stdout: `${key}\r\n    ${name ?? '(Default)'}    REG_SZ${data === '' ? '' : `    ${data}`}\r\n`,
+      }
+    }
+    // Anything else is the helper run the probe tests drive, not a registry verb.
+    return { code: 0 }
+  }
+
   const run: RunCommand = async (file, args, options) => {
     const index = calls.length
     calls.push({ file, args, timeout: options?.timeout })
-    const settled = await outcome({ file, args }, index)
+    const settled = await (outcome === undefined ? applyRegistryVerb({ file, args }) : outcome({ file, args }, index))
     return { code: settled.code, stdout: settled.stdout ?? '', stderr: settled.stderr ?? '' }
   }
-  return { calls, run }
+  return { calls, run, values }
 }
 
 /** The keys a `reg.exe` sequence leaves behind; `delete <key> /f` removes the whole subtree. */
@@ -138,6 +194,8 @@ function makeJumpBack(options: {
   helper?: string | null
   now?: () => number
   dataDir?: string
+  /** Liveness for marker owners; the production default asks the OS (R4). */
+  pidAlive?: (pid: number) => boolean
 } = {}) {
   const runner = options.run ?? recordingRunner()
   let resolverCalls = 0
@@ -151,6 +209,7 @@ function makeJumpBack(options: {
     },
     now: options.now ?? (() => NOW),
     dataDir: options.dataDir ?? PROFILE,
+    pidAlive: options.pidAlive,
   })
   return { instance, runner, resolverCalls: () => resolverCalls }
 }
@@ -347,10 +406,7 @@ await check('registration writes the scheme root marker and the command, quoted'
   assert.deepEqual(runner.calls.map(call => call.file), [REG_EXE, REG_EXE], 'the in-box registry tool is resolved from %WINDIR%, never PATH')
   assert.deepEqual(
     runner.calls.map(call => call.args),
-    [
-      ['add', PROTOCOL_KEY, '/v', 'URL Protocol', '/t', 'REG_SZ', '/d', '', '/f'],
-      ['add', PROTOCOL_COMMAND_KEY, '/ve', '/t', 'REG_SZ', '/d', `"${HELPER}" --activate "%1" -DataDir "${PROFILE}"`, '/f'],
-    ],
+    REGISTRATION_WRITES,
     'Windows resolves dsh-tui: only when the root carries the empty URL Protocol value; the command below it is the default value (D7/F-1)',
   )
   assert.ok(
@@ -359,11 +415,15 @@ await check('registration writes the scheme root marker and the command, quoted'
   )
 })
 
-await check('registration is cached, and a burst of notifications writes the key once', async () => {
+await check('registration is verified after the first write, and a burst of notifications writes the key once', async () => {
   const cached = makeJumpBack()
   assert.equal(await cached.instance.ensureProtocol(HELPER), true)
   assert.equal(await cached.instance.ensureProtocol(HELPER), true)
-  assert.equal(cached.runner.calls.length, 2, 'the second notification must not rewrite the two values')
+  assert.deepEqual(
+    cached.runner.calls.map(call => call.args[0]),
+    ['add', 'add', 'query', 'query'],
+    'the second notification proves both values are still ours instead of trusting the cache (D7/R4)',
+  )
 
   const burst = makeJumpBack()
   const answers = await Promise.all([
@@ -373,6 +433,53 @@ await check('registration is cached, and a burst of notifications writes the key
   ])
   assert.deepEqual(answers, [true, true, true])
   assert.equal(burst.runner.calls.length, 2, 'concurrent notifications share the one registration in flight (D7)')
+  assert.deepEqual(burst.runner.calls.map(call => call.args[0]), ['add', 'add'], 'and none of them re-checks a key that is still in flight')
+})
+
+await check('a key deleted outside this process is written again before the next notification', async () => {
+  for (const vanished of ['root value', 'command value'] as const) {
+    const runner = recordingRunner()
+    const { instance } = makeJumpBack({ run: runner })
+    assert.equal(await instance.ensureProtocol(HELPER), true)
+    runner.values.delete(vanished === 'root value'
+      ? registryValueId(PROTOCOL_KEY, 'URL Protocol')
+      : registryValueId(PROTOCOL_COMMAND_KEY, null))
+    const before = runner.calls.length
+    assert.equal(await instance.ensureProtocol(HELPER), true, `${vanished} gone: the next notification still promises the click`)
+    assert.deepEqual(
+      runner.calls.slice(before).map(call => call.args),
+      vanished === 'root value'
+        ? [['query', PROTOCOL_KEY, '/v', 'URL Protocol'], ...REGISTRATION_WRITES]
+        : [['query', PROTOCOL_KEY, '/v', 'URL Protocol'], ['query', PROTOCOL_COMMAND_KEY, '/ve'], ...REGISTRATION_WRITES],
+      `${vanished} gone: the cache is only a hint; both values are rewritten before the promise (D7/R4)`,
+    )
+  }
+})
+
+await check('a command rewritten to another helper is replaced before the next notification', async () => {
+  const runner = recordingRunner()
+  const { instance } = makeJumpBack({ run: runner })
+  assert.equal(await instance.ensureProtocol(HELPER), true)
+  runner.values.set(
+    registryValueId(PROTOCOL_COMMAND_KEY, null),
+    `"C:\\other\\activate.exe" --activate "%1" -DataDir "C:\\other"`,
+  )
+  const before = runner.calls.length
+  assert.equal(await instance.ensureProtocol(HELPER), true)
+  assert.deepEqual(
+    runner.calls.slice(before).map(call => call.args),
+    [
+      ['query', PROTOCOL_KEY, '/v', 'URL Protocol'],
+      ['query', PROTOCOL_COMMAND_KEY, '/ve'],
+      ...REGISTRATION_WRITES,
+    ],
+    'a value that points at someone else\'s helper is not this process\'s registration (R4)',
+  )
+  assert.equal(
+    runner.values.get(registryValueId(PROTOCOL_COMMAND_KEY, null)),
+    `"${HELPER}" --activate "%1" -DataDir "${PROFILE}"`,
+    'and the click is rewritten to this process\'s helper and data directory',
+  )
 })
 
 await check('either refused value answers false and is retried later', async () => {
@@ -513,6 +620,45 @@ await check('a process that never registered or wrote leaves everything alone', 
   await instance.cleanup()
   assert.deepEqual(runner.calls, [], 'a disabled process must not delete a key another instance registered')
   assert.equal(existsSync(foreign), true)
+})
+
+await check('cleanup yields the shared key to a live instance, and removes it when no one else is alive', async () => {
+  const liveDir = join(sandbox, 'cleanup-yield')
+  const liveMarkerDir = join(liveDir, 'notify', 'jumpback')
+  mkdirSync(liveMarkerDir, { recursive: true })
+  const sibling = join(liveMarkerDir, 'session-sibling.json')
+  writeFileSync(sibling, markerRecord({ pid: 4_242 }))
+  const live = makeJumpBack({ dataDir: liveDir, pidAlive: pid => pid === 4_242 })
+  assert.equal(await live.instance.ensureProtocol(HELPER), true)
+  const own = live.instance.writeMarker('session-own', MARKER)
+  const { lines } = await captureDebug(() => live.instance.cleanup())
+  assert.deepEqual(
+    live.runner.calls.map(call => call.args[0]),
+    ['add', 'add'],
+    'a live sibling still needs the shared key: removing it would make its next toast click dead (R4)',
+  )
+  assert.equal(existsSync(sibling), true, 'the sibling keeps its identity')
+  assert.ok(own !== undefined)
+  assert.equal(existsSync(own), false, 'this process still removes the file it wrote')
+  assert.match(lines.join(''), /left the protocol key/u, 'and the reason survives in the debug log')
+
+  const quietDir = join(sandbox, 'cleanup-dead-sibling')
+  const quietMarkerDir = join(quietDir, 'notify', 'jumpback')
+  mkdirSync(quietMarkerDir, { recursive: true })
+  writeFileSync(join(quietMarkerDir, 'gone.json'), markerRecord({ pid: DEAD_PID }))
+  const quiet = makeJumpBack({ dataDir: quietDir })
+  assert.equal(await quiet.instance.ensureProtocol(HELPER), true)
+  await quiet.instance.cleanup()
+  assert.deepEqual(
+    quiet.runner.calls.map(call => call.args[0]),
+    ['add', 'add', 'delete'],
+    'a dead owner is not a live instance: the last one out removes the key (D7/F-2)',
+  )
+  assert.deepEqual(
+    quiet.runner.calls.at(-1)?.args,
+    ['delete', PROTOCOL_KEY, '/f'],
+    'and it removes the whole scheme root, not just the command below it',
+  )
 })
 
 /** One marker file body, with the fields the sweep inspects overridable. */
