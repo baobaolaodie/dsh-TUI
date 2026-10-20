@@ -355,6 +355,11 @@ export async function deliverTaskCompletionOnWindows(
   backendId: string,
   delivery: TaskCompletionDelivery,
 ): Promise<void> {
+  // D8: the documented marker file names the session that just completed, so it
+  // is refreshed before the ownership question is asked - an external notifier
+  // may ship this toast, but the seam an external plugin reads must still be
+  // current (AC-9).
+  const target = refreshJumpBackMarker(delivery)
   let externalNotifierActive = false
   if (backendId === 'dsh' && delivery.pluginManager !== undefined) {
     try {
@@ -365,10 +370,10 @@ export async function deliverTaskCompletionOnWindows(
       logForDebugging('external notifier inventory unavailable; using the built-in Windows notification')
     }
   }
-  // An external notifier owns this completion: only the toast this process
-  // ships can come back here, so probing there would spend half a second and
-  // leave a marker file nobody can use.
-  const launch = externalNotifierActive ? undefined : await jumpBackLaunch(delivery)
+  // An external notifier ships this completion: only a toast this process sends
+  // can come back here, so no probe and no registration - the URI would never
+  // be clicked.
+  const launch = target === undefined || externalNotifierActive ? undefined : await jumpBackLaunch(target)
   const result = await delivery.toast({
     title,
     message,
@@ -426,39 +431,92 @@ function markerFileName(sessionId: string | undefined): string {
     : `process-${process.pid}`
 }
 
+/** The pane this completion speaks for: its marker and the orchestration that acts on it. */
+interface JumpBackTarget {
+  readonly marker: string
+  readonly jumpback: TaskCompletionJumpBack
+}
+
 /**
- * Ask whether this completion may carry a jump-back URI (DESIGN D4/D7/D8).
+ * Refresh the documented marker file for this completion (DESIGN D8).
  *
- * The switch and the marker come from the published leaf state (L-080): the
- * pane-title writer and this path read the same decision, so a toast can never
- * promise a pane the title did not tag. The marker file is refreshed before the
- * probe (AC-9), the probe must prove exactly one target (AC-3), and a refused
- * protocol registration also answers no URI - a click whose handler is missing
- * is a dead click (D7). Every skip leaves its stage and reason in the debug log.
+ * The file is written before the toast's ownership is known: an external
+ * notifier may deliver this completion, but an external plugin reading the
+ * documented seam still has to find this session's marker (AC-9). Only the
+ * probe that decides whether a click can be promised comes later.
  * @param delivery - The ports for this completion; `jumpback` defaults to this
  *   process's orchestration.
- * @returns The activation URI, or undefined for the plain toast.
+ * @returns The marker and its orchestration, or undefined when jump-back is
+ *   off, off Windows, has no marker yet, or the port refuses to write.
  */
-async function jumpBackLaunch(delivery: TaskCompletionDelivery): Promise<string | undefined> {
+function refreshJumpBackMarker(delivery: TaskCompletionDelivery): JumpBackTarget | undefined {
   // The title writer tags a pane only on Windows; promising a jump anywhere
-  // else is the L-080 dead point. A disabled switch comes first and costs nothing.
+  // else is the L-080 dead point. A disabled switch costs nothing and comes first.
   const { enabled, marker } = getJumpBackState()
   if (!enabled || marker === null || (delivery.platform ?? process.platform) !== 'win32') return undefined
+  const jumpback = delivery.jumpback ?? jumpBackForProcess()
   try {
-    const jumpback = delivery.jumpback ?? jumpBackForProcess()
     jumpback.writeMarker(markerFileName(delivery.sessionId), marker)
-    const probe = await jumpback.probe(marker)
-    if (!probe.capable) return undefined
-    if (!await jumpback.ensureProtocol(probe.helperPath)) return undefined
-    return `${JUMP_BACK_LAUNCH_PREFIX}${marker}`
+    return { marker, jumpback }
   } catch (error) {
     // The delivery path is fire-and-forget: a port that throws must cost the
-    // jump-back promise, never the notification itself (AC-3/AC-10).
+    // jump-back promise, never the notification itself (AC-3/AC-10). One
+    // message covers both preparation steps; `step` says which one failed.
     logForDebugging('jumpback: the launch could not be prepared; sending the plain toast', {
+      step: 'marker',
       detail: error instanceof Error ? error.message : String(error),
     })
     return undefined
   }
+}
+
+/**
+ * Ask whether this completion may carry a jump-back URI (DESIGN D4/D7).
+ *
+ * The marker file was already refreshed by {@link refreshJumpBackMarker}; this
+ * step only spends the half second a probe costs. It must prove exactly one
+ * target (AC-3), and a refused protocol registration also answers no URI - a
+ * click whose handler is missing is a dead click (D7). Every skip leaves its
+ * stage and reason in the debug log.
+ * @param target - The marker and the orchestration that must prove it reachable.
+ * @returns The activation URI, or undefined for the plain toast.
+ */
+async function jumpBackLaunch(target: JumpBackTarget): Promise<string | undefined> {
+  try {
+    const probe = await target.jumpback.probe(target.marker)
+    if (!probe.capable) return undefined
+    if (!await target.jumpback.ensureProtocol(probe.helperPath)) return undefined
+    return `${JUMP_BACK_LAUNCH_PREFIX}${target.marker}`
+  } catch (error) {
+    // Same rule as the marker refresh: the jump-back promise is all a throwing
+    // port may cost (AC-3/AC-10).
+    logForDebugging('jumpback: the launch could not be prepared; sending the plain toast', {
+      step: 'probe',
+      detail: error instanceof Error ? error.message : String(error),
+    })
+    return undefined
+  }
+}
+
+/**
+ * Publish one jump-back settings resolution and act on the transition (DESIGN
+ * D1/D4). Enabling sweeps stale marker files once; disabling is a cleanup point
+ * of its own (DESIGN §3, AC-1/AC-9), not merely a title rewrite.
+ *
+ * `cleanup()` removes only what THIS process registered or wrote - another
+ * instance's protocol key survives (R4) - and is a no-op for a process that
+ * never did either (T06), so a disabled boot path is unchanged. The sweep is
+ * win32-gated inside the orchestration, so no second platform judgment is made
+ * here. Exported for the regression, which drives the same transition the
+ * settings watch calls.
+ * @param jumpback - This process's orchestration.
+ * @param enabled - The resolved `jumpBack` setting.
+ */
+export function applyJumpBackSetting(jumpback: Pick<JumpBack, 'sweepStale' | 'cleanup'>, enabled: boolean): void {
+  const wasEnabled = getJumpBackState().enabled
+  setJumpBackEnabled(enabled)
+  if (enabled && !wasEnabled) jumpback.sweepStale()
+  else if (!enabled && wasEnabled) void jumpback.cleanup()
 }
 
 /**
@@ -1730,19 +1788,6 @@ export async function apply(ctx: Context, runtimeConfig: RuntimeConfig<Config>, 
         writeLangPref(value.lang)
       }
     }
-    /**
-     * Jump-back opt-in (DESIGN D1/D4): publish the resolved switch to the leaf
-     * state the pane-title writer and the pre-toast probe both read (L-080).
-     * The first enable of this process sweeps stale marker files; the sweep is
-     * win32-gated inside the orchestration, so no second platform judgment is
-     * made here (T06).
-     * @param enabled - The resolved `jumpBack` setting.
-     */
-    const applyJumpBack = (enabled: boolean): void => {
-      const firstEnable = enabled && !getJumpBackState().enabled
-      setJumpBackEnabled(enabled)
-      if (firstEnable) jumpBack.sweepStale()
-    }
     // Display preferences ride the same namespace: /settings writes them
     // live and future render consumers observe the channel version bump.
     const applyDisplay = (value: SettingsValue): void => {
@@ -1763,7 +1808,7 @@ export async function apply(ctx: Context, runtimeConfig: RuntimeConfig<Config>, 
       channel.setExpandEditor(value.expandEditor ?? config.expandEditor ?? true)
       channel.setSmoothStreaming(value.smoothStreaming ?? config.smoothStreaming ?? true)
       configureTaskNotifications(value.taskNotifications ?? config.taskNotifications, value.notificationMethod ?? config.notificationMethod)
-      applyJumpBack(value.jumpBack ?? config.jumpBack ?? false)
+      applyJumpBackSetting(jumpBack, value.jumpBack ?? config.jumpBack ?? false)
       applyMermaidDiagrams(value.mermaidDiagrams ?? config.mermaidDiagrams)
       applyCodeFrameStyle(value.codeFrameStyle ?? config.codeFrameStyle)
       applyMathRendering(resolveMathRendering(value, config))
