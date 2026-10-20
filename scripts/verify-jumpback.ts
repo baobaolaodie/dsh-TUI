@@ -44,7 +44,7 @@ process.on('exit', () => {
 })
 
 const { DATA_DIR } = await import('../src/utils/paths.js')
-const { createJumpBack, JUMP_BACK_PROTOCOL_KEY } = await import('../src/ink/jumpback.js')
+const { createJumpBack } = await import('../src/ink/jumpback.js')
 const { getJumpBackState, setJumpBackEnabled, subscribeJumpBack } = await import('../src/ink/jumpback-state.js')
 const { jumpBackTitleSuffix } = await import('../src/ink/hooks/use-terminal-title.js')
 const { applyJumpBackSetting, deliverTaskCompletionOnWindows } = await import('../src/dsh-adapter/plugin.js')
@@ -62,6 +62,14 @@ const WINDIR = 'C:\\WINDOWS'
 // Composed with `join` like the module does: this suite also runs on POSIX CI,
 // where a hardcoded backslash path would never equal what the module built.
 const REG_EXE = join(WINDIR, 'System32', 'reg.exe')
+/**
+ * The URI scheme root Windows resolves a toast click through (D7). Literal on
+ * purpose: importing the module's constants would let a wrong key agree with
+ * itself, and this suite is the only guard on the documented shape.
+ */
+const PROTOCOL_KEY = 'HKCU\\Software\\Classes\\dsh-tui'
+/** The subkey whose default value is the command a click runs. */
+const PROTOCOL_COMMAND_KEY = `${PROTOCOL_KEY}\\shell\\open\\command`
 const HELPER = join(sandbox, 'helper', 'activate.exe')
 /** The per-orchestration data directory; the suite never lets it default. */
 const PROFILE = join(sandbox, 'profile')
@@ -88,6 +96,37 @@ function recordingRunner(
     return { code: settled.code, stdout: settled.stdout ?? '', stderr: settled.stderr ?? '' }
   }
   return { calls, run }
+}
+
+/** The keys a `reg.exe` sequence leaves behind; `delete <key> /f` removes the whole subtree. */
+function keysAfter(calls: readonly RunCall[]): Set<string> {
+  const keys = new Set<string>()
+  for (const call of calls) {
+    const [verb, key] = call.args
+    if (key === undefined) continue
+    if (verb === 'add') {
+      keys.add(key)
+    } else if (verb === 'delete') {
+      for (const existing of [...keys]) {
+        if (existing === key || existing.startsWith(`${key}\\`)) keys.delete(existing)
+      }
+    }
+  }
+  return keys
+}
+
+/**
+ * The protocol keys a recorded sequence leaves under the scheme root. This stands
+ * in for the `reg query` UAT would run: the model applies the same subtree
+ * semantics `reg.exe` has, so "the root key is gone" is assertable without ever
+ * touching HKCU.
+ * @param calls - The recorded `reg.exe` invocations, in order.
+ * @returns The surviving protocol keys, sorted, with the root first.
+ */
+function protocolKeys(calls: readonly RunCall[]): string[] {
+  return [...keysAfter(calls)]
+    .filter(key => key === PROTOCOL_KEY || key.startsWith(`${PROTOCOL_KEY}\\`))
+    .sort()
 }
 
 /** One orchestration with every port stubbed; nothing here reaches the machine. */
@@ -302,24 +341,29 @@ await check('off Windows the probe compiles and spawns nothing', async () => {
 
 // --- the lazy protocol registration (D7, AC-1/AC-9) ---------------------------
 
-await check('one reg.exe add records the documented command, quoted', async () => {
+await check('registration writes the scheme root marker and the command, quoted', async () => {
   const { instance, runner } = makeJumpBack()
   assert.equal(await instance.ensureProtocol(HELPER), true)
-  assert.deepEqual(runner.calls.map(call => call.file), [REG_EXE], 'the in-box registry tool is resolved from %WINDIR%, never PATH')
-  const [call] = runner.calls
+  assert.deepEqual(runner.calls.map(call => call.file), [REG_EXE, REG_EXE], 'the in-box registry tool is resolved from %WINDIR%, never PATH')
   assert.deepEqual(
-    call.args,
-    ['add', JUMP_BACK_PROTOCOL_KEY, '/ve', '/d', `"${HELPER}" --activate "%1" -DataDir "${PROFILE}"`, '/f'],
-    'the value is a fixed template - quoted helper, quoted %1, explicit -DataDir (D7/L-077) - and /f keeps reg.exe from prompting',
+    runner.calls.map(call => call.args),
+    [
+      ['add', PROTOCOL_KEY, '/v', 'URL Protocol', '/t', 'REG_SZ', '/d', '', '/f'],
+      ['add', PROTOCOL_COMMAND_KEY, '/ve', '/t', 'REG_SZ', '/d', `"${HELPER}" --activate "%1" -DataDir "${PROFILE}"`, '/f'],
+    ],
+    'Windows resolves dsh-tui: only when the root carries the empty URL Protocol value; the command below it is the default value (D7/F-1)',
   )
-  assert.ok(typeof call.timeout === 'number' && call.timeout > 0, 'a stuck reg.exe must not hold the notification')
+  assert.ok(
+    runner.calls.every(call => typeof call.timeout === 'number' && call.timeout > 0),
+    'a stuck reg.exe must not hold the notification',
+  )
 })
 
 await check('registration is cached, and a burst of notifications writes the key once', async () => {
   const cached = makeJumpBack()
   assert.equal(await cached.instance.ensureProtocol(HELPER), true)
   assert.equal(await cached.instance.ensureProtocol(HELPER), true)
-  assert.equal(cached.runner.calls.length, 1, 'the second notification must not rewrite the key')
+  assert.equal(cached.runner.calls.length, 2, 'the second notification must not rewrite the two values')
 
   const burst = makeJumpBack()
   const answers = await Promise.all([
@@ -328,17 +372,22 @@ await check('registration is cached, and a burst of notifications writes the key
     burst.instance.ensureProtocol(HELPER),
   ])
   assert.deepEqual(answers, [true, true, true])
-  assert.equal(burst.runner.calls.length, 1, 'concurrent notifications share the one registration in flight (D7)')
+  assert.equal(burst.runner.calls.length, 2, 'concurrent notifications share the one registration in flight (D7)')
 })
 
-await check('a refused registration answers false and is retried later', async () => {
-  const runner = recordingRunner((_call, index) => (index === 0
-    ? { code: 1, stderr: 'ERROR: Access is denied.' }
-    : { code: 0 }))
-  const { instance } = makeJumpBack({ run: runner })
-  assert.equal(await instance.ensureProtocol(HELPER), false, 'a refusal must not claim the key is registered')
-  assert.equal(await instance.ensureProtocol(HELPER), true, 'and must not be cached: the next notification retries (D7/R3)')
-  assert.equal(runner.calls.length, 2)
+await check('either refused value answers false and is retried later', async () => {
+  for (const refused of [0, 1]) {
+    const runner = recordingRunner((_call, index) => (index === refused
+      ? { code: 1, stderr: 'ERROR: Access is denied.' }
+      : { code: 0 }))
+    const { instance } = makeJumpBack({ run: runner })
+    const { result, lines } = await captureDebug(() => instance.ensureProtocol(HELPER))
+    assert.equal(result, false, `refusing write ${refused + 1} must not claim the key is registered`)
+    assert.equal(runner.calls.length, refused + 1, 'a refused write stops the pair: the other value alone is not a registration')
+    assert.match(lines.join(''), /protocol registration failed/u, 'and the refusal keeps its cause')
+    assert.equal(await instance.ensureProtocol(HELPER), true, 'and must not be cached: the next notification retries (D7/R3)')
+    assert.equal(runner.calls.length, refused + 1 + 2, 'the retry writes both values again')
+  }
 })
 
 await check('an unquotable helper is refused before reg.exe runs', async () => {
@@ -358,17 +407,31 @@ await check('off Windows, or with no Windows directory, nothing is written', asy
   assert.deepEqual(rootless.runner.calls, [], 'and PATH is never used as a fallback')
 })
 
-await check('unregistering deletes the same key, and a key that is already gone is not an error', async () => {
+await check('unregistering deletes the whole scheme root, and a key that is already gone is not an error', async () => {
   const { instance, runner } = makeJumpBack({
     run: recordingRunner(() => ({ code: 1, stderr: 'ERROR: The system was unable to find the specified registry key.' })),
   })
   const { lines } = await captureDebug(() => instance.unregisterProtocol())
   assert.deepEqual(
     runner.calls.map(call => call.args),
-    [['delete', JUMP_BACK_PROTOCOL_KEY, '/f']],
-    'the same key, force-deleted so nobody is prompted',
+    [['delete', PROTOCOL_KEY, '/f']],
+    'the scheme root, force-deleted: deleting only `...\\command` would leave the empty protocol key behind (F-2)',
   )
   assert.match(lines.join(''), /unregistration failed/u, 'another instance may have removed it first; the refusal is recorded, not thrown (R4)')
+})
+
+await check('after unregistering, no protocol key is left behind', async () => {
+  const { instance, runner } = makeJumpBack()
+  assert.equal(await instance.ensureProtocol(HELPER), true)
+  const afterRegistration = protocolKeys(runner.calls)
+  assert.ok(afterRegistration.includes(PROTOCOL_KEY), 'the scheme root is created')
+  assert.ok(afterRegistration.includes(PROTOCOL_COMMAND_KEY), 'and so is the command subkey under it')
+  await instance.cleanup()
+  assert.deepEqual(
+    protocolKeys(runner.calls),
+    [],
+    'a normal exit leaves no protocol key at all, not just no command subkey (AC-1 / CHANGE line 3)',
+  )
 })
 
 // --- the documented marker file (D8, AC-9, R8) --------------------------------
@@ -430,11 +493,15 @@ await check('cleanup removes the key it registered and the files it wrote, once'
   const foreign = join(dir, 'notify', 'jumpback', 'foreign.json')
   writeFileSync(foreign, '{}')
   await instance.cleanup()
-  assert.deepEqual(runner.calls.map(call => call.args[0]), ['add', 'delete'], 'the key this process registered is the key it removes')
+  assert.deepEqual(
+    runner.calls.map(call => call.args[0]),
+    ['add', 'add', 'delete'],
+    'both values this process wrote are removed by the one root deletion, and nothing else is touched',
+  )
   assert.equal(existsSync(markerPath), false, 'the marker file this process wrote is removed')
   assert.equal(existsSync(foreign), true, 'another instance\'s file is not ours to delete (R4)')
   await instance.cleanup()
-  assert.equal(runner.calls.length, 2, 'cleanup is idempotent')
+  assert.equal(runner.calls.length, 3, 'cleanup is idempotent')
 })
 
 await check('a process that never registered or wrote leaves everything alone', async () => {

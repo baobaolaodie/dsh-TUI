@@ -23,12 +23,22 @@ import { DATA_DIR } from '../utils/paths.js'
 import { ensureHelper } from './notify-helper/compile.js'
 
 /**
+ * The URI scheme root (D7). Windows only hands `dsh-tui:` to a handler when this
+ * key carries the named value `URL Protocol`; the command a click runs lives in
+ * the subkey below it.
+ */
+export const JUMP_BACK_PROTOCOL_KEY = 'HKCU\\Software\\Classes\\dsh-tui'
+
+/**
  * The command a toast click runs (D7). The value quotes both the helper and the
  * data directory: Windows starts the handler from the shell, which inherits no
  * environment of ours, so the helper must be told where the profile lives
  * explicitly (L-077).
  */
-export const JUMP_BACK_PROTOCOL_KEY = 'HKCU\\Software\\Classes\\dsh-tui\\shell\\open\\command'
+export const JUMP_BACK_PROTOCOL_COMMAND_KEY = `${JUMP_BACK_PROTOCOL_KEY}\\shell\\open\\command`
+
+/** The named value that marks the scheme root as a URI handler; its data is empty (D7). */
+const URL_PROTOCOL_VALUE = 'URL Protocol'
 
 /** 16 lowercase hex characters; the title, the URI and the marker file all carry this (D2). */
 const MARKER_PATTERN = /^[0-9a-f]{16}$/u
@@ -161,15 +171,24 @@ export function createJumpBack(ports: JumpBackPorts = {}): JumpBack {
       return false
     }
     const command = `"${helper}" --activate "%1" -DataDir "${dataDir}"`
-    const result = await run(reg, ['add', JUMP_BACK_PROTOCOL_KEY, '/ve', '/d', command, '/f'], {
-      timeout: REGISTRY_TIMEOUT_MS,
-    })
-    if (result.code !== 0) {
-      logForDebugging('jumpback: protocol registration failed', {
-        code: result.code,
-        detail: firstOutputLine(result),
-      })
-      return false
+    // Windows needs both halves of the registration: the empty `URL Protocol`
+    // marker on the root, and the command below it. Either refusal means no
+    // click can be promised, and a half-written key is never remembered as
+    // registered, so the next notification retries both (D7/F-1).
+    const writes = [
+      { key: JUMP_BACK_PROTOCOL_KEY, name: URL_PROTOCOL_VALUE, data: '' },
+      { key: JUMP_BACK_PROTOCOL_COMMAND_KEY, name: null, data: command },
+    ] as const
+    for (const write of writes) {
+      const detail = await addRegistryValue(run, reg, write)
+      if (detail !== undefined) {
+        logForDebugging('jumpback: protocol registration failed', {
+          key: write.key,
+          value: write.name ?? '(default)',
+          detail,
+        })
+        return false
+      }
     }
     registered = true
     logForDebugging('jumpback: protocol registered', { key: JUMP_BACK_PROTOCOL_KEY })
@@ -201,6 +220,9 @@ export function createJumpBack(ports: JumpBackPorts = {}): JumpBack {
         logForDebugging('jumpback: protocol unregistration skipped', { reason: 'system-root-missing' })
         return
       }
+      // The whole scheme root goes, not just the command below it: leaving the
+      // empty `dsh-tui` key behind would contradict "a normal exit leaves no
+      // protocol key" and make the next default-off snapshot look wrong (D7/F-2).
       const result = await run(reg, ['delete', JUMP_BACK_PROTOCOL_KEY, '/f'], {
         timeout: REGISTRY_TIMEOUT_MS,
       })
@@ -316,6 +338,29 @@ export function createJumpBack(ports: JumpBackPorts = {}): JumpBack {
     cleanup,
     sweepStale,
   }
+}
+
+/**
+ * Write one `REG_SZ` value with `reg.exe add`. The named value and the key's
+ * default value share one argv shape; `name === null` means the default value
+ * (`/ve`), the form the T03 precedent read back from a real registry (D7).
+ * @param run - The injected process runner.
+ * @param reg - The absolute `reg.exe` path.
+ * @param write - The key, the value name (null for the default value) and its data.
+ * @returns undefined on success, or the line a failure left for the log.
+ */
+async function addRegistryValue(
+  run: typeof execFileNoThrow,
+  reg: string,
+  write: { readonly key: string, readonly name: string | null, readonly data: string },
+): Promise<string | undefined> {
+  const nameArgs = write.name === null ? ['/ve'] : ['/v', write.name]
+  const result = await run(reg, ['add', write.key, ...nameArgs, '/t', 'REG_SZ', '/d', write.data, '/f'], {
+    timeout: REGISTRY_TIMEOUT_MS,
+  })
+  if (result.code === 0) return undefined
+  const detail = firstOutputLine(result)
+  return detail === '' ? `exited with code ${result.code}` : detail
 }
 
 /**
