@@ -37,6 +37,8 @@ import { logForDebugging } from '../utils/debug.js'
 import { createTerminalNotifier, type NotificationMethod, type TaskNotifications } from '../ink/terminal-notification.js'
 import type { WindowsToastInput, WindowsToastResult } from '../ink/terminal-notification-windows.js'
 import { getTerminalFocused } from '../ink/terminal-focus-state.js'
+import { createJumpBack, type JumpBack } from '../ink/jumpback.js'
+import { getJumpBackState, setJumpBackEnabled } from '../ink/jumpback-state.js'
 import { resolveNotificationMethod } from '../ink/terminal.js'
 import { isEnvTruthy } from '../utils/envUtils.js'
 import { QuestionStore, bindQuestionStore } from './questions.js'
@@ -223,6 +225,13 @@ export interface RuntimeApplyOptions {
   readonly exitSeam?: ProcessExitSeam
 }
 
+/**
+ * The jump-back capability one completion may promise (DESIGN D4/D7/D8), as the
+ * orchestration in `../ink/jumpback.js` provides it. A regression injects a
+ * recorder here; production passes this process's orchestration.
+ */
+export type TaskCompletionJumpBack = Pick<JumpBack, 'probe' | 'ensureProtocol' | 'writeMarker'>
+
 /** Where a Windows task-completion announcement delivers, and where it falls back to. */
 export interface TaskCompletionDelivery {
   /** Live inventory from the running profile; installed packages alone do not own events. */
@@ -233,6 +242,22 @@ export interface TaskCompletionDelivery {
   toast(input: WindowsToastInput): Promise<WindowsToastResult>
   /** The terminal bell, used when the native transport is unavailable. */
   terminal(title: string, message: string): void
+  /**
+   * Jump-back ports (DESIGN D4/D7); absent, this process's orchestration is used
+   * once the setting is on. Nothing is asked at all while the setting is off.
+   */
+  jumpback?: TaskCompletionJumpBack
+  /**
+   * The session this completion belongs to (D8): it names the documented marker
+   * file. Absent or unusable, a stable per-process name is used instead.
+   */
+  sessionId?: string
+  /**
+   * The platform this delivery runs on (DESIGN D4's win32 gate); defaults to
+   * `process.platform`. The regression injects it so the launch decision is
+   * assertable on a POSIX runner, mirroring the toast transport's own port.
+   */
+  platform?: NodeJS.Platform
 }
 
 /** The two live task-notification settings both delivery paths read. */
@@ -340,11 +365,16 @@ export async function deliverTaskCompletionOnWindows(
       logForDebugging('external notifier inventory unavailable; using the built-in Windows notification')
     }
   }
+  // An external notifier owns this completion: only the toast this process
+  // ships can come back here, so probing there would spend half a second and
+  // leave a marker file nobody can use.
+  const launch = externalNotifierActive ? undefined : await jumpBackLaunch(delivery)
   const result = await delivery.toast({
     title,
     message,
     externalNotifierActive,
     canDispatch: delivery.canDispatch,
+    launch,
   })
   if (result.status !== 'unavailable' || delivery.canDispatch?.() === false) return
   // AC-5 wants the bell, not a silent loss - and the reason is what makes the
@@ -355,6 +385,80 @@ export async function deliverTaskCompletionOnWindows(
   const cause = result.detail === undefined ? result.reason : `${result.reason}: ${result.detail}`
   delivery.terminal(title, message)
   logForDebugging(`windows toast unavailable (${cause}); using the terminal fallback`)
+}
+
+/** Where the documented activation URI starts (DESIGN §9.3); the helper parses it (D6). */
+const JUMP_BACK_LAUNCH_PREFIX = 'dsh-tui:activate?m='
+
+/**
+ * A session id becomes a file name in the marker directory (D8), so only
+ * characters that cannot introduce a path separator are admitted. Same shape
+ * `writeMarker` enforces (T06): this copy only picks the name, while the
+ * downstream gate is what keeps the directory safe (R8).
+ */
+const MARKER_FILE_SESSION = /^[A-Za-z0-9._-]{1,128}$/u
+
+/** The one orchestration this process shares between delivery and exit cleanup. */
+let sharedJumpBack: JumpBack | undefined
+
+/**
+ * The jump-back orchestration for this process: one instance, so the protocol
+ * key it registered and the marker files it wrote are exactly what `cleanup()`
+ * removes (T06). A per-notification instance would lose that bookkeeping and
+ * leak both.
+ * @returns This process's orchestration.
+ */
+function jumpBackForProcess(): JumpBack {
+  sharedJumpBack ??= createJumpBack()
+  return sharedJumpBack
+}
+
+/**
+ * The marker file's name for one completion (D8): the backend's session id when
+ * it is a safe file name, else a name for this process. A missing id is no
+ * reason to skip the documented file - the toast still names this pane.
+ * @param sessionId - The id the delivery reported, if any.
+ * @returns A file name that cannot leave the marker directory.
+ */
+function markerFileName(sessionId: string | undefined): string {
+  return sessionId !== undefined && MARKER_FILE_SESSION.test(sessionId)
+    ? sessionId
+    : `process-${process.pid}`
+}
+
+/**
+ * Ask whether this completion may carry a jump-back URI (DESIGN D4/D7/D8).
+ *
+ * The switch and the marker come from the published leaf state (L-080): the
+ * pane-title writer and this path read the same decision, so a toast can never
+ * promise a pane the title did not tag. The marker file is refreshed before the
+ * probe (AC-9), the probe must prove exactly one target (AC-3), and a refused
+ * protocol registration also answers no URI - a click whose handler is missing
+ * is a dead click (D7). Every skip leaves its stage and reason in the debug log.
+ * @param delivery - The ports for this completion; `jumpback` defaults to this
+ *   process's orchestration.
+ * @returns The activation URI, or undefined for the plain toast.
+ */
+async function jumpBackLaunch(delivery: TaskCompletionDelivery): Promise<string | undefined> {
+  // The title writer tags a pane only on Windows; promising a jump anywhere
+  // else is the L-080 dead point. A disabled switch comes first and costs nothing.
+  const { enabled, marker } = getJumpBackState()
+  if (!enabled || marker === null || (delivery.platform ?? process.platform) !== 'win32') return undefined
+  try {
+    const jumpback = delivery.jumpback ?? jumpBackForProcess()
+    jumpback.writeMarker(markerFileName(delivery.sessionId), marker)
+    const probe = await jumpback.probe(marker)
+    if (!probe.capable) return undefined
+    if (!await jumpback.ensureProtocol(probe.helperPath)) return undefined
+    return `${JUMP_BACK_LAUNCH_PREFIX}${marker}`
+  } catch (error) {
+    // The delivery path is fire-and-forget: a port that throws must cost the
+    // jump-back promise, never the notification itself (AC-3/AC-10).
+    logForDebugging('jumpback: the launch could not be prepared; sending the plain toast', {
+      detail: error instanceof Error ? error.message : String(error),
+    })
+    return undefined
+  }
 }
 
 /**
@@ -383,6 +487,13 @@ export async function apply(ctx: Context, runtimeConfig: RuntimeConfig<Config>, 
     method: config.notificationMethod ?? 'auto',
   })
   configureTaskNotifications(config.taskNotifications, config.notificationMethod)
+  // Jump-back (DESIGN D4/D7/D8): one orchestration per process, cleaned up on
+  // this fiber's teardown. Creating it touches nothing - the registry and the
+  // marker directory are only reached after the user turns the setting on and a
+  // notification is delivered (AC-1). `cleanup()` is a no-op for a process that
+  // never registered or wrote (T06), so an off launch exits exactly as before.
+  const jumpBack = jumpBackForProcess()
+  ctx.effect(() => () => jumpBack.cleanup())
   /**
    * Whether a task completion is announced at all: the one gate, asked before
    * the Windows transport so a suppressed notification never costs a PowerShell
@@ -412,6 +523,10 @@ export async function apply(ctx: Context, runtimeConfig: RuntimeConfig<Config>, 
       canDispatch: () => channelOwnerCurrent(rawChannel) && notificationSettings.condition !== 'off',
       toast: showWindowsToast,
       terminal: (fallbackTitle, fallbackMessage) => ringTaskCompletion(taskNotifier, notificationSettings, fallbackTitle, fallbackMessage),
+      jumpback: jumpBack,
+      // Read at announce time: the marker file names the session that just
+      // completed, not whichever session this process mounted at boot (D8).
+      sessionId: rawChannel.sessionRef.sessionId,
     })
   }
   // /restart handoff diagnosis: the replacement process is marked by env and
@@ -1383,6 +1498,10 @@ export async function apply(ctx: Context, runtimeConfig: RuntimeConfig<Config>, 
         // Must mirror Config's union (`src/dsh-adapter/index.ts`): a method
         // missing here is rejected by /settings and never reaches the runtime.
         notificationMethod: Schema.union(['auto', 'osc9', 'bel', 'windows']),
+        // Must mirror Config's `jumpBack` (DESIGN D1). No default on purpose
+        // (D1a): applyDisplay resolves `?? config.jumpBack ?? false`, so an
+        // explicit cordis.yml value stays decisive while the user layer is unset.
+        jumpBack: Schema.boolean(),
         // Same no-default rule: applyDisplay resolves `?? config.mermaidDiagrams ?? true`.
         mermaidDiagrams: Schema.boolean(),
         // Code-frame shape; unset keeps the light rail frame.
@@ -1523,6 +1642,7 @@ export async function apply(ctx: Context, runtimeConfig: RuntimeConfig<Config>, 
       smoothStreaming?: boolean
       taskNotifications?: TaskNotifications
       notificationMethod?: NotificationMethod
+      jumpBack?: boolean
       mermaidDiagrams?: boolean
       codeFrameStyle?: CodeFrameStyle
       mathRendering?: MathRendering
@@ -1610,6 +1730,19 @@ export async function apply(ctx: Context, runtimeConfig: RuntimeConfig<Config>, 
         writeLangPref(value.lang)
       }
     }
+    /**
+     * Jump-back opt-in (DESIGN D1/D4): publish the resolved switch to the leaf
+     * state the pane-title writer and the pre-toast probe both read (L-080).
+     * The first enable of this process sweeps stale marker files; the sweep is
+     * win32-gated inside the orchestration, so no second platform judgment is
+     * made here (T06).
+     * @param enabled - The resolved `jumpBack` setting.
+     */
+    const applyJumpBack = (enabled: boolean): void => {
+      const firstEnable = enabled && !getJumpBackState().enabled
+      setJumpBackEnabled(enabled)
+      if (firstEnable) jumpBack.sweepStale()
+    }
     // Display preferences ride the same namespace: /settings writes them
     // live and future render consumers observe the channel version bump.
     const applyDisplay = (value: SettingsValue): void => {
@@ -1630,6 +1763,7 @@ export async function apply(ctx: Context, runtimeConfig: RuntimeConfig<Config>, 
       channel.setExpandEditor(value.expandEditor ?? config.expandEditor ?? true)
       channel.setSmoothStreaming(value.smoothStreaming ?? config.smoothStreaming ?? true)
       configureTaskNotifications(value.taskNotifications ?? config.taskNotifications, value.notificationMethod ?? config.notificationMethod)
+      applyJumpBack(value.jumpBack ?? config.jumpBack ?? false)
       applyMermaidDiagrams(value.mermaidDiagrams ?? config.mermaidDiagrams)
       applyCodeFrameStyle(value.codeFrameStyle ?? config.codeFrameStyle)
       applyMathRendering(resolveMathRendering(value, config))
@@ -1899,6 +2033,13 @@ export async function apply(ctx: Context, runtimeConfig: RuntimeConfig<Config>, 
         {
           ...settingField('notificationMethod'),
           format: value => String(value ?? config.notificationMethod ?? 'auto'),
+        },
+        {
+          ...settingField('jumpBack'),
+          format(value: unknown): string {
+            // Unset in settings.yaml: the effective default is off (D1a).
+            return String(typeof value === 'boolean' ? value : config.jumpBack === true)
+          },
         },
         {
           ...settingField('codeFrameStyle'),
