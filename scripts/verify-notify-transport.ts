@@ -163,6 +163,49 @@ await check('the toast XML carries the title and the summary, and nothing else',
   assert.ok(nasty.includes('🐋'), 'the emoji must survive escaping')
 })
 
+await check('a toast without a launch URI is the document #1637 shipped, byte for byte', () => {
+  // Both documents are spelled out rather than built from `toastXml`: this pins
+  // an existing document, so an expectation that moves with the function under
+  // test would pin nothing (D9 - the plain toast may not change at all).
+  assert.equal(
+    toastXml({ title: TITLE, message: '摘要一行' }),
+    '<toast><visual><binding template="ToastGeneric"><text>dsh-TUI · 任务已完成</text><text>摘要一行</text></binding></visual></toast>',
+    'no launch means no attribute on the root: the toast every existing caller sends must not change',
+  )
+  assert.equal(
+    toastXml({ title: TITLE }),
+    '<toast><visual><binding template="ToastGeneric"><text>dsh-TUI · 任务已完成</text></binding></visual></toast>',
+    'and the title-only document is unchanged too',
+  )
+})
+
+await check('a launch URI makes the toast a protocol activation, escaped', async () => {
+  const launch = 'dsh-tui:activate?m=0123456789abcdef'
+  const xml = toastXml({ title: TITLE, message: '摘要一行', launch })
+  assert.ok(
+    xml.startsWith(`<toast activationType="protocol" launch="${launch}">`),
+    `both attributes belong on the toast root - on <binding> the shell ignores them: ${xml}`,
+  )
+  assert.deepEqual(textNodes(xml), [TITLE, '摘要一行'], 'the activation adds attributes, not content')
+
+  // Spelled out like NASTY_ESCAPED, and for the same reason: an expectation
+  // built by the escaper under test cannot fail when that escaper breaks.
+  const nastyLaunch = 'dsh-tui:activate?m=a&b<c>"d"'
+  assert.ok(
+    toastXml({ title: TITLE, launch: nastyLaunch })
+      .startsWith('<toast activationType="protocol" launch="dsh-tui:activate?m=a&amp;b&lt;c&gt;&quot;d&quot;">'),
+    'a launch carrying markup must not be able to end the attribute early',
+  )
+  assert.ok(!toastXml({ title: TITLE, launch: '' }).includes('launch='), 'an empty launch is no activation at all: clicking it would open nothing')
+
+  // The wiring no type check covers (L-079): `show()` builds the XML from the
+  // input, so a launch that stops at `WindowsToastInput` passes every assertion
+  // above while the delivered toast stays inert.
+  const h = harness()
+  await h.transport.notify({ title: TITLE, message: '摘要一行', launch })
+  assert.equal(h.runner.calls.at(-1)?.input, xml, 'the launch has to reach the XML handed to the shell')
+})
+
 await check('an over-long summary is clipped to the two lines the toast can show', () => {
   // Windows clips the body itself at around four rendered lines and stops the
   // sentence with no ellipsis at all (UAT screenshot, 2026-10-16), so the

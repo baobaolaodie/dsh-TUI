@@ -199,10 +199,11 @@ function spawnConsoleLess(file: string, args: readonly string[], options?: ExecF
 // --- the pure layer (D10) ------------------------------------------------------
 
 /**
- * Escape the four characters that would otherwise end a text node (AC-8). A
- * summary is arbitrary model output, so nothing may reach the XML unescaped.
- * @param text Raw text from the renderer.
- * @returns The same text, safe inside an XML text node.
+ * Escape the four characters that would otherwise end a text node or a
+ * double-quoted attribute (AC-8). A summary is arbitrary model output, so
+ * nothing may reach the XML unescaped.
+ * @param text Raw text from the renderer, or a launch URI.
+ * @returns The same text, safe inside an XML text node or a quoted attribute.
  */
 export function escapeXmlText(text: string): string {
   // `&` first: escaping it after `&lt;` would double-escape the entities.
@@ -219,6 +220,13 @@ export interface ToastContent {
   title: string
   /** Second line: the single-line summary. Omitted when empty, clipped by {@link clampSummary}. */
   message?: string
+  /**
+   * The protocol activation URI a click opens (D9), or undefined for a toast
+   * that only informs. The caller sets it once a probe has proved exactly one
+   * target (AC-3): a URI that resolves nothing is a click that does nothing,
+   * and this transport cannot tell the two apart.
+   */
+  launch?: string
 }
 
 /**
@@ -255,7 +263,7 @@ function clampSummary(message: string): string {
 
 /**
  * Build the ToastGeneric document (D10).
- * @param content Title and summary.
+ * @param content Title, summary and the optional activation URI.
  * @returns The XML handed to `XmlDocument.LoadXml` on the PowerShell side.
  */
 export function toastXml(content: ToastContent): string {
@@ -263,7 +271,14 @@ export function toastXml(content: ToastContent): string {
   if (content.message !== undefined && content.message !== '') {
     texts.push(`<text>${escapeXmlText(clampSummary(content.message))}</text>`)
   }
-  return `<toast><visual><binding template="ToastGeneric">${texts.join('')}</binding></visual></toast>`
+  // D9: without a launch the document has to stay byte for byte what it was, so
+  // the plain toast is the absence of an attribute rather than a second
+  // template. `protocol` is what makes the shell hand the URI to the registered
+  // `dsh-tui:` handler instead of treating a click as a dismiss.
+  const activation = content.launch !== undefined && content.launch !== ''
+    ? ` activationType="protocol" launch="${escapeXmlText(content.launch)}"`
+    : ''
+  return `<toast${activation}><visual><binding template="ToastGeneric">${texts.join('')}</binding></visual></toast>`
 }
 
 // --- the port types -----------------------------------------------------------
@@ -350,6 +365,8 @@ export interface WindowsToastInput {
   title: string
   /** Single-line summary; empty shows the title alone. */
   message?: string
+  /** Protocol activation URI a click opens (D9); omitted, the toast only informs. See {@link ToastContent.launch}. */
+  launch?: string
   /** The host confirmed an enabled, active DSH notifier in its live inventory. */
   externalNotifierActive?: boolean
   /** Recheck live permission before dispatch, without repeating the focus gate. */
@@ -445,7 +462,7 @@ export function createWindowsToastTransport(options: WindowsToastTransportOption
   }
 
   async function show(input: WindowsToastInput, powershell: string): Promise<WindowsToastResult> {
-    const xml = toastXml({ title: input.title, message: input.message })
+    const xml = toastXml({ title: input.title, message: input.message, launch: input.launch })
     const started = now()
     const result = await toastHost(powershell, ['-NoProfile', '-Command', TOAST_SCRIPT], { input: xml, timeout: TOAST_TIMEOUT_MS })
     if (result.code !== 0) {
