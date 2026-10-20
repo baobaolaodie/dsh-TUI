@@ -499,24 +499,69 @@ async function jumpBackLaunch(target: JumpBackTarget): Promise<string | undefine
 }
 
 /**
+ * Publish the documented marker file as soon as the setting is turned on (D8).
+ *
+ * The notification path refreshes it per completion, but between the flip and
+ * the first completion an external reader already sees the switch on and would
+ * find no file for the current session (AC-9). Only a session whose id can name
+ * the documented `<session>.json` is published: the per-completion fallback
+ * (`process-<pid>.json`) exists for a toast that still needs a name, while here
+ * a reader looking the session up would find nothing either way.
+ *
+ * Best-effort by the same rule as the delivery path: the switch was already
+ * published, and a throwing port may cost the seam, never the settings edit.
+ * @param jumpback - This process's orchestration.
+ * @param sessionId - The current session's id, when the host has one yet.
+ * @param platform - The host platform; only Windows tags panes (D2).
+ */
+function refreshEnabledMarker(
+  jumpback: Pick<JumpBack, 'writeMarker'>,
+  sessionId: string | undefined,
+  platform: NodeJS.Platform,
+): void {
+  const { marker } = getJumpBackState()
+  if (platform !== 'win32' || marker === null) return
+  if (sessionId === undefined || !MARKER_FILE_SESSION.test(sessionId)) return
+  try {
+    jumpback.writeMarker(sessionId, marker)
+  } catch (error) {
+    logForDebugging('jumpback: the enabled marker file could not be refreshed', {
+      detail: error instanceof Error ? error.message : String(error),
+    })
+  }
+}
+
+/**
  * Publish one jump-back settings resolution and act on the transition (DESIGN
- * D1/D4). Enabling sweeps stale marker files once; disabling is a cleanup point
- * of its own (DESIGN §3, AC-1/AC-9), not merely a title rewrite.
+ * D1/D4/D8). Enabling sweeps stale marker files once and refreshes the
+ * documented seam for the current session; disabling is a cleanup point of its
+ * own (DESIGN §3, AC-1/AC-9), not merely a title rewrite.
  *
  * `cleanup()` removes only what THIS process registered or wrote - another
  * instance's protocol key survives (R4) - and is a no-op for a process that
  * never did either (T06), so a disabled boot path is unchanged. The sweep is
  * win32-gated inside the orchestration, so no second platform judgment is made
- * here. Exported for the regression, which drives the same transition the
- * settings watch calls.
+ * for it; the marker refresh needs the platform here because it happens before
+ * any port proves the host. Exported for the regression, which drives the same
+ * transition the settings watch calls.
  * @param jumpback - This process's orchestration.
  * @param enabled - The resolved `jumpBack` setting.
+ * @param sessionId - The session this process currently drives, if any.
+ * @param platform - The host platform; defaults to this process's, injectable
+ *   for the regression, which runs on POSIX CI.
  */
-export function applyJumpBackSetting(jumpback: Pick<JumpBack, 'sweepStale' | 'cleanup'>, enabled: boolean): void {
+export function applyJumpBackSetting(
+  jumpback: Pick<JumpBack, 'sweepStale' | 'cleanup' | 'writeMarker'>,
+  enabled: boolean,
+  sessionId?: string,
+  platform: NodeJS.Platform = process.platform,
+): void {
   const wasEnabled = getJumpBackState().enabled
   setJumpBackEnabled(enabled)
-  if (enabled && !wasEnabled) jumpback.sweepStale()
-  else if (!enabled && wasEnabled) void jumpback.cleanup()
+  if (enabled && !wasEnabled) {
+    jumpback.sweepStale()
+    refreshEnabledMarker(jumpback, sessionId, platform)
+  } else if (!enabled && wasEnabled) void jumpback.cleanup()
 }
 
 /**
@@ -1808,7 +1853,7 @@ export async function apply(ctx: Context, runtimeConfig: RuntimeConfig<Config>, 
       channel.setExpandEditor(value.expandEditor ?? config.expandEditor ?? true)
       channel.setSmoothStreaming(value.smoothStreaming ?? config.smoothStreaming ?? true)
       configureTaskNotifications(value.taskNotifications ?? config.taskNotifications, value.notificationMethod ?? config.notificationMethod)
-      applyJumpBackSetting(jumpBack, value.jumpBack ?? config.jumpBack ?? false)
+      applyJumpBackSetting(jumpBack, value.jumpBack ?? config.jumpBack ?? false, rawChannel.sessionRef.sessionId)
       applyMermaidDiagrams(value.mermaidDiagrams ?? config.mermaidDiagrams)
       applyCodeFrameStyle(value.codeFrameStyle ?? config.codeFrameStyle)
       applyMathRendering(resolveMathRendering(value, config))

@@ -715,33 +715,77 @@ await check('off Windows the sweep deletes nothing', () => {
 /** Stands in for the orchestration's lifecycle side: a setting flip calls exactly these. */
 function recordingLifecycle() {
   const steps: string[] = []
+  const markerWrites: [string, string][] = []
   return {
     steps,
+    markerWrites,
     jumpback: {
       sweepStale(): void { steps.push('sweepStale') },
       async cleanup(): Promise<void> { steps.push('cleanup') },
+      writeMarker(sessionId: string, marker: string): string | undefined {
+        steps.push('writeMarker')
+        markerWrites.push([sessionId, marker])
+        return undefined
+      },
     },
   }
 }
 
-await check('flipping the setting cleans up on disable and sweeps once on enable', () => {
+/** The session a settings flip names, standing in for `rawChannel.sessionRef.sessionId`. */
+const FLIP_SESSION = 'session-flip'
+
+await check('flipping the setting cleans up on disable, sweeps once on enable, and refreshes the marker file', () => {
   const marker = enableJumpBack()
   const port = recordingLifecycle()
-  applyJumpBackSetting(port.jumpback, false)
+  applyJumpBackSetting(port.jumpback, false, FLIP_SESSION, 'win32')
   assert.deepEqual(
     port.steps,
     ['cleanup'],
     'on→off is a cleanup point of its own: the key and marker files this process left must go (AC-1/AC-9)',
   )
   assert.equal(getJumpBackState().enabled, false)
-  applyJumpBackSetting(port.jumpback, false)
+  applyJumpBackSetting(port.jumpback, false, FLIP_SESSION, 'win32')
   assert.deepEqual(port.steps, ['cleanup'], 'republishing off publishes nothing and cleans up nothing twice')
 
-  applyJumpBackSetting(port.jumpback, true)
-  assert.deepEqual(port.steps, ['cleanup', 'sweepStale'], 'off→on sweeps stale marker files once (D8)')
+  applyJumpBackSetting(port.jumpback, true, FLIP_SESSION, 'win32')
+  assert.deepEqual(
+    port.steps,
+    ['cleanup', 'sweepStale', 'writeMarker'],
+    'off→on sweeps stale marker files once and refreshes the documented seam for the current session (D8)',
+  )
+  assert.deepEqual(
+    port.markerWrites,
+    [[FLIP_SESSION, marker]],
+    'the enable-time refresh names the current session with this pane\'s marker, so an external reader finds it before the first completion (AC-9)',
+  )
   assert.equal(getJumpBackState().marker, marker, 'the flip keeps this pane\'s identity (AC-2)')
-  applyJumpBackSetting(port.jumpback, true)
-  assert.deepEqual(port.steps, ['cleanup', 'sweepStale'], 'republishing on does not sweep again')
+  applyJumpBackSetting(port.jumpback, true, FLIP_SESSION, 'win32')
+  assert.deepEqual(port.steps, ['cleanup', 'sweepStale', 'writeMarker'], 'republishing on neither sweeps nor refreshes again')
+  assert.deepEqual(port.markerWrites, [[FLIP_SESSION, marker]], 'repeated true writes the seam exactly once (D8)')
+
+  // The refresh is only a Windows, session-named promise: another host or a
+  // boot without a session yet has no documented file to publish (D2/D8).
+  applyJumpBackSetting(port.jumpback, false, FLIP_SESSION, 'win32')
+  applyJumpBackSetting(port.jumpback, true, undefined, 'win32')
+  applyJumpBackSetting(port.jumpback, false, FLIP_SESSION, 'win32')
+  applyJumpBackSetting(port.jumpback, true, FLIP_SESSION, 'linux')
+  assert.deepEqual(
+    port.markerWrites,
+    [[FLIP_SESSION, marker]],
+    'off Windows, or with no session to name, enabling publishes no marker file',
+  )
+})
+
+await check('an enable whose marker refresh fails keeps the switch on and leaves the reason', async () => {
+  setJumpBackEnabled(false)
+  const throwing = {
+    sweepStale(): void {},
+    async cleanup(): Promise<void> {},
+    writeMarker(): string | undefined { throw new Error('marker port exploded') },
+  }
+  const { lines } = await captureDebug(() => applyJumpBackSetting(throwing, true, FLIP_SESSION, 'win32'))
+  assert.equal(getJumpBackState().enabled, true, 'a failed refresh must not roll the switch back')
+  assert.match(lines.join(''), /enabled marker file could not be refreshed/u, 'the reason stays in the log instead of the user losing the switch')
 })
 
 // --- the toast wiring (T07, D4/D7/D8, AC-3/AC-7/AC-10) -----------------------
