@@ -33,8 +33,8 @@
 //
 // Log: <DataDir>/notify/jumpback.log (default %USERPROFILE%\.dsh-tui). Every run leaves its
 // stages and, on failure, the reason there. The shell starts this process detached, so the
-// log is the only trace a click leaves behind; L-077 is why the data directory is an
-// explicit argument instead of an inherited environment variable.
+// log is the only trace a click leaves behind; the data directory is an explicit argument
+// rather than an inherited environment variable, because the shell starts us with none.
 //
 // Restrictions (do not "modernize" this file): it has to compile with the in-box csc.exe
 // (.NET Framework 4.x) against the framework's UIAutomationClient/UIAutomationTypes, so it
@@ -203,7 +203,7 @@ internal static class JumpBack
         return raw;
     }
 
-    // R8: the marker is the only thing a toast carries and it arrives as an argument, so only
+    // The marker is the only thing a toast carries and it arrives as an argument, so only
     // a conservative ASCII token alphabet is accepted. Explicit ranges (not char.IsLetter)
     // keep non-ASCII letters out of a value that is matched against a window title.
     private static bool ValidMarker(string marker)
@@ -260,7 +260,7 @@ internal static class JumpBack
         return tabHits == 1;
     }
 
-    // The click path (DESIGN D6). Every step is verified, and when a step fails the helper
+    // The click path (D6). Every step is verified, and when a step fails the helper
     // stops there: it never reports success for a jump it could not prove.
     private static int Activate(string marker)
     {
@@ -270,7 +270,7 @@ internal static class JumpBack
         FindHits(marker, out panes, out tabs);
 
         // The same predicate the probe used decides here as well: a jump is only attempted for
-        // the identity the probe called capable (L-080), and ambiguity is rejected before any
+        // the identity the probe called capable, and ambiguity is rejected before any
         // window is touched so a marker carried by two panes cannot pull one of them forward.
         if (!IsCapable(panes.Count, tabs.Count))
         {
@@ -479,7 +479,7 @@ internal static class JumpBack
 
     // ADR-0016: SetForegroundWindow returns true without moving the window while the
     // foreground lock holds, so each attempt asks the desktop instead of trusting the call.
-    // Failing here is a known UAT risk (DESIGN R1); the window stays where it was and the
+    // Failing here is a known UAT risk; the window stays where it was and the
     // stage is reported rather than a success being faked.
     private static bool BringToForeground(IntPtr hwnd)
     {
@@ -666,7 +666,7 @@ internal static class JumpBack
         }
     }
 
-    // L-077: an external host (the shell) starts this process outside the TUI's environment,
+    // An external host (the shell) starts this process outside the TUI's environment,
     // so the data directory is passed explicitly on the command line. The fallback mirrors
     // what src/utils/paths.ts resolves when the helper is run by hand.
     private static string ResolveLogPath(string dataDir)

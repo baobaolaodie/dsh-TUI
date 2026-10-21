@@ -1,5 +1,5 @@
 /**
- * Jump-back identity and capability contracts (DESIGN D2/D4/D7/D8, AC-1..AC-9).
+ * Jump-back identity and capability contracts.
  *
  * What this suite owns: the pane marker (minted once, published to the title
  * writer and to the activation URI), the pre-toast probe, the lazy protocol
@@ -16,7 +16,7 @@
  * spawning, the helper path is a string that is never compiled, and each
  * orchestration gets its own temporary data directory. The environment is
  * redirected before the import and the final assertion proves the production
- * data directory was never reached (L-049).
+ * data directory was never reached.
  *
  * Run: node --import tsx/esm scripts/verify-jumpback.ts
  */
@@ -35,7 +35,7 @@ const sandbox = mkdtempSync(join(tmpdir(), 'dsh-jumpback-'))
 const sandboxHome = join(sandbox, 'home')
 mkdirSync(sandboxHome)
 // `DATA_DIR` is a module-level constant: the redirect has to be in place before
-// the first import that reads it, or the suite writes the user's profile (L-049).
+// the first import that reads it, or the suite writes the user's profile.
 process.env.HOME = sandboxHome
 process.env.USERPROFILE = sandboxHome
 process.env.DSH_HOME = join(sandbox, 'dsh-home')
@@ -75,7 +75,7 @@ const HELPER = join(sandbox, 'helper', 'activate.exe')
 const PROFILE = join(sandbox, 'profile')
 const MARKER_DIR = join(PROFILE, 'notify', 'jumpback')
 /**
- * The two argv rows a full registration writes (D7/F-1). A fresh write and a
+ * The two argv rows a full registration writes. A fresh write and a
  * rewrite after an external change share them, so the self-heal expectations
  * cannot drift from the registration contract.
  */
@@ -104,7 +104,7 @@ function registryValueId(key: string, name: string | null): string {
  * so a later `reg query` answers what earlier `reg add` calls wrote. A case can
  * delete or rewrite a value between notifications, which is how an external
  * change (another instance, the user's registry tool) reaches the orchestration
- * without touching HKCU (R4).
+ * without touching HKCU.
  * @param outcome - Overrides the default answers for the `reg.exe` calls.
  */
 function recordingRunner(
@@ -194,7 +194,7 @@ function makeJumpBack(options: {
   helper?: string | null
   now?: () => number
   dataDir?: string
-  /** Liveness for marker owners; the production default asks the OS (R4). */
+  /** Liveness for marker owners; the production default asks the OS. */
   pidAlive?: (pid: number) => boolean
 } = {}) {
   const runner = options.run ?? recordingRunner()
@@ -290,7 +290,7 @@ await check('the pane title carries the marker only on Windows, once enabled', (
   )
 })
 
-// --- one published identity (D2, L-080) ---------------------------------------
+// --- one published identity ---------------------------------------------------
 
 await check('enabling mints one 16-hex marker and publishes it once', () => {
   assert.deepEqual(getJumpBackState(), { enabled: false, marker: null }, 'a fresh process starts off with no identity')
@@ -350,7 +350,7 @@ await check('exit 0 is capable and names the helper, with the data directory pas
   assert.deepEqual(
     runner.calls[0].args,
     ['--probe', MARKER, '-DataDir', PROFILE],
-    'L-077: the shell-started helper inherits no environment, so the data directory travels as argv',
+    'the shell-started helper inherits no environment, so the data directory travels as argv',
   )
   assert.equal(runner.calls[0].timeout, 1_500, 'D4 budgets 1.5 s for a probe; a stuck helper must not delay the notification')
 })
@@ -407,7 +407,7 @@ await check('registration writes the scheme root marker and the command, quoted'
   assert.deepEqual(
     runner.calls.map(call => call.args),
     REGISTRATION_WRITES,
-    'Windows resolves dsh-tui: only when the root carries the empty URL Protocol value; the command below it is the default value (D7/F-1)',
+    'Windows resolves dsh-tui: only when the root carries the empty URL Protocol value; the command below it is the default value',
   )
   assert.ok(
     runner.calls.every(call => typeof call.timeout === 'number' && call.timeout > 0),
@@ -422,7 +422,7 @@ await check('registration is verified after the first write, and a burst of noti
   assert.deepEqual(
     cached.runner.calls.map(call => call.args[0]),
     ['add', 'add', 'query', 'query'],
-    'the second notification proves both values are still ours instead of trusting the cache (D7/R4)',
+    'the second notification proves both values are still ours instead of trusting the cache',
   )
 
   const burst = makeJumpBack()
@@ -451,7 +451,7 @@ await check('a key deleted outside this process is written again before the next
       vanished === 'root value'
         ? [['query', PROTOCOL_KEY, '/v', 'URL Protocol'], ...REGISTRATION_WRITES]
         : [['query', PROTOCOL_KEY, '/v', 'URL Protocol'], ['query', PROTOCOL_COMMAND_KEY, '/ve'], ...REGISTRATION_WRITES],
-      `${vanished} gone: the cache is only a hint; both values are rewritten before the promise (D7/R4)`,
+      `${vanished} gone: the cache is only a hint; both values are rewritten before the promise`,
     )
   }
 })
@@ -473,7 +473,7 @@ await check('a command rewritten to another helper is replaced before the next n
       ['query', PROTOCOL_COMMAND_KEY, '/ve'],
       ...REGISTRATION_WRITES,
     ],
-    'a value that points at someone else\'s helper is not this process\'s registration (R4)',
+    'a value that points at someone else\'s helper is not this process\'s registration',
   )
   assert.equal(
     runner.values.get(registryValueId(PROTOCOL_COMMAND_KEY, null)),
@@ -492,7 +492,7 @@ await check('either refused value answers false and is retried later', async () 
     assert.equal(result, false, `refusing write ${refused + 1} must not claim the key is registered`)
     assert.equal(runner.calls.length, refused + 1, 'a refused write stops the pair: the other value alone is not a registration')
     assert.match(lines.join(''), /protocol registration failed/u, 'and the refusal keeps its cause')
-    assert.equal(await instance.ensureProtocol(HELPER), true, 'and must not be cached: the next notification retries (D7/R3)')
+    assert.equal(await instance.ensureProtocol(HELPER), true, 'and must not be cached: the next notification retries')
     assert.equal(runner.calls.length, refused + 1 + 2, 'the retry writes both values again')
   }
 })
@@ -522,9 +522,9 @@ await check('unregistering deletes the whole scheme root, and a key that is alre
   assert.deepEqual(
     runner.calls.map(call => call.args),
     [['delete', PROTOCOL_KEY, '/f']],
-    'the scheme root, force-deleted: deleting only `...\\command` would leave the empty protocol key behind (F-2)',
+    'the scheme root, force-deleted: deleting only `...\\command` would leave the empty protocol key behind',
   )
-  assert.match(lines.join(''), /unregistration failed/u, 'another instance may have removed it first; the refusal is recorded, not thrown (R4)')
+  assert.match(lines.join(''), /unregistration failed/u, 'another instance may have removed it first; the refusal is recorded, not thrown')
 })
 
 await check('after unregistering, no protocol key is left behind', async () => {
@@ -537,7 +537,7 @@ await check('after unregistering, no protocol key is left behind', async () => {
   assert.deepEqual(
     protocolKeys(runner.calls),
     [],
-    'a normal exit leaves no protocol key at all, not just no command subkey (AC-1 / CHANGE line 3)',
+    'a normal exit leaves no protocol key at all, not just no command subkey',
   )
 })
 
@@ -606,7 +606,7 @@ await check('cleanup removes the key it registered and the files it wrote, once'
     'both values this process wrote are removed by the one root deletion, and nothing else is touched',
   )
   assert.equal(existsSync(markerPath), false, 'the marker file this process wrote is removed')
-  assert.equal(existsSync(foreign), true, 'another instance\'s file is not ours to delete (R4)')
+  assert.equal(existsSync(foreign), true, 'another instance\'s file is not ours to delete')
   await instance.cleanup()
   assert.equal(runner.calls.length, 3, 'cleanup is idempotent')
 })
@@ -635,7 +635,7 @@ await check('cleanup yields the shared key to a live instance, and removes it wh
   assert.deepEqual(
     live.runner.calls.map(call => call.args[0]),
     ['add', 'add'],
-    'a live sibling still needs the shared key: removing it would make its next toast click dead (R4)',
+    'a live sibling still needs the shared key: removing it would make its next toast click dead',
   )
   assert.equal(existsSync(sibling), true, 'the sibling keeps its identity')
   assert.ok(own !== undefined)
@@ -652,7 +652,7 @@ await check('cleanup yields the shared key to a live instance, and removes it wh
   assert.deepEqual(
     quiet.runner.calls.map(call => call.args[0]),
     ['add', 'add', 'delete'],
-    'a dead owner is not a live instance: the last one out removes the key (D7/F-2)',
+    'a dead owner is not a live instance: the last one out removes the key',
   )
   assert.deepEqual(
     quiet.runner.calls.at(-1)?.args,
@@ -788,7 +788,7 @@ await check('an enable whose marker refresh fails keeps the switch on and leaves
   assert.match(lines.join(''), /enabled marker file could not be refreshed/u, 'the reason stays in the log instead of the user losing the switch')
 })
 
-// --- the toast wiring (T07, D4/D7/D8, AC-3/AC-7/AC-10) -----------------------
+// --- the toast wiring ---------------------------------------------------------
 
 type Step = { name: string, args: string[] }
 
@@ -883,7 +883,7 @@ await check('an off switch, or a non-Windows host, sends the plain toast without
   enableJumpBack()
   const elsewhere = recordingJumpBack()
   const posix = await deliver({ jumpback: elsewhere.jumpback, platform: 'linux' })
-  assert.deepEqual(elsewhere.steps, [], 'the title is untagged here, so a promised jump would be the L-080 dead point')
+  assert.deepEqual(elsewhere.steps, [], 'the title is untagged here, so a promised jump would be one that can never be kept')
   assert.equal(posix.toastInputs[0].launch, undefined)
 })
 
@@ -903,7 +903,7 @@ await check('a capable probe prepares the documented URI, in the documented orde
   assert.equal(
     delivery.toastInputs[0].launch,
     `dsh-tui:activate?m=${marker}`,
-    'the URI carries the same published marker the title carries (L-080)',
+    'the URI carries the same published marker the title carries',
   )
 })
 
@@ -982,7 +982,7 @@ await check('the marker file is named for the session, or for this process when 
   }
 })
 
-// --- isolation self-proof (L-049) ---------------------------------------------
+// --- isolation self-proof ------------------------------------------------------
 
 assert.equal(DATA_DIR, join(sandboxHome, '.dsh-tui'), 'the throwaway home must own DATA_DIR, or the redirect ran after the import')
 assert.equal(existsSync(join(DATA_DIR, 'notify')), false, 'no case reached the production data directory: every orchestration was given its own')

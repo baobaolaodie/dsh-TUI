@@ -1,5 +1,5 @@
 /**
- * The Windows toast transport (DESIGN D3/D4/D8/D10/D11/D12): the only place the
+ * The Windows toast transport (D3/D4/D8/D10/D11/D12): the only place the
  * renderer talks to the Windows shell about task-completion notifications.
  *
  * It answers two questions, and a caller should not need anything else:
@@ -14,7 +14,7 @@
  *
  * Showing is in-box PowerShell 5.1 + WinRT, one process per notification (D3):
  * the ~3 s cold start of `powershell.exe` is the accepted cost of adding no
- * resident helper (R1). That process is started without a console of this one's
+ * resident helper. That process is started without a console of this one's
  * ({@link toastHostSpawnOptions}), because a PowerShell host renames the console
  * it runs on. Nothing here waits for the user either: `Show()` hands the
  * notification to the shell and the process exits.
@@ -109,7 +109,7 @@ $d.LoadXml($x)
 $t=New-Object Windows.UI.Notifications.ToastNotification $d
 [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('${TOAST_AUMID}').Show($t)`
 
-// --- how the toast host is started (T-FIX-05) ----------------------------------
+// --- how the toast host is started ---------------------------------------------
 
 /** How much of a host's output is kept; the bound `execFileNoThrow` applies too. */
 const MAX_CAPTURE_BYTES = 64 * 1024
@@ -120,7 +120,7 @@ const MAX_CAPTURE_BYTES = 64 * 1024
  * Showing a toast means running in-box `powershell.exe` (D3), and a PowerShell
  * host sets the console title as it starts. A child that inherits this process's
  * console therefore renames the session's tab - measured 2026-10-16, before and
- * after one toast: `✦ 🐋 [dsh-tui:42672]` became `Windows PowerShell` (UAT-M4).
+ * after one toast: `✦ 🐋 [dsh-tui:42672]` became `Windows PowerShell`.
  *
  * `windowsHide` is what keeps that console away: Windows starts the child with
  * CREATE_NO_WINDOW, so it has none of its own to retitle, while the pipes below
@@ -328,10 +328,10 @@ export interface WindowsToastTransportOptions {
    * Process runner for the toast host; defaults to the console-less spawn
    * ({@link toastHostSpawnOptions}). A port of its own because "which runner"
    * is exactly the difference between a session whose tab keeps its title and
-   * one whose tab a PowerShell host renames (UAT-M4).
+   * one whose tab a PowerShell host renames.
    */
   runToastHost?: RunCommand
-  /** Clock, so the log can report how long the toast spawn took (R1); defaults to `Date.now`. */
+  /** Clock, so the log can report how long the toast spawn took; defaults to `Date.now`. */
   now?: () => number
   /** Log sink; defaults to `logForDebugging`. */
   log?: (message: string, fields?: Record<string, unknown>) => void

@@ -5,7 +5,7 @@
  * The marker is published here instead of being derived by each consumer.
  * The pane-title writer, the pre-toast probe and the documented JSON contract
  * all read this one value, so the title and the activation URI can never
- * disagree about who this pane is (L-080). It is minted on the first enable
+ * disagree about who this pane is. It is minted on the first enable
  * and kept for the rest of the process, which is the stability the title
  * contract asks for.
  */

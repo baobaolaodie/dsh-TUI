@@ -1,5 +1,5 @@
 /**
- * Jump-back orchestration (DESIGN D4/D7/D8): the single place that asks whether
+ * Jump-back orchestration (D4/D7/D8): the single place that asks whether
  * this pane can be promised a jump, registers the `dsh-tui:` protocol a toast
  * click comes back through, and keeps the documented marker files truthful.
  *
@@ -33,7 +33,7 @@ export const JUMP_BACK_PROTOCOL_KEY = 'HKCU\\Software\\Classes\\dsh-tui'
  * The command a toast click runs (D7). The value quotes both the helper and the
  * data directory: Windows starts the handler from the shell, which inherits no
  * environment of ours, so the helper must be told where the profile lives
- * explicitly (L-077).
+ * explicitly.
  */
 export const JUMP_BACK_PROTOCOL_COMMAND_KEY = `${JUMP_BACK_PROTOCOL_KEY}\\shell\\open\\command`
 
@@ -70,8 +70,8 @@ export type JumpBackProbe =
 
 /**
  * The ports a regression injects. Every one of them has the production default
- * named in its comment, so T09 can drive the whole orchestration without the
- * registry, without csc and without the real profile directory.
+ * named in its comment, so the suite can drive the whole orchestration without
+ * the registry, without csc and without the real profile directory.
  */
 export interface JumpBackPorts {
   /** Platform override for the regression; production is `process.platform`. */
@@ -84,7 +84,7 @@ export interface JumpBackPorts {
   now?: () => number
   /** Data directory (`~/.dsh-tui` normally); defaults to {@link DATA_DIR}. */
   dataDir?: string
-  /** Liveness for marker owners; defaults to {@link pidAlive} (D8 sweep and R4 cleanup). */
+  /** Liveness for marker owners; defaults to {@link pidAlive} (D8 sweep and cleanup). */
   pidAlive?: (pid: number) => boolean
   /** Resolves the compiled helper; defaults to {@link ensureHelper}, the only compiler. */
   helperPath?: () => Promise<string | undefined>
@@ -94,13 +94,13 @@ export interface JumpBackPorts {
 export interface JumpBack {
   /** Decide before a toast whether a click can be promised to land on this pane (D4). */
   probe(marker: string): Promise<JumpBackProbe>
-  /** Register the protocol key, or prove the cached registration is still ours (D7/R4). */
+  /** Register the protocol key, or prove the cached registration is still ours (D7). */
   ensureProtocol(helperPath: string): Promise<boolean>
   /** Remove the protocol key; a missing key is not an error (D7). */
   unregisterProtocol(): Promise<void>
   /** Write the documented read-only marker file for one session (D8). */
   writeMarker(sessionId: string, marker: string): string | undefined
-  /** Remove its marker files, and the key unless another live instance still needs it (D7/R4). */
+  /** Remove its marker files, and the key unless another live instance still needs it (D7). */
   cleanup(): Promise<void>
   /** Remove marker files whose owner is gone or older than a week (D8 startup cleanup). */
   sweepStale(): void
@@ -123,7 +123,7 @@ export function createJumpBack(ports: JumpBackPorts = {}): JumpBack {
 
   /** Marker files this process wrote; the only ones cleanup may remove. */
   const written = new Set<string>()
-  /** Whether this process registered the key; re-checked before every later promise (D7/R4). */
+  /** Whether this process registered the key; re-checked before every later promise (D7). */
   let registered = false
   /** The one registration or re-check in flight, so concurrent notifications share it. */
   let pendingEnsure: Promise<boolean> | undefined
@@ -176,7 +176,7 @@ export function createJumpBack(ports: JumpBackPorts = {}): JumpBack {
     // Windows needs both halves of the registration: the empty `URL Protocol`
     // marker on the root, and the command below it. Either refusal means no
     // click can be promised, and a half-written key is never remembered as
-    // registered, so the next notification retries both (D7/F-1).
+    // registered, so the next notification retries both (D7).
     for (const value of registrationValues(helper, dataDir)) {
       const detail = await addRegistryValue(run, reg, value)
       if (detail !== undefined) {
@@ -198,7 +198,7 @@ export function createJumpBack(ports: JumpBackPorts = {}): JumpBack {
     // A write that succeeded earlier is not proof the key is still there: the
     // user, another instance or a crash may have deleted or rewritten it since.
     // Every later notification re-checks the pair and rewrites it when the check
-    // fails (D7/R4). A failed attempt is not cached: the next notification
+    // fails (D7). A failed attempt is not cached: the next notification
     // retries, which is the recovery path after a transient policy refusal.
     pendingEnsure = ensureCurrent(helper)
       .catch((error: unknown) => {
@@ -214,7 +214,7 @@ export function createJumpBack(ports: JumpBackPorts = {}): JumpBack {
   /**
    * Answer "is the promise still backed by the key?", writing the pair when it
    * is not. The first notification pays for two writes; later ones pay for two
-   * `reg query` calls unless the key changed (D7/R4).
+   * `reg query` calls unless the key changed (D7).
    * @param helper - The helper path this process would register.
    * @returns Whether both values now hold this process's template.
    */
@@ -236,12 +236,12 @@ export function createJumpBack(ports: JumpBackPorts = {}): JumpBack {
       }
       // The whole scheme root goes, not just the command below it: leaving the
       // empty `dsh-tui` key behind would contradict "a normal exit leaves no
-      // protocol key" and make the next default-off snapshot look wrong (D7/F-2).
+      // protocol key" and make the next default-off snapshot look wrong (D7).
       const result = await run(reg, ['delete', JUMP_BACK_PROTOCOL_KEY, '/f'], {
         timeout: REGISTRY_TIMEOUT_MS,
       })
       // A key another instance removed first is the normal multi-instance case;
-      // the refusal costs nothing and is recorded for the post-mortem (D7/R4).
+      // the refusal costs nothing and is recorded for the post-mortem (D7).
       if (result.code !== 0) {
         logForDebugging('jumpback: protocol unregistration failed', {
           code: result.code,
@@ -294,7 +294,7 @@ export function createJumpBack(ports: JumpBackPorts = {}): JumpBack {
         // The key is shared by every instance under this profile: removing it
         // here would turn another live instance's next toast clicks into dead
         // ones. Its own next notification re-checks and rewrites the pair if
-        // needed (D7/R4).
+        // needed (D7).
         registered = false
         logForDebugging('jumpback: left the protocol key for a live instance', {
           key: JUMP_BACK_PROTOCOL_KEY,
@@ -316,7 +316,7 @@ export function createJumpBack(ports: JumpBackPorts = {}): JumpBack {
 
   /**
    * List the marker directory, or undefined when there is nothing to read yet.
-   * The startup sweep and the cleanup yield check share this one read (D8/R4).
+   * The startup sweep and the cleanup yield check share this one read (D8).
    * @returns The directory entries, or undefined when the directory is absent.
    */
   function markerEntries() {
@@ -332,7 +332,7 @@ export function createJumpBack(ports: JumpBackPorts = {}): JumpBack {
   }
 
   /**
-   * Whether a marker file belongs to another process that is still alive (R4).
+   * Whether a marker file belongs to another process that is still alive.
    * Such an instance still needs the shared key, so cleanup must not remove it.
    * Files this process wrote, unreadable files and dead pids do not block the
    * removal; the stale sweep owns whatever is left behind.
@@ -405,11 +405,11 @@ interface RegistryValue {
 }
 
 /**
- * The two values a full registration writes (D7/F-1), each with the data this
+ * The two values a full registration writes (D7), each with the data this
  * process would leave behind. The pair doubles as the template every later
- * notification checks against (R4).
+ * notification checks against.
  * @param helper - The helper path the command launches.
- * @param dataDir - The data directory the command passes on (L-077).
+ * @param dataDir - The data directory the command passes on.
  * @returns The root marker and the command, in the order they are written.
  */
 function registrationValues(helper: string, dataDir: string): readonly RegistryValue[] {
@@ -423,7 +423,7 @@ function registrationValues(helper: string, dataDir: string): readonly RegistryV
  * Whether both values still hold this process's template. A missing value, a
  * command rewritten to another helper, half a root key or output this parser
  * cannot read all answer false, so the caller rewrites the pair instead of
- * trusting the cache (D7/R4).
+ * trusting the cache (D7).
  * @param run - The injected process runner.
  * @param reg - The absolute `reg.exe` path.
  * @param helper - The helper path this process would register.
@@ -445,7 +445,7 @@ async function registrationMatches(
 /**
  * Read one value back with `reg query`. A value that is gone (non-zero exit) or
  * whose output this parser cannot read answers undefined; both mean "not
- * provably ours", never "probably fine" (D7/R4).
+ * provably ours", never "probably fine" (D7).
  * @param run - The injected process runner.
  * @param reg - The absolute `reg.exe` path.
  * @param value - The key and value name to read.
@@ -485,7 +485,7 @@ function parseRegistryValue(stdout: string, name: string | null): string | undef
 /**
  * Write one `REG_SZ` value with `reg.exe add`. The named value and the key's
  * default value share one argv shape; `name === null` means the default value
- * (`/ve`), the form the T03 precedent read back from a real registry (D7).
+ * (`/ve`), the form verified against a real registry (D7).
  * @param run - The injected process runner.
  * @param reg - The absolute `reg.exe` path.
  * @param write - The key, the value name (null for the default value) and its data.

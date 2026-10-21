@@ -1,5 +1,5 @@
 /**
- * The jump-back helper's one build step (DESIGN D5/R3): compile `activate.cs`
+ * The jump-back helper's one build step (D5): compile `activate.cs`
  * with the in-box .NET Framework `csc.exe` on first use, then reuse the
  * executable until either the source or the compiler moves.
  *
@@ -14,7 +14,7 @@
  * non-zero exit or the {@link COMPILE_TIMEOUT_MS} ceiling - answers undefined
  * and leaves the reason in the debug log. Jump-back is the only capability
  * that needs the helper, so the caller degrades to a plain toast while the
- * notification itself is unaffected (R3). Nothing here writes the registry;
+ * notification itself is unaffected. Nothing here writes the registry;
  * that is the lazy protocol step in `jumpback.ts` (D7).
  */
 
@@ -29,7 +29,7 @@ import { DATA_DIR } from '../../utils/paths.js'
 /**
  * The helper source beside this module. tsc keeps the directory layout, and
  * the build's copy step puts `activate.cs` next to the emitted JavaScript in
- * `lib/types/ink/notify-helper/`, so the same URL resolves in both trees (T08).
+ * `lib/types/ink/notify-helper/`, so the same URL resolves in both trees.
  */
 const HELPER_SOURCE = fileURLToPath(new URL('./activate.cs', import.meta.url))
 
@@ -39,7 +39,7 @@ const HELPER_EXE = join(HELPER_DIR, 'activate.exe')
 /** Remembers the (source hash, csc path) pair the executable was built from. */
 const HELPER_HASH = `${HELPER_EXE}.hash`
 
-/** csc takes ~0.3 s on a warm machine; ten seconds means stuck, not slow (R3). */
+/** csc takes ~0.3 s on a warm machine; ten seconds means stuck, not slow. */
 const COMPILE_TIMEOUT_MS = 10_000
 
 /** The in-box framework layouts, 64-bit first; both ship the same csc. */
@@ -49,7 +49,7 @@ const FRAMEWORK_VERSION = 'v4.0.30319'
 /**
  * The assemblies the helper references. Both sit in the `WPF/` subdirectory of
  * the framework directory csc itself was found in, and neither needs
- * `System.Core` (verified when the source was written, T03).
+ * `System.Core` (verified when the source was written).
  */
 const UI_AUTOMATION_ASSEMBLIES = ['UIAutomationClient.dll', 'UIAutomationTypes.dll'] as const
 
@@ -75,7 +75,7 @@ function inBoxCsc(): string | undefined {
 /**
  * The csc invocation. `/target:winexe` keeps a console from flashing when
  * Windows starts the helper from a toast click (D5); the source must stay at
- * C# 5 because this csc is the .NET Framework 4.x in-box one (T03).
+ * C# 5 because this csc is the .NET Framework 4.x in-box one.
  * @param csc - the resolved compiler path.
  * @returns the argv to run.
  */
@@ -185,7 +185,7 @@ let inFlight: Promise<string | undefined> | undefined
  * Concurrent callers in this process share one compilation, so a burst of
  * notifications cannot start two csc processes writing the same executable.
  * A failed run is not remembered: the next notification retries, which is the
- * recovery R3 asks for after an antivirus block or a deleted cache.
+ * recovery path after an antivirus block or a deleted cache.
  * @returns the executable path, or undefined when this machine cannot build it.
  */
 export function ensureHelper(): Promise<string | undefined> {

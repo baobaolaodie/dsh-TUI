@@ -78,7 +78,7 @@ for (const feedFile of ['tui-profile/feed/first-party.json']) {
 }
 // The jump-back helper is compiled from this source on first use, and the tarball
 // ships no binary: without the source the installed package can still notify,
-// but a click can never come back. Assert presence only (no output counts, L-025).
+// but a click can never come back. Assert presence only.
 const notifyHelperSource = 'lib/types/ink/notify-helper/activate.cs'
 if (!packed.has(notifyHelperSource)) {
   throw new Error(`packaged jump-back helper source missing from tarball: ${notifyHelperSource}`)

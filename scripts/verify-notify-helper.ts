@@ -1,12 +1,12 @@
 /**
- * The jump-back helper's build cache (DESIGN D5, R3): the first call compiles
+ * The jump-back helper's build cache: the first call compiles
  * `activate.cs` with the in-box .NET Framework csc, later calls reuse the
  * executable, and a cache key that no longer matches the source - or a
  * compiler that moved - rebuilds it.
  *
  * Every path is redirected into a throwaway home before the module is imported:
  * `DATA_DIR` is a module-level constant, so the executable this suite builds
- * can never land in the user's profile (L-049). The source is shipped, not
+ * can never land in the user's profile. The source is shipped, not
  * modified: "the source changed" is simulated by planting a cache key that no
  * longer matches, which is exactly the pair the key compares.
  *
@@ -26,7 +26,7 @@ const sandboxHome = join(sandbox, 'home')
 mkdirSync(sandboxHome)
 // `DATA_DIR` and the cache paths built from it are module-level constants: the
 // redirect has to be in place before the import, or this suite compiles into
-// the user's real profile (L-049).
+// the user's real profile.
 process.env.HOME = sandboxHome
 process.env.USERPROFILE = sandboxHome
 process.env.DSH_HOME = join(sandbox, 'dsh-home')
@@ -64,7 +64,7 @@ async function captureDebug<T>(body: () => T | Promise<T>): Promise<{ result: T,
 
 /**
  * Point the module's `%WINDIR%` lookup somewhere else for one case, then put the
- * environment back. The module resolves csc per call (T05), which is what makes
+ * environment back. The module resolves csc per call, which is what makes
  * the missing/failing compiler paths reachable in-process.
  * @param root - The Windows directory to present to the lookup.
  * @param body - The call(s) that should see it.
@@ -168,7 +168,7 @@ async function main(): Promise<boolean> {
     const emptyRoot = join(sandbox, 'no-windows')
     mkdirSync(emptyRoot)
     const missing = await withWindowsRoot(emptyRoot, () => captureDebug(() => ensureHelper()))
-    assert.equal(missing.result, undefined, 'the caller degrades to a plain toast; it must not throw (R3)')
+    assert.equal(missing.result, undefined, 'the caller degrades to a plain toast; it must not throw')
     assert.match(missing.lines.join(''), /in-box csc not found/u)
   })
 
@@ -184,7 +184,7 @@ async function main(): Promise<boolean> {
     copyFileSync(join(REAL_WINDOWS_ROOT, 'System32', 'reg.exe'), fakeCsc)
     const failed = await withWindowsRoot(fakeRoot, () => captureDebug(() => ensureHelper()))
     assert.equal(failed.result, undefined, 'a failed build degrades instead of rejecting')
-    assert.match(failed.lines.join(''), /notify helper: csc failed/u, 'the stage is in the log (R3)')
+    assert.match(failed.lines.join(''), /notify helper: csc failed/u, 'the stage is in the log')
     assert.equal(existsSync(HELPER_EXE), false, 'a half-written executable must never look like a cache hit')
   })
 

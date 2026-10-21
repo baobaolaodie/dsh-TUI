@@ -226,7 +226,7 @@ export interface RuntimeApplyOptions {
 }
 
 /**
- * The jump-back capability one completion may promise (DESIGN D4/D7/D8), as the
+ * The jump-back capability one completion may promise (D4/D7/D8), as the
  * orchestration in `../ink/jumpback.js` provides it. A regression injects a
  * recorder here; production passes this process's orchestration.
  */
@@ -243,7 +243,7 @@ export interface TaskCompletionDelivery {
   /** The terminal bell, used when the native transport is unavailable. */
   terminal(title: string, message: string): void
   /**
-   * Jump-back ports (DESIGN D4/D7); absent, this process's orchestration is used
+   * Jump-back ports (D4/D7); absent, this process's orchestration is used
    * once the setting is on. Nothing is asked at all while the setting is off.
    */
   jumpback?: TaskCompletionJumpBack
@@ -253,7 +253,7 @@ export interface TaskCompletionDelivery {
    */
   sessionId?: string
   /**
-   * The platform this delivery runs on (DESIGN D4's win32 gate); defaults to
+   * The platform this delivery runs on (D4's win32 gate); defaults to
    * `process.platform`. The regression injects it so the launch decision is
    * assertable on a POSIX runner, mirroring the toast transport's own port.
    */
@@ -392,14 +392,14 @@ export async function deliverTaskCompletionOnWindows(
   logForDebugging(`windows toast unavailable (${cause}); using the terminal fallback`)
 }
 
-/** Where the documented activation URI starts (DESIGN §9.3); the helper parses it (D6). */
+/** Where the documented activation URI starts; the helper parses it (D6). */
 const JUMP_BACK_LAUNCH_PREFIX = 'dsh-tui:activate?m='
 
 /**
  * A session id becomes a file name in the marker directory (D8), so only
  * characters that cannot introduce a path separator are admitted. Same shape
- * `writeMarker` enforces (T06): this copy only picks the name, while the
- * downstream gate is what keeps the directory safe (R8).
+ * `writeMarker` enforces: this copy only picks the name, while the downstream
+ * gate is what keeps the directory safe.
  */
 const MARKER_FILE_SESSION = /^[A-Za-z0-9._-]{1,128}$/u
 
@@ -409,7 +409,7 @@ let sharedJumpBack: JumpBack | undefined
 /**
  * The jump-back orchestration for this process: one instance, so the protocol
  * key it registered and the marker files it wrote are exactly what `cleanup()`
- * removes (T06). A per-notification instance would lose that bookkeeping and
+ * removes. A per-notification instance would lose that bookkeeping and
  * leak both.
  * @returns This process's orchestration.
  */
@@ -438,7 +438,7 @@ interface JumpBackTarget {
 }
 
 /**
- * Refresh the documented marker file for this completion (DESIGN D8).
+ * Refresh the documented marker file for this completion (D8).
  *
  * The file is written before the toast's ownership is known: an external
  * notifier may deliver this completion, but an external plugin reading the
@@ -451,7 +451,7 @@ interface JumpBackTarget {
  */
 function refreshJumpBackMarker(delivery: TaskCompletionDelivery): JumpBackTarget | undefined {
   // The title writer tags a pane only on Windows; promising a jump anywhere
-  // else is the L-080 dead point. A disabled switch costs nothing and comes first.
+  // else is a dead click. A disabled switch costs nothing and comes first.
   const { enabled, marker } = getJumpBackState()
   if (!enabled || marker === null || (delivery.platform ?? process.platform) !== 'win32') return undefined
   const jumpback = delivery.jumpback ?? jumpBackForProcess()
@@ -471,7 +471,7 @@ function refreshJumpBackMarker(delivery: TaskCompletionDelivery): JumpBackTarget
 }
 
 /**
- * Ask whether this completion may carry a jump-back URI (DESIGN D4/D7).
+ * Ask whether this completion may carry a jump-back URI (D4/D7).
  *
  * The marker file was already refreshed by {@link refreshJumpBackMarker}; this
  * step only spends the half second a probe costs. It must prove exactly one
@@ -532,14 +532,14 @@ function refreshEnabledMarker(
 }
 
 /**
- * Publish one jump-back settings resolution and act on the transition (DESIGN
- * D1/D4/D8). Enabling sweeps stale marker files once and refreshes the
+ * Publish one jump-back settings resolution and act on the transition
+ * (D1/D4/D8). Enabling sweeps stale marker files once and refreshes the
  * documented seam for the current session; disabling is a cleanup point of its
- * own (DESIGN §3, AC-1/AC-9), not merely a title rewrite.
+ * own (AC-1/AC-9), not merely a title rewrite.
  *
  * `cleanup()` removes only what THIS process registered or wrote - another
- * instance's protocol key survives (R4) - and is a no-op for a process that
- * never did either (T06), so a disabled boot path is unchanged. The sweep is
+ * instance's protocol key survives - and is a no-op for a process that
+ * never did either, so a disabled boot path is unchanged. The sweep is
  * win32-gated inside the orchestration, so no second platform judgment is made
  * for it; the marker refresh needs the platform here because it happens before
  * any port proves the host. Exported for the regression, which drives the same
@@ -590,11 +590,11 @@ export async function apply(ctx: Context, runtimeConfig: RuntimeConfig<Config>, 
     method: config.notificationMethod ?? 'auto',
   })
   configureTaskNotifications(config.taskNotifications, config.notificationMethod)
-  // Jump-back (DESIGN D4/D7/D8): one orchestration per process, cleaned up on
+  // Jump-back (D4/D7/D8): one orchestration per process, cleaned up on
   // this fiber's teardown. Creating it touches nothing - the registry and the
   // marker directory are only reached after the user turns the setting on and a
   // notification is delivered (AC-1). `cleanup()` is a no-op for a process that
-  // never registered or wrote (T06), so an off launch exits exactly as before.
+  // never registered or wrote, so an off launch exits exactly as before.
   const jumpBack = jumpBackForProcess()
   ctx.effect(() => () => jumpBack.cleanup())
   /**
@@ -1601,7 +1601,7 @@ export async function apply(ctx: Context, runtimeConfig: RuntimeConfig<Config>, 
         // Must mirror Config's union (`src/dsh-adapter/index.ts`): a method
         // missing here is rejected by /settings and never reaches the runtime.
         notificationMethod: Schema.union(['auto', 'osc9', 'bel', 'windows']),
-        // Must mirror Config's `jumpBack` (DESIGN D1). No default on purpose
+        // Must mirror Config's `jumpBack` (D1). No default on purpose
         // (D1a): applyDisplay resolves `?? config.jumpBack ?? false`, so an
         // explicit cordis.yml value stays decisive while the user layer is unset.
         jumpBack: Schema.boolean(),

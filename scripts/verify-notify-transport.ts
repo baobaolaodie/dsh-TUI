@@ -1,5 +1,5 @@
 /**
- * Windows toast transport contract (T03): the toast XML layer, the lazy AUMID
+ * Windows toast transport contract: the toast XML layer, the lazy AUMID
  * registration state machine, and the external-notifier dedup - all driven
  * through injected ports.
  *
@@ -198,7 +198,7 @@ await check('a launch URI makes the toast a protocol activation, escaped', async
   )
   assert.ok(!toastXml({ title: TITLE, launch: '' }).includes('launch='), 'an empty launch is no activation at all: clicking it would open nothing')
 
-  // The wiring no type check covers (L-079): `show()` builds the XML from the
+  // The wiring no type check covers: `show()` builds the XML from the
   // input, so a launch that stops at `WindowsToastInput` passes every assertion
   // above while the delivered toast stays inert.
   const h = harness()
@@ -214,7 +214,7 @@ await check('an over-long summary is clipped to the two lines the toast can show
   // measure, so an English summary still reads as two lines rather than one
   // clipped by the shell.
   const message = '很长的任务摘要。'.repeat(20)
-  assert.ok(stringWidth(message) > 80, 'the fixture must exceed the budget, or this check proves nothing (L-048)')
+  assert.ok(stringWidth(message) > 80, 'the fixture must exceed the budget, or this check proves nothing')
   const [, body] = textNodes(toastXml({ title: TITLE, message }))
   assert.ok(stringWidth(body) <= 80, `the body must fit two lines, got ${stringWidth(body)} columns`)
   assert.ok(body.endsWith('…'), `a clipped summary says so instead of just stopping: ${body}`)
@@ -290,7 +290,7 @@ await check('a refused AUMID write is reported, not retried', async () => {
   const first = await h.transport.notify({ title: TITLE })
   assert.equal(first.status, 'unavailable')
   assert.equal(first.reason, 'aumid-registration-failed')
-  assert.match(first.detail ?? '', /Access is denied/, 'the registry error is the only clue for R2')
+  assert.match(first.detail ?? '', /Access is denied/, 'the registry error is the only clue the caller gets')
   assert.equal(h.registry.writes.length, 1, 'a policy refusal is not retried on the next notification')
   const second = await h.transport.notify({ title: TITLE })
   assert.deepEqual(second, first)
@@ -312,7 +312,7 @@ await check('the toast is spawned by in-box PowerShell with the XML on stdin, ne
   )
   assert.ok(!/[<>·🐋]/u.test(call.args.join(' ')), 'user text must never reach the command line (security)')
   assert.ok(typeof call.timeout === 'number' && call.timeout > 0, 'a stuck PowerShell must not hold the caller forever')
-  assert.equal(h.logged.filter(([, fields]) => fields?.ms !== undefined).length, 1, 'R1: the log records how long the spawn took')
+  assert.equal(h.logged.filter(([, fields]) => fields?.ms !== undefined).length, 1, 'the log records how long the spawn took')
 })
 
 await check('the script body carries the two things the real host needs', async () => {
@@ -337,7 +337,7 @@ await check('the script body carries the two things the real host needs', async 
 })
 
 await check('the toast host is spawned with no console of its own, so it cannot retitle ours', () => {
-  // The defect this pins (UAT-M4): the in-box host inherits the TUI's console and
+  // The defect this pins: the in-box host inherits the TUI's console and
   // sets its title as it starts. Measured on a real machine (2026-10-16): the
   // title went to "Windows PowerShell" with the previous options and stayed put
   // with these.
@@ -351,7 +351,7 @@ await check('the toast host runs on its own runner, never on the one that keeps 
   // Where the toast is spawned is the half a test can see: handing it back to
   // `run` - the runner `reg.exe` uses, which `execFileNoThrow` spawns with the
   // console inherited - leaves the isolated runner empty, and that is the shape
-  // that produced UAT-M4. Every port but the registry is stubbed, so the two
+  // that produced that defect. Every port but the registry is stubbed, so the two
   // runners are told apart by what they carried.
   const shared = recordingRunner()
   const toast = recordingRunner()
