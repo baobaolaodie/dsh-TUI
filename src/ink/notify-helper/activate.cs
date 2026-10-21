@@ -191,7 +191,7 @@ internal static class JumpBack
 
     // The shell starts us as:  activate.exe --activate "dsh-tui:activate?m=<marker>" -DataDir <dir>
     // The marker is URL-safe by contract (see ValidMarker), so no percent-decoding is done:
-    // a value that would need it was not produced by this change.
+    // a value that would need it was not produced by this process.
     private static string NormalizeMarker(string raw)
     {
         const string prefix = "dsh-tui:activate?m=";
@@ -477,9 +477,9 @@ internal static class JumpBack
         return pane;
     }
 
-    // ADR-0016: SetForegroundWindow returns true without moving the window while the
-    // foreground lock holds, so each attempt asks the desktop instead of trusting the call.
-    // Failing here is a known UAT risk; the window stays where it was and the
+    // SetForegroundWindow returns true without moving the window while the foreground
+    // lock holds, so each attempt asks the desktop instead of trusting the call.
+    // Failing here is a known real-machine risk; the window stays where it was and the
     // stage is reported rather than a success being faked.
     private static bool BringToForeground(IntPtr hwnd)
     {

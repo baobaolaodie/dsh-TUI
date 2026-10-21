@@ -51,6 +51,11 @@ const MARKER_PATTERN = /^[0-9a-f]{16}$/u
  */
 const SESSION_ID_PATTERN = /^[A-Za-z0-9._-]{1,128}$/u
 
+/** True when the id can name a marker file; `writeMarker` enforces the same rule. */
+export function isMarkerFileSession(sessionId: string): boolean {
+  return SESSION_ID_PATTERN.test(sessionId)
+}
+
 /** The helper probes in ~0.5 s (D4); 1.5 s means stuck, not slow. */
 const PROBE_TIMEOUT_MS = 1_500
 
@@ -258,7 +263,7 @@ export function createJumpBack(ports: JumpBackPorts = {}): JumpBack {
       logForDebugging('jumpback: marker file skipped', { reason: 'not-win32' })
       return undefined
     }
-    if (!SESSION_ID_PATTERN.test(sessionId)) {
+    if (!isMarkerFileSession(sessionId)) {
       logForDebugging('jumpback: marker file refused', { reason: 'unusable session id', sessionId })
       return undefined
     }

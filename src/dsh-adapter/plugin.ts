@@ -37,7 +37,7 @@ import { logForDebugging } from '../utils/debug.js'
 import { createTerminalNotifier, type NotificationMethod, type TaskNotifications } from '../ink/terminal-notification.js'
 import type { WindowsToastInput, WindowsToastResult } from '../ink/terminal-notification-windows.js'
 import { getTerminalFocused } from '../ink/terminal-focus-state.js'
-import { createJumpBack, type JumpBack } from '../ink/jumpback.js'
+import { createJumpBack, isMarkerFileSession, type JumpBack } from '../ink/jumpback.js'
 import { getJumpBackState, setJumpBackEnabled } from '../ink/jumpback-state.js'
 import { resolveNotificationMethod } from '../ink/terminal.js'
 import { isEnvTruthy } from '../utils/envUtils.js'
@@ -395,14 +395,6 @@ export async function deliverTaskCompletionOnWindows(
 /** Where the documented activation URI starts; the helper parses it (D6). */
 const JUMP_BACK_LAUNCH_PREFIX = 'dsh-tui:activate?m='
 
-/**
- * A session id becomes a file name in the marker directory (D8), so only
- * characters that cannot introduce a path separator are admitted. Same shape
- * `writeMarker` enforces: this copy only picks the name, while the downstream
- * gate is what keeps the directory safe.
- */
-const MARKER_FILE_SESSION = /^[A-Za-z0-9._-]{1,128}$/u
-
 /** The one orchestration this process shares between delivery and exit cleanup. */
 let sharedJumpBack: JumpBack | undefined
 
@@ -426,7 +418,7 @@ function jumpBackForProcess(): JumpBack {
  * @returns A file name that cannot leave the marker directory.
  */
 function markerFileName(sessionId: string | undefined): string {
-  return sessionId !== undefined && MARKER_FILE_SESSION.test(sessionId)
+  return sessionId !== undefined && isMarkerFileSession(sessionId)
     ? sessionId
     : `process-${process.pid}`
 }
@@ -521,7 +513,7 @@ function refreshEnabledMarker(
 ): void {
   const { marker } = getJumpBackState()
   if (platform !== 'win32' || marker === null) return
-  if (sessionId === undefined || !MARKER_FILE_SESSION.test(sessionId)) return
+  if (sessionId === undefined || !isMarkerFileSession(sessionId)) return
   try {
     jumpback.writeMarker(sessionId, marker)
   } catch (error) {
