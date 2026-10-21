@@ -355,10 +355,6 @@ export async function deliverTaskCompletionOnWindows(
   backendId: string,
   delivery: TaskCompletionDelivery,
 ): Promise<void> {
-  // D8: the documented marker file names the session that just completed, so it
-  // is refreshed before the ownership question is asked - an external notifier
-  // may ship this toast, but the seam an external plugin reads must still be
-  // current (AC-9).
   const target = refreshJumpBackMarker(delivery)
   let externalNotifierActive = false
   if (backendId === 'dsh' && delivery.pluginManager !== undefined) {
@@ -395,7 +391,6 @@ export async function deliverTaskCompletionOnWindows(
 /** Where the documented activation URI starts; the helper parses it (D6). */
 const JUMP_BACK_LAUNCH_PREFIX = 'dsh-tui:activate?m='
 
-/** The one orchestration this process shares between delivery and exit cleanup. */
 let sharedJumpBack: JumpBack | undefined
 
 /**
@@ -403,7 +398,6 @@ let sharedJumpBack: JumpBack | undefined
  * key it registered and the marker files it wrote are exactly what `cleanup()`
  * removes. A per-notification instance would lose that bookkeeping and
  * leak both.
- * @returns This process's orchestration.
  */
 function jumpBackForProcess(): JumpBack {
   sharedJumpBack ??= createJumpBack()
@@ -414,7 +408,6 @@ function jumpBackForProcess(): JumpBack {
  * The marker file's name for one completion (D8): the backend's session id when
  * it is a safe file name, else a name for this process. A missing id is no
  * reason to skip the documented file - the toast still names this pane.
- * @param sessionId - The id the delivery reported, if any.
  * @returns A file name that cannot leave the marker directory.
  */
 function markerFileName(sessionId: string | undefined): string {
@@ -502,7 +495,6 @@ async function jumpBackLaunch(target: JumpBackTarget): Promise<string | undefine
  *
  * Best-effort by the same rule as the delivery path: the switch was already
  * published, and a throwing port may cost the seam, never the settings edit.
- * @param jumpback - This process's orchestration.
  * @param sessionId - The current session's id, when the host has one yet.
  * @param platform - The host platform; only Windows tags panes (D2).
  */
@@ -536,9 +528,6 @@ function refreshEnabledMarker(
  * for it; the marker refresh needs the platform here because it happens before
  * any port proves the host. Exported for the regression, which drives the same
  * transition the settings watch calls.
- * @param jumpback - This process's orchestration.
- * @param enabled - The resolved `jumpBack` setting.
- * @param sessionId - The session this process currently drives, if any.
  * @param platform - The host platform; defaults to this process's, injectable
  *   for the regression, which runs on POSIX CI.
  */
