@@ -1,31 +1,28 @@
 // activate.cs - the helper Windows starts when a dsh-tui task-completion toast is clicked.
 //
-// It has two modes, and the TypeScript side is the only caller of the first one:
-//
+// Two modes; the TypeScript side calls only the first:
 //   activate.exe --probe    <marker> [-DataDir <dir>]
 //   activate.exe --activate <marker> [-DataDir <dir>]
 //
 // `--probe` answers one question without touching the desktop: is the marker carried by
-// exactly one pane (or, when that pane is not realized, by exactly one tab title)? The
-// TypeScript side runs it before it puts an activation URI on a toast, so a toast never
-// promises a jump this helper cannot verify. It never selects a tab and never moves focus.
+// exactly one pane (or, when that pane is not realized, exactly one tab title)? It runs
+// before a toast carries an activation URI, so a toast never promises an unverifiable jump.
 //
 // `--activate` is the click path: resolve the marker to one pane, restore and foreground
 // its window, select the tab when the pane is not realized yet, and call SetFocus on the
 // SAME element that was resolved. It then re-reads the desktop and exits 0 only when all
-// five checks hold: the focused element is that pane (runtime id), it has the keyboard
-// focus, its HelpText still carries the marker, its window is the foreground window, and
-// that window is not minimized.
+// five checks hold: that pane is the focused element (runtime id), it has keyboard focus,
+// its HelpText still carries the marker, its window is foreground and not minimized.
 //
 // The marker is opaque here: this file never formats one, it only matches the string it
-// was handed as a substring of a title. Windows Terminal exposes each pane's own title as
-// TermControl.HelpText and each tab's title as TabItem.Name (which shows the focused
-// pane's title). Looking at per-pane HelpText first is what makes the target the pane that
-// produced the notification instead of "some TermControl in the window".
+// was handed as a substring of a title. Windows Terminal exposes each pane's title as
+// TermControl.HelpText and each tab's as TabItem.Name (the focused pane's). Looking at
+// per-pane HelpText first is what makes the target the pane that produced the notification
+// instead of "some TermControl in the window".
 //
 // Argument forms: the registered protocol command passes the whole launch URI
-// (`dsh-tui:activate?m=<marker>`), so that form is parsed down to the marker; a bare marker
-// is accepted too, so the helper can be driven by hand while diagnosing.
+// (`dsh-tui:activate?m=<marker>`), parsed down to the marker; a bare marker is accepted
+// too, so the helper can be driven by hand while diagnosing.
 //
 // Exit codes: 0 = the jump was performed and verified, 2 = invalid invocation (including a
 // marker outside [A-Za-z0-9._-]{1,64}), 3 = the target was unreachable or a step/check
@@ -33,7 +30,7 @@
 //
 // Log: <DataDir>/notify/jumpback.log (default %USERPROFILE%\.dsh-tui). Every run leaves its
 // stages and, on failure, the reason there. The shell starts this process detached, so the
-// log is the only trace a click leaves behind; the data directory is an explicit argument
+// log is the only trace a click leaves; the data directory travels as an explicit argument
 // rather than an inherited environment variable, because the shell starts us with none.
 //
 // Restrictions (do not "modernize" this file): it has to compile with the in-box csc.exe
@@ -146,9 +143,8 @@ internal static class JumpBack
         }
     }
 
-    // The command line is fixed by the registered protocol command; anything the shell or a
-    // person adds is rejected instead of guessed at. Marker validation happens here, before
-    // any UIA call, so a malformed argument cannot reach a window lookup.
+    // The command line is fixed by the registered protocol command: anything extra is
+    // rejected, not guessed at. Marker validation happens here, before any UIA call.
     private static bool TryParseArgs(string[] args, out Options options, out string error)
     {
         options = new Options();
@@ -203,9 +199,8 @@ internal static class JumpBack
         return raw;
     }
 
-    // The marker is the only thing a toast carries and it arrives as an argument, so only
-    // a conservative ASCII token alphabet is accepted. Explicit ranges (not char.IsLetter)
-    // keep non-ASCII letters out of a value that is matched against a window title.
+    // The marker arrives as an argument, so only a conservative ASCII token alphabet is
+    // accepted; explicit ranges (not char.IsLetter) keep non-ASCII out of a window title.
     private static bool ValidMarker(string marker)
     {
         if (marker == null || marker.Length == 0 || marker.Length > 64) return false;
@@ -235,8 +230,7 @@ internal static class JumpBack
         }
     }
 
-    // Non-invasive by construction: read panes and tabs, count how many carry the marker, and
-    // return whether a toast may promise the jump. No tab is selected and no focus is moved.
+    // Non-invasive: count matching panes/tabs; no tab is selected and no focus is moved.
     private static int Probe(string marker)
     {
         Stopwatch clock = Stopwatch.StartNew();
@@ -306,9 +300,8 @@ internal static class JumpBack
         AutomationElement pane;
         if (viaTab)
         {
-            // The tab is only an entry point: select it, verify the selection, then resolve
-            // the pane again by HelpText. The element found while the tab was unselected does
-            // not exist yet, and a runtime id does not survive the switch.
+            // The tab is only an entry point: select, verify, then resolve the pane again by
+            // HelpText; the unselected element does not exist yet and no runtime id survives.
             if (!SelectTab(tabs[0].Tab))
             {
                 Log("stage=select ok=false reason=\"the tab did not report itself selected\"");
@@ -361,10 +354,9 @@ internal static class JumpBack
         return ExitOk;
     }
 
-    // Top-level Windows Terminal windows, found by the class the window registers with the
-    // desktop rather than by process name. Minimized windows stay in this list (they are still
-    // visible windows), which AC-6 needs; windows without a native handle cannot be restored
-    // or foregrounded and are skipped.
+    // Top-level Windows Terminal windows, found by desktop class rather than process name.
+    // Minimized windows stay (still visible, which AC-6 needs); windows without a native
+    // handle cannot be restored or foregrounded and are skipped.
     private static List<AutomationElement> TerminalWindows()
     {
         List<AutomationElement> windows = new List<AutomationElement>();
@@ -433,9 +425,8 @@ internal static class JumpBack
         }
     }
 
-    // One identity rule for the whole file: a pane is a TermControl whose own HelpText carries
-    // the marker. Discovery and the post-tab-switch lookup both go through here, so the rule
-    // cannot drift between the two callers.
+    // One identity rule for the whole file: a pane is a TermControl whose own HelpText
+    // carries the marker, shared by discovery and the post-switch lookup so it cannot drift.
     private static List<AutomationElement> PanesCarryingMarker(AutomationElement window, string marker)
     {
         List<AutomationElement> hits = new List<AutomationElement>();
@@ -477,10 +468,9 @@ internal static class JumpBack
         return pane;
     }
 
-    // SetForegroundWindow returns true without moving the window while the foreground
-    // lock holds, so each attempt asks the desktop instead of trusting the call.
-    // Failing here is a known real-machine risk; the window stays where it was and the
-    // stage is reported rather than a success being faked.
+    // SetForegroundWindow returns true without moving the window while the foreground lock
+    // holds, so each attempt asks the desktop instead of trusting the call. Failing here is
+    // a known real-machine risk; the stage is reported rather than a success being faked.
     private static bool BringToForeground(IntPtr hwnd)
     {
         for (int attempt = 1; attempt <= ForegroundAttempts; attempt++)
@@ -530,9 +520,8 @@ internal static class JumpBack
         }
     }
 
-    // The previous implementation focused "the first focusable TermControl", which proves
-    // only that some pane in the window is focused. This one focuses the element that was
-    // resolved through the marker and waits until the desktop agrees that element is focused.
+    // Focusing "the first focusable TermControl" proves only that some pane is focused; this
+    // focuses the element resolved through the marker and waits until the desktop agrees.
     private static bool FocusPane(AutomationElement pane, string paneRtid, string marker)
     {
         for (int attempt = 1; attempt <= FocusAttempts; attempt++)
@@ -666,9 +655,8 @@ internal static class JumpBack
         }
     }
 
-    // An external host (the shell) starts this process outside the TUI's environment,
-    // so the data directory is passed explicitly on the command line. The fallback mirrors
-    // what src/utils/paths.ts resolves when the helper is run by hand.
+    // The shell starts this outside the TUI's environment, so the data directory is an
+    // explicit argument; the fallback mirrors src/utils/paths.ts for a hand run.
     private static string ResolveLogPath(string dataDir)
     {
         try
@@ -689,10 +677,9 @@ internal static class JumpBack
         }
     }
 
-    // The log is the only trace a click leaves behind, but a log that cannot be written must
-    // never cost the jump itself. The file copy comes first, and the console copy is allowed
-    // to fail: exit codes are part of the contract, the console is not (a winexe may have no
-    // console at all).
+    // The log is the only trace a click leaves, but an unwritable log must never cost the
+    // jump. The file copy comes first; the console copy may fail - exit codes are the
+    // contract, the console is not (a winexe may have none).
     private static void Log(string message)
     {
         string line = DateTime.Now.ToString("yyyy-MM-ddTHH:mm:ss.fff") + " " + message;
@@ -700,9 +687,8 @@ internal static class JumpBack
         {
             try
             {
-                // The helper creates its own log directory: on a first click there may be
-                // neither <DataDir>/notify nor a log file yet, and AppendAllText does not
-                // create parents.
+                // The helper creates its own log directory: on a first click neither
+                // <DataDir>/notify nor the log exists, and AppendAllText makes no parents.
                 string directory = Path.GetDirectoryName(logPath);
                 if (directory != null && directory.Length > 0) Directory.CreateDirectory(directory);
                 TruncateLogIfFull();
