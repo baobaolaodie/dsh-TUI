@@ -20,7 +20,6 @@ import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync,
 import { tmpdir } from 'node:os'
 import { basename, dirname, join } from 'node:path'
 
-/** The throwaway tree every path in this suite resolves under. */
 const sandbox = mkdtempSync(join(tmpdir(), 'dsh-notify-helper-'))
 const sandboxHome = join(sandbox, 'home')
 mkdirSync(sandboxHome)
@@ -37,13 +36,11 @@ process.on('exit', () => {
 const { DATA_DIR } = await import('../src/utils/paths.js')
 const { ensureHelper } = await import('../src/ink/notify-helper/compile.js')
 
-/** Where the module under test keeps the executable and its cache key (D5). */
 const HELPER_EXE = join(DATA_DIR, 'notify', 'helper', 'activate.exe')
 const HELPER_HASH = `${HELPER_EXE}.hash`
 /** The Windows directory the module resolves csc from; saved so cases can move it. */
 const REAL_WINDOWS_ROOT = process.env.WINDIR ?? process.env.SystemRoot
 
-/** Run one body with the debug logger on and stderr captured. */
 async function captureDebug<T>(body: () => T | Promise<T>): Promise<{ result: T, lines: string[] }> {
   const realWrite = process.stderr.write.bind(process.stderr)
   const lines: string[] = []
@@ -63,11 +60,8 @@ async function captureDebug<T>(body: () => T | Promise<T>): Promise<{ result: T,
 }
 
 /**
- * Point the module's `%WINDIR%` lookup somewhere else for one case, then put the
- * environment back. The module resolves csc per call, which is what makes
- * the missing/failing compiler paths reachable in-process.
- * @param root - The Windows directory to present to the lookup.
- * @param body - The call(s) that should see it.
+ * The module resolves csc per call, so the missing and failing compiler paths are
+ * reachable in-process.
  * @returns The body's result.
  */
 async function withWindowsRoot<T>(root: string, body: () => Promise<T>): Promise<T> {
@@ -81,7 +75,6 @@ async function withWindowsRoot<T>(root: string, body: () => Promise<T>): Promise
   }
 }
 
-/** Print the loud skip and answer "this suite did not run". */
 function skipped(reason: string): false {
   process.stdout.write(`skip: ${reason}\n`)
   return false
@@ -95,7 +88,6 @@ async function check(name: string, body: () => void | Promise<void>): Promise<vo
 }
 
 /**
- * Run the platform-appropriate half of the suite.
  * @returns Whether the compile/cache assertions ran (false when the machine
  *   cannot build the helper at all).
  */
