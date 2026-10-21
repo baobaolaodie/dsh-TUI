@@ -1,11 +1,8 @@
 /**
- * Jump-back orchestration (D4/D7/D8): the single place that asks whether
- * this pane can be promised a jump, registers the `dsh-tui:` protocol a toast
- * click comes back through, and keeps the documented marker files truthful.
- *
- * The UIA work itself belongs to the helper under `notify-helper/`. This module
- * only decides whether to promise a jump (D4), writes the HKCU value that makes
- * the promise reachable (D7), and owns the marker-file lifecycle (D8).
+ * Jump-back orchestration (D4/D7/D8): the single place that asks whether this
+ * pane can be promised a jump, registers the `dsh-tui:` protocol a toast click
+ * comes back through, and keeps the documented marker files truthful. The UIA
+ * work itself belongs to the helper under `notify-helper/`.
  *
  * Every system side effect sits behind the win32 guard and behind the injected
  * ports, so a POSIX process neither writes the registry nor leaves marker files.
@@ -23,17 +20,15 @@ import { DATA_DIR } from '../utils/paths.js'
 import { ensureHelper } from './notify-helper/compile.js'
 
 /**
- * The URI scheme root (D7). Windows only hands `dsh-tui:` to a handler when this
- * key carries the named value `URL Protocol`; the command a click runs lives in
- * the subkey below it.
+ * The URI scheme root (D7): Windows hands `dsh-tui:` to a handler only when this
+ * key carries the named value `URL Protocol`; the click command sits below it.
  */
 export const JUMP_BACK_PROTOCOL_KEY = 'HKCU\\Software\\Classes\\dsh-tui'
 
 /**
- * The command a toast click runs (D7). The value quotes both the helper and the
- * data directory: Windows starts the handler from the shell, which inherits no
- * environment of ours, so the helper must be told where the profile lives
- * explicitly.
+ * The command a toast click runs (D7). It quotes both the helper and the data
+ * directory: the shell starts the handler with none of our environment, so the
+ * helper must be told where the profile lives explicitly.
  */
 export const JUMP_BACK_PROTOCOL_COMMAND_KEY = `${JUMP_BACK_PROTOCOL_KEY}\\shell\\open\\command`
 
@@ -45,9 +40,8 @@ const MARKER_PATTERN = /^[0-9a-f]{16}$/u
 
 /**
  * A session id becomes a file name, so only characters that cannot introduce a
- * path separator are admitted. DSH session ids are `session-<uuid>`; `.` and
- * `..` are harmless here because `.json` is appended, so neither can name the
- * marker directory itself.
+ * path separator are admitted. DSH ids are `session-<uuid>`; `.` and `..` are
+ * harmless because `.json` is appended, so neither can name a directory.
  */
 const SESSION_ID_PATTERN = /^[A-Za-z0-9._-]{1,128}$/u
 
@@ -74,9 +68,9 @@ export type JumpBackProbe =
   | { readonly capable: false, readonly stage: JumpBackProbeStage, readonly reason: string }
 
 /**
- * The ports a regression injects. Every one of them has the production default
- * named in its comment, so the suite can drive the whole orchestration without
- * the registry, without csc and without the real profile directory.
+ * The ports a regression injects: each production default is named in its
+ * comment, so the suite drives the whole orchestration without the registry,
+ * csc or the real profile directory.
  */
 export interface JumpBackPorts {
   /** Platform override for the regression; production is `process.platform`. */
@@ -113,7 +107,6 @@ export interface JumpBack {
 
 /**
  * Create the orchestration for one process.
- * @param ports Ports and paths; every one of them has a production default.
  * @returns The jump-back orchestration.
  */
 export function createJumpBack(ports: JumpBackPorts = {}): JumpBack {
@@ -178,10 +171,9 @@ export function createJumpBack(ports: JumpBackPorts = {}): JumpBack {
       })
       return false
     }
-    // Windows needs both halves of the registration: the empty `URL Protocol`
-    // marker on the root, and the command below it. Either refusal means no
-    // click can be promised, and a half-written key is never remembered as
-    // registered, so the next notification retries both (D7).
+    // Windows needs both halves: the empty `URL Protocol` marker on the root and
+    // the command below it. Either refusal means no click, and a half-written
+    // key is never remembered as registered, so the next notification retries (D7).
     for (const value of registrationValues(helper, dataDir)) {
       const detail = await addRegistryValue(run, reg, value)
       if (detail !== undefined) {
@@ -202,9 +194,9 @@ export function createJumpBack(ports: JumpBackPorts = {}): JumpBack {
     if (pendingEnsure !== undefined) return pendingEnsure
     // A write that succeeded earlier is not proof the key is still there: the
     // user, another instance or a crash may have deleted or rewritten it since.
-    // Every later notification re-checks the pair and rewrites it when the check
-    // fails (D7). A failed attempt is not cached: the next notification
-    // retries, which is the recovery path after a transient policy refusal.
+    // Every later notification re-checks the pair and rewrites it on failure
+    // (D7); a failed attempt is not cached, so the next notification retries
+    // after a transient policy refusal.
     pendingEnsure = ensureCurrent(helper)
       .catch((error: unknown) => {
         logForDebugging('jumpback: protocol registration threw', { detail: describe(error) })
@@ -220,7 +212,6 @@ export function createJumpBack(ports: JumpBackPorts = {}): JumpBack {
    * Answer "is the promise still backed by the key?", writing the pair when it
    * is not. The first notification pays for two writes; later ones pay for two
    * `reg query` calls unless the key changed (D7).
-   * @param helper - The helper path this process would register.
    * @returns Whether both values now hold this process's template.
    */
   async function ensureCurrent(helper: string): Promise<boolean> {
@@ -297,9 +288,8 @@ export function createJumpBack(ports: JumpBackPorts = {}): JumpBack {
     if (registered) {
       if (hasOtherLiveInstance()) {
         // The key is shared by every instance under this profile: removing it
-        // here would turn another live instance's next toast clicks into dead
-        // ones. Its own next notification re-checks and rewrites the pair if
-        // needed (D7).
+        // would turn another live instance's next toast clicks into dead ones.
+        // Its next notification re-checks and rewrites the pair if needed (D7).
         registered = false
         logForDebugging('jumpback: left the protocol key for a live instance', {
           key: JUMP_BACK_PROTOCOL_KEY,
@@ -320,8 +310,8 @@ export function createJumpBack(ports: JumpBackPorts = {}): JumpBack {
   }
 
   /**
-   * List the marker directory, or undefined when there is nothing to read yet.
-   * The startup sweep and the cleanup yield check share this one read (D8).
+   * List the marker directory, or undefined when there is nothing to read yet;
+   * the startup sweep and the cleanup yield check share this one read (D8).
    * @returns The directory entries, or undefined when the directory is absent.
    */
   function markerEntries() {
@@ -337,10 +327,10 @@ export function createJumpBack(ports: JumpBackPorts = {}): JumpBack {
   }
 
   /**
-   * Whether a marker file belongs to another process that is still alive.
-   * Such an instance still needs the shared key, so cleanup must not remove it.
-   * Files this process wrote, unreadable files and dead pids do not block the
-   * removal; the stale sweep owns whatever is left behind.
+   * Whether a marker file belongs to another process that is still alive: such
+   * an instance still needs the shared key, so cleanup must not remove it. Files
+   * this process wrote, unreadable files and dead pids do not block removal; the
+   * stale sweep owns whatever is left behind.
    * @returns True when at least one other live pid owns a marker file.
    */
   function hasOtherLiveInstance(): boolean {
@@ -413,8 +403,6 @@ interface RegistryValue {
  * The two values a full registration writes (D7), each with the data this
  * process would leave behind. The pair doubles as the template every later
  * notification checks against.
- * @param helper - The helper path the command launches.
- * @param dataDir - The data directory the command passes on.
  * @returns The root marker and the command, in the order they are written.
  */
 function registrationValues(helper: string, dataDir: string): readonly RegistryValue[] {
@@ -425,14 +413,9 @@ function registrationValues(helper: string, dataDir: string): readonly RegistryV
 }
 
 /**
- * Whether both values still hold this process's template. A missing value, a
- * command rewritten to another helper, half a root key or output this parser
- * cannot read all answer false, so the caller rewrites the pair instead of
- * trusting the cache (D7).
- * @param run - The injected process runner.
- * @param reg - The absolute `reg.exe` path.
- * @param helper - The helper path this process would register.
- * @param dataDir - The data directory this process would pass on.
+ * Whether both values still hold this process's template: a missing value, a
+ * command rewritten to another helper, half a root key or unreadable output all
+ * answer false, so the caller rewrites the pair instead of trusting the cache (D7).
  * @returns True only when both values match the template exactly.
  */
 async function registrationMatches(
@@ -448,12 +431,9 @@ async function registrationMatches(
 }
 
 /**
- * Read one value back with `reg query`. A value that is gone (non-zero exit) or
- * whose output this parser cannot read answers undefined; both mean "not
- * provably ours", never "probably fine" (D7).
- * @param run - The injected process runner.
- * @param reg - The absolute `reg.exe` path.
- * @param value - The key and value name to read.
+ * Read one value back with `reg query`. A gone value (non-zero exit) or output
+ * this parser cannot read answers undefined; both mean "not provably ours",
+ * never "probably fine" (D7).
  * @returns The data string, or undefined when the value is not provably there.
  */
 async function readRegistryValue(
@@ -472,7 +452,6 @@ async function readRegistryValue(
  * token, so the label before it is skipped for the default value (Windows
  * localises `(Default)`) and compared exactly for the named root marker (so a
  * data line cannot be mistaken for the value).
- * @param stdout - The query's standard output.
  * @param name - The value name, or null for the key's default value.
  * @returns The data string, or undefined when no value line is present.
  */
@@ -488,12 +467,9 @@ function parseRegistryValue(stdout: string, name: string | null): string | undef
 }
 
 /**
- * Write one `REG_SZ` value with `reg.exe add`. The named value and the key's
- * default value share one argv shape; `name === null` means the default value
- * (`/ve`), the form verified against a real registry (D7).
- * @param run - The injected process runner.
- * @param reg - The absolute `reg.exe` path.
- * @param write - The key, the value name (null for the default value) and its data.
+ * Write one `REG_SZ` value with `reg.exe add`. The named value and the default
+ * share one argv shape; `name === null` means the default value (`/ve`), the
+ * form verified against a real registry (D7).
  * @returns undefined on success, or the line a failure left for the log.
  */
 async function addRegistryValue(
@@ -514,7 +490,6 @@ async function addRegistryValue(
  * The in-box registry tool under `%WINDIR%`, or undefined when the environment
  * names no Windows directory. Resolved by absolute path, never through `PATH`
  * (the same rule the toast transport follows for its own registry writes).
- * @param env - The environment to read.
  * @returns The absolute `reg.exe` path, or undefined.
  */
 function regExe(env: Record<string, string | undefined>): string | undefined {
@@ -527,7 +502,6 @@ function regExe(env: Record<string, string | undefined>): string | undefined {
  * Parse one marker file. Unreadable and unshaped files are left in place: not
  * being able to read a file is not proof that its owner is gone, and a newer
  * process may still know the format (D8).
- * @param path - The marker file to read.
  * @returns The record, or undefined when it cannot be interpreted.
  */
 function readMarkerRecord(path: string): Record<string, unknown> | undefined {
