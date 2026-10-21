@@ -19,7 +19,6 @@ import type { JumpBackProbe } from '../src/ink/jumpback.js'
 import type { WindowsToastInput, WindowsToastResult } from '../src/ink/terminal-notification-windows.js'
 import type { ExecFileNoThrowOptions, ExecFileNoThrowResult } from '../src/utils/execFileNoThrow.js'
 
-/** The throwaway tree every path in this suite resolves under. */
 const sandbox = mkdtempSync(join(tmpdir(), 'dsh-jumpback-'))
 const sandboxHome = join(sandbox, 'home')
 mkdirSync(sandboxHome)
@@ -61,10 +60,8 @@ const REGISTRATION_WRITES = [
   ['add', PROTOCOL_KEY, '/v', 'URL Protocol', '/t', 'REG_SZ', '/d', '', '/f'],
   ['add', PROTOCOL_COMMAND_KEY, '/ve', '/t', 'REG_SZ', '/d', `"${HELPER}" --activate "%1" -DataDir "${PROFILE}"`, '/f'],
 ] as const
-/** The `reg query` answer for a value that is not there. */
 const MISSING_KEY = 'ERROR: The system was unable to find the specified registry key or value.'
 
-/** The process runner the ports are given, as `execFileNoThrow` provides it. */
 type RunCommand = (file: string, args: readonly string[], options?: ExecFileNoThrowOptions) => Promise<ExecFileNoThrowResult>
 type RunCall = { file: string, args: readonly string[], timeout: number | undefined }
 type RunOutcome = { code: number | null, stdout?: string, stderr?: string }
@@ -170,7 +167,6 @@ async function captureDebug<T>(body: () => T | Promise<T>): Promise<{ result: T,
 
 /** The stage a probe reported, or undefined when it promised a jump. */
 const unavailableStage = (probe: JumpBackProbe): string | undefined => probe.capable ? undefined : probe.stage
-/** The reason a probe reported, for the failure cases only. */
 const reasonOf = (probe: JumpBackProbe): string => probe.capable ? '' : probe.reason
 
 /** Turn the setting on and answer the marker the title writer would append. */
@@ -410,7 +406,6 @@ const markerRecord = (overrides: Record<string, unknown> = {}): string => JSON.s
   schemaVersion: 1, marker: MARKER, pid: process.pid, startedAt: new Date(NOW).toISOString(), ...overrides,
 })
 
-/** A throwaway data directory with its marker directory, optionally pre-filled. */
 function markerFixture(name: string, files: Record<string, string> = {}): { dir: string, markerDir: string } {
   const dir = join(sandbox, name)
   const markerDir = join(dir, 'notify', 'jumpback')
@@ -660,9 +655,8 @@ await check('a throwing port costs the jump-back promise, not the notification',
 })
 await check('an external notifier still gets the seam refreshed, but is never probed or registered', async () => {
   const marker = enableJumpBack()
-  // One ordered log across the jump-back ports and the inventory read: the
-  // refresh has to happen before the ownership question, or an external plugin
-  // reading the seam at completion time may see the previous session (D8/AC-9).
+  // One ordered log across the ports and the inventory read: the refresh must
+  // precede the ownership question, or an external plugin may see the old session (D8/AC-9).
   const order: string[] = []
   const recorder = recordingJumpBack({ onStep: name => order.push(name) })
   const delivery = await deliver({ jumpback: recorder.jumpback, platform: 'win32', sessionId: 'session-external', plugins: [notifierRow()], onInventory: () => order.push('inventory') })
