@@ -1,5 +1,5 @@
 /**
- * The Windows toast transport (D3/D4/D8/D10/D11/D12): the only place the
+ * The Windows toast transport (DESIGN D3/D4/D8/D10/D11/D12): the only place the
  * renderer talks to the Windows shell about task-completion notifications.
  *
  * It answers two questions, and a caller should not need anything else:
@@ -14,7 +14,7 @@
  *
  * Showing is in-box PowerShell 5.1 + WinRT, one process per notification (D3):
  * the ~3 s cold start of `powershell.exe` is the accepted cost of adding no
- * resident helper. That process is started without a console of this one's
+ * resident helper (R1). That process is started without a console of this one's
  * ({@link toastHostSpawnOptions}), because a PowerShell host renames the console
  * it runs on. Nothing here waits for the user either: `Show()` hands the
  * notification to the shell and the process exits.
@@ -109,7 +109,7 @@ $d.LoadXml($x)
 $t=New-Object Windows.UI.Notifications.ToastNotification $d
 [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('${TOAST_AUMID}').Show($t)`
 
-// --- how the toast host is started ---------------------------------------------
+// --- how the toast host is started (T-FIX-05) ----------------------------------
 
 /** How much of a host's output is kept; the bound `execFileNoThrow` applies too. */
 const MAX_CAPTURE_BYTES = 64 * 1024
@@ -120,7 +120,7 @@ const MAX_CAPTURE_BYTES = 64 * 1024
  * Showing a toast means running in-box `powershell.exe` (D3), and a PowerShell
  * host sets the console title as it starts. A child that inherits this process's
  * console therefore renames the session's tab - measured 2026-10-16, before and
- * after one toast: `✦ 🐋 [dsh-tui:42672]` became `Windows PowerShell`.
+ * after one toast: `✦ 🐋 [dsh-tui:42672]` became `Windows PowerShell` (UAT-M4).
  *
  * `windowsHide` is what keeps that console away: Windows starts the child with
  * CREATE_NO_WINDOW, so it has none of its own to retitle, while the pipes below
@@ -199,11 +199,10 @@ function spawnConsoleLess(file: string, args: readonly string[], options?: ExecF
 // --- the pure layer (D10) ------------------------------------------------------
 
 /**
- * Escape the four characters that would otherwise end a text node or a
- * double-quoted attribute (AC-8). A summary is arbitrary model output, so
- * nothing may reach the XML unescaped.
- * @param text Raw text from the renderer, or a launch URI.
- * @returns The same text, safe inside an XML text node or a quoted attribute.
+ * Escape the four characters that would otherwise end a text node (AC-8). A
+ * summary is arbitrary model output, so nothing may reach the XML unescaped.
+ * @param text Raw text from the renderer.
+ * @returns The same text, safe inside an XML text node.
  */
 export function escapeXmlText(text: string): string {
   // `&` first: escaping it after `&lt;` would double-escape the entities.
@@ -220,12 +219,7 @@ export interface ToastContent {
   title: string
   /** Second line: the single-line summary. Omitted when empty, clipped by {@link clampSummary}. */
   message?: string
-  /**
-   * The protocol activation URI a click opens (D9), or undefined for a toast
-   * that only informs. The caller sets it once a probe has proved exactly one
-   * target (AC-3): a URI that resolves nothing is a click that does nothing,
-   * and this transport cannot tell the two apart.
-   */
+  /** Protocol activation URI a click opens; omitted, the toast only informs. */
   launch?: string
 }
 
@@ -263,21 +257,19 @@ function clampSummary(message: string): string {
 
 /**
  * Build the ToastGeneric document (D10).
- * @param content Title, summary and the optional activation URI.
+ * @param content Title and summary.
  * @returns The XML handed to `XmlDocument.LoadXml` on the PowerShell side.
  */
 export function toastXml(content: ToastContent): string {
+  // Without a launch URI the document has to stay byte for byte what it was, so
+  // the attribute is built only when there is something to activate.
+  const activation = content.launch !== undefined && content.launch !== ''
+    ? ` activationType="protocol" launch="${escapeXmlText(content.launch)}"`
+    : ''
   const texts = [`<text>${escapeXmlText(content.title)}</text>`]
   if (content.message !== undefined && content.message !== '') {
     texts.push(`<text>${escapeXmlText(clampSummary(content.message))}</text>`)
   }
-  // D9: without a launch the document has to stay byte for byte what it was, so
-  // the plain toast is the absence of an attribute rather than a second
-  // template. `protocol` is what makes the shell hand the URI to the registered
-  // `dsh-tui:` handler instead of treating a click as a dismiss.
-  const activation = content.launch !== undefined && content.launch !== ''
-    ? ` activationType="protocol" launch="${escapeXmlText(content.launch)}"`
-    : ''
   return `<toast${activation}><visual><binding template="ToastGeneric">${texts.join('')}</binding></visual></toast>`
 }
 
@@ -328,10 +320,10 @@ export interface WindowsToastTransportOptions {
    * Process runner for the toast host; defaults to the console-less spawn
    * ({@link toastHostSpawnOptions}). A port of its own because "which runner"
    * is exactly the difference between a session whose tab keeps its title and
-   * one whose tab a PowerShell host renames.
+   * one whose tab a PowerShell host renames (UAT-M4).
    */
   runToastHost?: RunCommand
-  /** Clock, so the log can report how long the toast spawn took; defaults to `Date.now`. */
+  /** Clock, so the log can report how long the toast spawn took (R1); defaults to `Date.now`. */
   now?: () => number
   /** Log sink; defaults to `logForDebugging`. */
   log?: (message: string, fields?: Record<string, unknown>) => void
@@ -365,7 +357,7 @@ export interface WindowsToastInput {
   title: string
   /** Single-line summary; empty shows the title alone. */
   message?: string
-  /** Protocol activation URI a click opens (D9); omitted, the toast only informs. See {@link ToastContent.launch}. */
+  /** Protocol activation URI a click opens; omitted, the toast only informs. */
   launch?: string
   /** The host confirmed an enabled, active DSH notifier in its live inventory. */
   externalNotifierActive?: boolean

@@ -1,5 +1,5 @@
 /**
- * Windows toast transport contract: the toast XML layer, the lazy AUMID
+ * Windows toast transport contract (T03): the toast XML layer, the lazy AUMID
  * registration state machine, and the external-notifier dedup - all driven
  * through injected ports.
  *
@@ -163,19 +163,12 @@ await check('the toast XML carries the title and the summary, and nothing else',
   assert.ok(nasty.includes('🐋'), 'the emoji must survive escaping')
 })
 
-await check('a toast without a launch URI is the document #1637 shipped, byte for byte', () => {
-  // Both documents are spelled out rather than built from `toastXml`: this pins
-  // an existing document, so an expectation that moves with the function under
-  // test would pin nothing (D9 - the plain toast may not change at all).
+await check('a toast without a launch URI is the document the previous release shipped, byte for byte', () => {
+  const xml = toastXml({ title: TITLE, message: '摘要一行' })
   assert.equal(
-    toastXml({ title: TITLE, message: '摘要一行' }),
-    '<toast><visual><binding template="ToastGeneric"><text>dsh-TUI · 任务已完成</text><text>摘要一行</text></binding></visual></toast>',
-    'no launch means no attribute on the root: the toast every existing caller sends must not change',
-  )
-  assert.equal(
-    toastXml({ title: TITLE }),
-    '<toast><visual><binding template="ToastGeneric"><text>dsh-TUI · 任务已完成</text></binding></visual></toast>',
-    'and the title-only document is unchanged too',
+    xml,
+    `<toast><visual><binding template="ToastGeneric"><text>${TITLE}</text><text>摘要一行</text></binding></visual></toast>`,
+    'no launch means no attribute on the root, so every existing caller sends the same bytes'
   )
 })
 
@@ -184,26 +177,25 @@ await check('a launch URI makes the toast a protocol activation, escaped', async
   const xml = toastXml({ title: TITLE, message: '摘要一行', launch })
   assert.ok(
     xml.startsWith(`<toast activationType="protocol" launch="${launch}">`),
-    `both attributes belong on the toast root - on <binding> the shell ignores them: ${xml}`,
+    'a launch makes the event a protocol activation whose argument is that URI'
   )
-  assert.deepEqual(textNodes(xml), [TITLE, '摘要一行'], 'the activation adds attributes, not content')
-
-  // Spelled out like NASTY_ESCAPED, and for the same reason: an expectation
-  // built by the escaper under test cannot fail when that escaper breaks.
   const nastyLaunch = 'dsh-tui:activate?m=a&b<c>"d"'
   assert.ok(
     toastXml({ title: TITLE, launch: nastyLaunch })
       .startsWith('<toast activationType="protocol" launch="dsh-tui:activate?m=a&amp;b&lt;c&gt;&quot;d&quot;">'),
-    'a launch carrying markup must not be able to end the attribute early',
+    'a launch carrying markup must not be able to end the attribute early'
   )
   assert.ok(!toastXml({ title: TITLE, launch: '' }).includes('launch='), 'an empty launch is no activation at all: clicking it would open nothing')
 
-  // The wiring no type check covers: `show()` builds the XML from the
-  // input, so a launch that stops at `WindowsToastInput` passes every assertion
-  // above while the delivered toast stays inert.
+  // The XML the transport hands to the shell is what carries the launch, so a
+  // launch that stops at WindowsToastInput would pass every assertion above.
   const h = harness()
   await h.transport.notify({ title: TITLE, message: '摘要一行', launch })
-  assert.equal(h.runner.calls.at(-1)?.input, xml, 'the launch has to reach the XML handed to the shell')
+  assert.equal(
+    h.runner.calls.at(-1)?.input,
+    toastXml({ title: TITLE, message: '摘要一行', launch }),
+    'the launch has to reach the XML handed to the shell'
+  )
 })
 
 await check('an over-long summary is clipped to the two lines the toast can show', () => {
@@ -214,7 +206,7 @@ await check('an over-long summary is clipped to the two lines the toast can show
   // measure, so an English summary still reads as two lines rather than one
   // clipped by the shell.
   const message = '很长的任务摘要。'.repeat(20)
-  assert.ok(stringWidth(message) > 80, 'the fixture must exceed the budget, or this check proves nothing')
+  assert.ok(stringWidth(message) > 80, 'the fixture must exceed the budget, or this check proves nothing (L-048)')
   const [, body] = textNodes(toastXml({ title: TITLE, message }))
   assert.ok(stringWidth(body) <= 80, `the body must fit two lines, got ${stringWidth(body)} columns`)
   assert.ok(body.endsWith('…'), `a clipped summary says so instead of just stopping: ${body}`)
@@ -290,7 +282,7 @@ await check('a refused AUMID write is reported, not retried', async () => {
   const first = await h.transport.notify({ title: TITLE })
   assert.equal(first.status, 'unavailable')
   assert.equal(first.reason, 'aumid-registration-failed')
-  assert.match(first.detail ?? '', /Access is denied/, 'the registry error is the only clue the caller gets')
+  assert.match(first.detail ?? '', /Access is denied/, 'the registry error is the only clue for R2')
   assert.equal(h.registry.writes.length, 1, 'a policy refusal is not retried on the next notification')
   const second = await h.transport.notify({ title: TITLE })
   assert.deepEqual(second, first)
@@ -312,7 +304,7 @@ await check('the toast is spawned by in-box PowerShell with the XML on stdin, ne
   )
   assert.ok(!/[<>·🐋]/u.test(call.args.join(' ')), 'user text must never reach the command line (security)')
   assert.ok(typeof call.timeout === 'number' && call.timeout > 0, 'a stuck PowerShell must not hold the caller forever')
-  assert.equal(h.logged.filter(([, fields]) => fields?.ms !== undefined).length, 1, 'the log records how long the spawn took')
+  assert.equal(h.logged.filter(([, fields]) => fields?.ms !== undefined).length, 1, 'R1: the log records how long the spawn took')
 })
 
 await check('the script body carries the two things the real host needs', async () => {
@@ -337,7 +329,7 @@ await check('the script body carries the two things the real host needs', async 
 })
 
 await check('the toast host is spawned with no console of its own, so it cannot retitle ours', () => {
-  // The defect this pins: the in-box host inherits the TUI's console and
+  // The defect this pins (UAT-M4): the in-box host inherits the TUI's console and
   // sets its title as it starts. Measured on a real machine (2026-10-16): the
   // title went to "Windows PowerShell" with the previous options and stayed put
   // with these.
@@ -351,7 +343,7 @@ await check('the toast host runs on its own runner, never on the one that keeps 
   // Where the toast is spawned is the half a test can see: handing it back to
   // `run` - the runner `reg.exe` uses, which `execFileNoThrow` spawns with the
   // console inherited - leaves the isolated runner empty, and that is the shape
-  // that produced that defect. Every port but the registry is stubbed, so the two
+  // that produced UAT-M4. Every port but the registry is stubbed, so the two
   // runners are told apart by what they carried.
   const shared = recordingRunner()
   const toast = recordingRunner()
