@@ -33,7 +33,6 @@ import { DATA_DIR } from '../../utils/paths.js'
  */
 const HELPER_SOURCE = fileURLToPath(new URL('./activate.cs', import.meta.url))
 
-/** Where the compiled helper and its cache key live (D5). */
 const HELPER_DIR = join(DATA_DIR, 'notify', 'helper')
 const HELPER_EXE = join(HELPER_DIR, 'activate.exe')
 /** Remembers the (source hash, csc path) pair the executable was built from. */
@@ -53,7 +52,6 @@ const FRAMEWORK_VERSION = 'v4.0.30319'
  */
 const UI_AUTOMATION_ASSEMBLIES = ['UIAutomationClient.dll', 'UIAutomationTypes.dll'] as const
 
-/** A readable reason for the debug log; `unknown` may be anything. */
 function detailOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
@@ -73,10 +71,9 @@ function inBoxCsc(): string | undefined {
 }
 
 /**
- * The csc invocation. `/target:winexe` keeps a console from flashing when
- * Windows starts the helper from a toast click (D5); the source must stay at
- * C# 5 because this csc is the .NET Framework 4.x in-box one.
- * @param csc - the resolved compiler path.
+ * `/target:winexe` keeps a console from flashing when Windows starts the helper
+ * from a toast click (D5); the source must stay at C# 5 because this csc is the
+ * .NET Framework 4.x in-box one.
  * @returns the argv to run.
  */
 function cscArgs(csc: string): string[] {
@@ -87,11 +84,8 @@ function cscArgs(csc: string): string[] {
 }
 
 /**
- * The cache key: the source content plus the compiler that built it. The csc
- * path is in the key so a machine that acquires or switches framework
+ * The csc path is in the key so a machine that acquires or switches framework
  * directories rebuilds rather than running an executable from another layout.
- * @param source - the source file's text.
- * @param csc - the resolved compiler path.
  * @returns the string stored in {@link HELPER_HASH}.
  */
 function cacheKey(source: string, csc: string): string {
@@ -99,8 +93,6 @@ function cacheKey(source: string, csc: string): string {
 }
 
 /**
- * Whether the executable on disk was built from exactly this key.
- * @param key - the key for the current source and compiler.
  * @returns true when the executable and its matching key both exist.
  */
 function cacheHit(key: string): boolean {
