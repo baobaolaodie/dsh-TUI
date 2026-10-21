@@ -561,8 +561,8 @@ internal static class JumpBack
         }
     }
 
-    // The five checks from ADR-0016's Amendment, each read from the live desktop after the
-    // focus call. A check that cannot be read is false: unproven is not verified.
+    // The five checks the jump-back contract requires, each read from the live desktop
+    // after the focus call. A check that cannot be read is false: unproven is not verified.
     private static Checks Verify(string paneRtid, string marker, IntPtr hwnd)
     {
         Checks checks = new Checks();
