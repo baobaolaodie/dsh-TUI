@@ -737,6 +737,21 @@ await check('disabling while the probe is in flight drops the launch and never r
   assert.equal(toastInputs[0].launch, undefined, 'and the toast carries no URI')
 })
 
+await check('a probe that outlives an off→on cycle cannot register for the new generation', async () => {
+  enableJumpBack()
+  let release!: () => void
+  const gate = new Promise<void>(resolve => { release = resolve })
+  const recorder = recordingJumpBack({ probe: async () => { await gate; return { capable: true, helperPath: HELPER } } })
+  const pending = deliver({ jumpback: recorder.jumpback, platform: 'win32' })
+  await tick()
+  setJumpBackEnabled(false)
+  setJumpBackEnabled(true)
+  release()
+  const { toastInputs } = await pending
+  assert.deepEqual(recorder.steps.map(step => step.name), ['writeMarker', 'probe'], 'the old completion belongs to the generation it started in, even though the switch is on again')
+  assert.equal(toastInputs[0].launch, undefined, 'a re-enabled generation must not inherit the old preparation')
+})
+
 await check('a released owner during the probe never reaches registration', async () => {
   enableJumpBack()
   let release!: () => void
