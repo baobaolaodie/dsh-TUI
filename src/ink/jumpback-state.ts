@@ -17,9 +17,15 @@ export interface JumpBackState {
   readonly enabled: boolean
   /** 16 lowercase hex characters naming this pane; null until the first enable. */
   readonly marker: string | null
+  /**
+   * The enable generation. Every enable or disable publishes a new value, so an
+   * asynchronous preparation that started under an older generation can tell it
+   * has been superseded before it reaches the registry.
+   */
+  readonly generation: number
 }
 
-let state: JumpBackState = { enabled: false, marker: null }
+let state: JumpBackState = { enabled: false, marker: null, generation: 0 }
 const subscribers: Set<() => void> = new Set()
 
 /**
@@ -54,6 +60,7 @@ export function setJumpBackEnabled(enabled: boolean): void {
   state = {
     enabled,
     marker: enabled && state.marker === null ? randomBytes(8).toString('hex') : state.marker,
+    generation: state.generation + 1,
   }
   for (const cb of subscribers) {
     cb()

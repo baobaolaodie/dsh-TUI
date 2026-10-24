@@ -123,6 +123,18 @@ export function createJumpBack(ports: JumpBackPorts = {}): JumpBack {
   const written = new Set<string>()
   /** Whether this process registered the key; re-checked before every later promise (D7). */
   let registered = false
+  /**
+   * The helper this process registered (or found its own template for). Cleanup
+   * uses it to recognise a shared key another instance wrote for every instance
+   * under this profile, so the last one out can still release it.
+   */
+  let lastHelper: string | undefined
+  /**
+   * Whether this process ever took part in jump-back (registered or wrote a
+   * marker). A default-off process stays untouched: cleanup must not even read
+   * the registry for it, or the "no trace" promise grows a pair of queries.
+   */
+  let armed = false
   /** The one registration or re-check in flight, so concurrent notifications share it. */
   let pendingEnsure: Promise<boolean> | undefined
 
@@ -186,6 +198,8 @@ export function createJumpBack(ports: JumpBackPorts = {}): JumpBack {
       }
     }
     registered = true
+    lastHelper = helper
+    armed = true
     logForDebugging('jumpback: protocol registered', { key: JUMP_BACK_PROTOCOL_KEY })
     return true
   }
@@ -217,7 +231,11 @@ export function createJumpBack(ports: JumpBackPorts = {}): JumpBack {
   async function ensureCurrent(helper: string): Promise<boolean> {
     if (!registered) return register(helper)
     const reg = regExe(env)
-    if (reg !== undefined && await registrationMatches(run, reg, helper, dataDir)) return true
+    if (reg !== undefined && await registrationMatches(run, reg, helper, dataDir)) {
+      lastHelper = helper
+      armed = true
+      return true
+    }
     return register(helper)
   }
 
@@ -277,6 +295,7 @@ export function createJumpBack(ports: JumpBackPorts = {}): JumpBack {
       return undefined
     }
     written.add(path)
+    armed = true
     logForDebugging('jumpback: marker file written', { path })
     return path
   }
@@ -285,7 +304,15 @@ export function createJumpBack(ports: JumpBackPorts = {}): JumpBack {
     // A registration still in flight may land after this check; waiting for it
     // makes "we do not leave a key behind" true even on a fast exit.
     if (pendingEnsure !== undefined) await pendingEnsure
-    if (registered) {
+    const reg = regExe(env)
+    const helper = lastHelper ?? join(dataDir, 'notify', 'helper', 'activate.exe')
+    // A process that never registered can still be the last one out: another
+    // instance registered the same shared key for this profile. Recognise our
+    // own template instead of trusting this object's `registered` flag, and
+    // never remove a key that belongs to something else.
+    const keyIsOurs = registered || (armed && platform === 'win32' && reg !== undefined
+      && await registrationMatches(run, reg, helper, dataDir))
+    if (keyIsOurs) {
       if (hasOtherLiveInstance()) {
         // The key is shared by every instance under this profile: removing it
         // would turn another live instance's next toast clicks into dead ones.

@@ -355,7 +355,7 @@ export async function deliverTaskCompletionOnWindows(
   backendId: string,
   delivery: TaskCompletionDelivery,
 ): Promise<void> {
-  const target = refreshJumpBackMarker(delivery)
+  let target = refreshJumpBackMarker(delivery)
   let externalNotifierActive = false
   if (backendId === 'dsh' && delivery.pluginManager !== undefined) {
     try {
@@ -366,10 +366,19 @@ export async function deliverTaskCompletionOnWindows(
       logForDebugging('external notifier inventory unavailable; using the built-in Windows notification')
     }
   }
+  // The inventory await is a toggle boundary too: a switch turned off while it
+  // ran already cleaned up, so the target taken before it must not register or
+  // promise anything now.
+  if (target !== undefined) {
+    const state = getJumpBackState()
+    if (!state.enabled || state.generation !== target.generation || delivery.canDispatch?.() === false) {
+      target = undefined
+    }
+  }
   // An external notifier ships this completion: only a toast this process sends
   // can come back here, so no probe and no registration - the URI would never
   // be clicked.
-  const launch = target === undefined || externalNotifierActive ? undefined : await jumpBackLaunch(target)
+  const launch = target === undefined || externalNotifierActive ? undefined : await jumpBackLaunch(target, delivery)
   const result = await delivery.toast({
     title,
     message,
@@ -416,10 +425,12 @@ function markerFileName(sessionId: string | undefined): string {
     : `process-${process.pid}`
 }
 
-/** The pane this completion speaks for: its marker and the orchestration that acts on it. */
+/** The pane this completion speaks for: its marker, orchestration and enable generation. */
 interface JumpBackTarget {
   readonly marker: string
   readonly jumpback: TaskCompletionJumpBack
+  /** The enable generation the marker was written under; a later toggle supersedes it. */
+  readonly generation: number
 }
 
 /**
@@ -437,12 +448,22 @@ interface JumpBackTarget {
 function refreshJumpBackMarker(delivery: TaskCompletionDelivery): JumpBackTarget | undefined {
   // The title writer tags a pane only on Windows; promising a jump anywhere
   // else is a dead click. A disabled switch costs nothing and comes first.
-  const { enabled, marker } = getJumpBackState()
+  const { enabled, marker, generation } = getJumpBackState()
   if (!enabled || marker === null || (delivery.platform ?? process.platform) !== 'win32') return undefined
   const jumpback = delivery.jumpback ?? jumpBackForProcess()
   try {
-    jumpback.writeMarker(markerFileName(delivery.sessionId), marker)
-    return { marker, jumpback }
+    // `writeMarker` answers undefined, not a throw, when the directory is not
+    // writable. A target without its documented file would still allow a probe
+    // and a registration, so a click would promise a jump other instances
+    // cannot see (and cannot use to judge this one alive).
+    if (jumpback.writeMarker(markerFileName(delivery.sessionId), marker) === undefined) {
+      logForDebugging('jumpback: the launch could not be prepared; sending the plain toast', {
+        step: 'marker',
+        detail: 'the marker file was not written',
+      })
+      return undefined
+    }
+    return { marker, jumpback, generation }
   } catch (error) {
     // The delivery path is fire-and-forget: a port that throws must cost the
     // jump-back promise, never the notification itself (AC-3/AC-10). One
@@ -466,11 +487,20 @@ function refreshJumpBackMarker(delivery: TaskCompletionDelivery): JumpBackTarget
  * @param target - The marker and the orchestration that must prove it reachable.
  * @returns The activation URI, or undefined for the plain toast.
  */
-async function jumpBackLaunch(target: JumpBackTarget): Promise<string | undefined> {
+async function jumpBackLaunch(target: JumpBackTarget, delivery: TaskCompletionDelivery): Promise<string | undefined> {
+  // The setting can be turned off while this completion waits for its probe or
+  // for the registry. A stale preparation must not write the key back: the
+  // disable already ran its cleanup, and the click would outlive the switch.
+  const stillWanted = (): boolean => {
+    const state = getJumpBackState()
+    return state.enabled && state.generation === target.generation && delivery.canDispatch?.() !== false
+  }
+  if (!stillWanted()) return undefined
   try {
     const probe = await target.jumpback.probe(target.marker)
-    if (!probe.capable) return undefined
+    if (!probe.capable || !stillWanted()) return undefined
     if (!await target.jumpback.ensureProtocol(probe.helperPath)) return undefined
+    if (!stillWanted()) return undefined
     return `${JUMP_BACK_LAUNCH_PREFIX}${target.marker}`
   } catch (error) {
     // Same rule as the marker refresh: the jump-back promise is all a throwing
@@ -507,13 +537,21 @@ function refreshEnabledMarker(
   if (platform !== 'win32' || marker === null) return
   if (sessionId === undefined || !isMarkerFileSession(sessionId)) return
   try {
-    jumpback.writeMarker(sessionId, marker)
+    if (jumpback.writeMarker(sessionId, marker) === undefined) {
+      logForDebugging('jumpback: the enabled marker file was not written', { sessionId })
+    }
   } catch (error) {
     logForDebugging('jumpback: the enabled marker file could not be refreshed', {
       detail: error instanceof Error ? error.message : String(error),
     })
   }
 }
+
+/**
+ * The cleanup a disable started, so a quick enable can order its marker write
+ * after the delete instead of racing it for the same documented path.
+ */
+let pendingCleanup: Promise<void> = Promise.resolve()
 
 /**
  * Publish one jump-back settings resolution and act on the transition
@@ -531,18 +569,31 @@ function refreshEnabledMarker(
  * @param platform - The host platform; defaults to this process's, injectable
  *   for the regression, which runs on POSIX CI.
  */
-export function applyJumpBackSetting(
+export async function applyJumpBackSetting(
   jumpback: Pick<JumpBack, 'sweepStale' | 'cleanup' | 'writeMarker'>,
   enabled: boolean,
   sessionId?: string,
   platform: NodeJS.Platform = process.platform,
-): void {
+): Promise<void> {
   const wasEnabled = getJumpBackState().enabled
   setJumpBackEnabled(enabled)
   if (enabled && !wasEnabled) {
+    // The previous generation may still be deleting the documented marker file.
+    // A new enable writes the same path, so it waits for that delete: otherwise
+    // the old cleanup would remove the file this generation just published.
+    await pendingCleanup
+    pendingCleanup = Promise.resolve()
     jumpback.sweepStale()
     refreshEnabledMarker(jumpback, sessionId, platform)
-  } else if (!enabled && wasEnabled) void jumpback.cleanup()
+  } else if (!enabled && wasEnabled) {
+    // Kept so a quick re-enable can order itself after this cleanup; the
+    // settings watch does not wait for the transition itself.
+    pendingCleanup = jumpback.cleanup().catch((error: unknown) => {
+      logForDebugging('jumpback: the cleanup after disabling failed', {
+        detail: error instanceof Error ? error.message : String(error),
+      })
+    })
+  }
 }
 
 /**
@@ -1834,7 +1885,7 @@ export async function apply(ctx: Context, runtimeConfig: RuntimeConfig<Config>, 
       channel.setExpandEditor(value.expandEditor ?? config.expandEditor ?? true)
       channel.setSmoothStreaming(value.smoothStreaming ?? config.smoothStreaming ?? true)
       configureTaskNotifications(value.taskNotifications ?? config.taskNotifications, value.notificationMethod ?? config.notificationMethod)
-      applyJumpBackSetting(jumpBack, value.jumpBack ?? config.jumpBack ?? false, rawChannel.sessionRef.sessionId)
+      void applyJumpBackSetting(jumpBack, value.jumpBack ?? config.jumpBack ?? false, rawChannel.sessionRef.sessionId)
       applyMermaidDiagrams(value.mermaidDiagrams ?? config.mermaidDiagrams)
       applyCodeFrameStyle(value.codeFrameStyle ?? config.codeFrameStyle)
       applyMathRendering(resolveMathRendering(value, config))
