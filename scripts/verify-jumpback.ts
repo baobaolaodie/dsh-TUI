@@ -195,7 +195,7 @@ await check('the pane title carries the marker only on Windows, once enabled', (
 
 // --- one published identity ---------------------------------------------------
 await check('enabling mints one 16-hex marker and publishes it once', () => {
-  assert.deepEqual(getJumpBackState(), { enabled: false, marker: null }, 'a fresh process starts off with no identity')
+  assert.deepEqual(getJumpBackState(), { enabled: false, marker: null, generation: 0 }, 'a fresh process starts off with no identity')
   const before = getJumpBackState()
   const seen: number[] = []
   const unsubscribe = subscribeJumpBack(() => seen.push(1))
@@ -203,6 +203,7 @@ await check('enabling mints one 16-hex marker and publishes it once', () => {
   const state = getJumpBackState()
   assert.notEqual(state, before, 'a real change publishes a new snapshot, or useSyncExternalStore never re-renders')
   assert.equal(state.enabled, true)
+  assert.equal(state.generation, before.generation + 1, 'every toggle publishes a new generation, so a late preparation can tell it is stale')
   assert.match(String(state.marker), /^[0-9a-f]{16}$/u, 'the marker is 16 lowercase hex characters (D2/AC-2)')
   assert.deepEqual(seen, [1], 'subscribers are told exactly once')
   unsubscribe()
@@ -426,7 +427,7 @@ await check('cleanup removes the key it registered and the files it wrote, once'
   assert.equal(existsSync(markerPath), false, 'the marker file this process wrote is removed')
   assert.equal(existsSync(foreign), true, 'another instance\'s file is not ours to delete')
   await instance.cleanup()
-  assert.equal(runner.calls.length, 3, 'cleanup is idempotent')
+  assert.equal(runner.calls.filter(call => call.args[0] !== 'query').length, 3, 'cleanup is idempotent: the second pass only reads, it never writes or deletes again')
 })
 await check('a process that never registered or wrote leaves everything alone', async () => {
   const { dir, markerDir } = markerFixture('cleanup-empty', { 'session-other.json': '{}' })
@@ -502,26 +503,26 @@ function recordingLifecycle() {
 /** The session a settings flip names, standing in for `rawChannel.sessionRef.sessionId`. */
 const FLIP_SESSION = 'session-flip'
 
-await check('flipping the setting cleans up on disable, sweeps once on enable, and refreshes the marker file', () => {
+await check('flipping the setting cleans up on disable, sweeps once on enable, and refreshes the marker file', async () => {
   const marker = enableJumpBack()
   const port = recordingLifecycle()
-  const flip = (enabled: boolean, sessionId: string | undefined, platform: NodeJS.Platform = 'win32'): void => applyJumpBackSetting(port.jumpback, enabled, sessionId, platform)
-  flip(false, FLIP_SESSION)
+  const flip = (enabled: boolean, sessionId: string | undefined, platform: NodeJS.Platform = 'win32'): Promise<void> => applyJumpBackSetting(port.jumpback, enabled, sessionId, platform)
+  await flip(false, FLIP_SESSION)
   assert.deepEqual(port.steps, ['cleanup'], 'on→off cleans up: the key and marker files this process left must go (AC-1/AC-9)')
   assert.equal(getJumpBackState().enabled, false)
-  flip(false, FLIP_SESSION)
+  await flip(false, FLIP_SESSION)
   assert.deepEqual(port.steps, ['cleanup'], 'republishing off publishes nothing and cleans up nothing twice')
-  flip(true, FLIP_SESSION)
+  await flip(true, FLIP_SESSION)
   assert.deepEqual(port.steps, ['cleanup', 'sweepStale', 'writeMarker'], 'off→on sweeps stale marker files once and refreshes the documented seam for the current session (D8)')
   assert.deepEqual(port.markerWrites, [[FLIP_SESSION, marker]], 'the refresh names the current session with this pane\'s marker, so an external reader finds it before the first completion (AC-9)')
   assert.equal(getJumpBackState().marker, marker, 'the flip keeps this pane\'s identity (AC-2)')
-  flip(true, FLIP_SESSION)
+  await flip(true, FLIP_SESSION)
   assert.deepEqual(port.steps, ['cleanup', 'sweepStale', 'writeMarker'], 'republishing on neither sweeps nor refreshes again')
   assert.deepEqual(port.markerWrites, [[FLIP_SESSION, marker]], 'repeated true writes the seam exactly once (D8)')
   // The refresh is only a Windows, session-named promise: another host or a
   // boot without a session yet has no documented file to publish (D2/D8).
   for (const [on, session, platform] of [[false, FLIP_SESSION, 'win32'], [true, undefined, 'win32'], [false, FLIP_SESSION, 'win32'], [true, FLIP_SESSION, 'linux']] as const) {
-    flip(on, session, platform)
+    await flip(on, session, platform)
   }
   assert.deepEqual(port.markerWrites, [[FLIP_SESSION, marker]], 'off Windows, or with no session to name, enabling publishes no marker file')
 })
@@ -546,6 +547,8 @@ function recordingJumpBack(options: {
   probe?: JumpBackProbe | (() => Promise<JumpBackProbe>)
   register?: boolean
   markerPath?: string
+  /** False makes the port answer like an unwritable directory (undefined, not a throw). */
+  markerWritten?: boolean
   throwOn?: 'writeMarker' | 'probe' | 'ensureProtocol'
   /** Also reports each step into a shared log, so ordering against another port is assertable. */
   onStep?: (name: string) => void
@@ -558,7 +561,8 @@ function recordingJumpBack(options: {
     writeMarker(sessionId, marker) {
       guard('writeMarker')
       record('writeMarker', [sessionId, marker])
-      return options.markerPath
+      if (options.markerWritten === false) return undefined
+      return options.markerPath ?? join(MARKER_DIR, `${sessionId}.json`)
     },
     async probe(marker) {
       guard('probe')
@@ -591,6 +595,10 @@ async function deliver(options: {
   toast?: WindowsToastResult
   /** Reports the inventory read into a shared log, for ordering against the ports. */
   onInventory?: () => void
+  /** Holds the inventory read open so a toggle can land while it is pending. */
+  inventoryGate?: Promise<void>
+  /** The host's live permission; false stands in for a released owner. */
+  canDispatch?: () => boolean
 }): Promise<{ toastInputs: WindowsToastInput[] }> {
   const toastInputs: WindowsToastInput[] = []
   const delivery: TaskCompletionDelivery = {
@@ -599,7 +607,16 @@ async function deliver(options: {
     jumpback: options.jumpback,
     sessionId: options.sessionId,
     platform: options.platform,
-    pluginManager: options.plugins === undefined ? undefined : { listPlugins: async () => { options.onInventory?.(); return options.plugins ?? [] } },
+    canDispatch: options.canDispatch,
+    pluginManager: options.plugins === undefined
+      ? undefined
+      : {
+          listPlugins: async () => {
+            options.onInventory?.()
+            if (options.inventoryGate !== undefined) await options.inventoryGate
+            return options.plugins ?? []
+          },
+        },
   }
   await deliverTaskCompletionOnWindows(TITLE, '摘要一行', 'dsh', delivery)
   return { toastInputs }
@@ -676,6 +693,103 @@ await check('the marker file is named for the session, or for this process when 
     await deliver({ jumpback: fallback.jumpback, platform: 'win32', sessionId })
     assert.deepEqual(fallback.steps[0], { name: 'writeMarker', args: [`process-${process.pid}`, marker] }, 'an unsafe or missing id must not decide the path, and the file still has to exist (AC-9)')
   }
+})
+
+// --- lifecycle under a moving switch ------------------------------------------
+
+/** Let a pending port reach its await before the test toggles the switch. */
+const tick = (): Promise<void> => new Promise(resolve => { setImmediate(resolve) })
+
+await check('a marker file the port refuses to write sends the plain toast', async () => {
+  enableJumpBack()
+  const recorder = recordingJumpBack({ markerWritten: false })
+  const { result, lines } = await captureDebug(() => deliver({ jumpback: recorder.jumpback, platform: 'win32' }))
+  assert.deepEqual(recorder.steps.map(step => step.name), ['writeMarker'], 'an unwritten seam stops before the probe: there is no target to promise')
+  assert.equal(result.toastInputs[0].launch, undefined, 'no file, no click: the toast stays ordinary')
+  assert.match(lines.join(''), /marker file was not written/u, 'the reason is in the log instead of a silent degradation')
+})
+
+await check('disabling during the inventory read cancels the preparation', async () => {
+  enableJumpBack()
+  let release!: () => void
+  const gate = new Promise<void>(resolve => { release = resolve })
+  const recorder = recordingJumpBack()
+  const pending = deliver({ jumpback: recorder.jumpback, platform: 'win32', plugins: [], inventoryGate: gate })
+  await tick()
+  setJumpBackEnabled(false)
+  release()
+  const { toastInputs } = await pending
+  assert.deepEqual(recorder.steps.map(step => step.name), ['writeMarker'], 'the target taken before the await must not reach the probe after the switch moved')
+  assert.equal(toastInputs[0].launch, undefined, 'the plain toast is what a disabled switch sends')
+})
+
+await check('disabling while the probe is in flight drops the launch and never registers', async () => {
+  enableJumpBack()
+  let release!: () => void
+  const gate = new Promise<void>(resolve => { release = resolve })
+  const recorder = recordingJumpBack({ probe: async () => { await gate; return { capable: true, helperPath: HELPER } } })
+  const pending = deliver({ jumpback: recorder.jumpback, platform: 'win32' })
+  await tick()
+  setJumpBackEnabled(false)
+  release()
+  const { toastInputs } = await pending
+  assert.deepEqual(recorder.steps.map(step => step.name), ['writeMarker', 'probe'], 'a probe that resolves after the disable must not write the key back')
+  assert.equal(toastInputs[0].launch, undefined, 'and the toast carries no URI')
+})
+
+await check('a released owner during the probe never reaches registration', async () => {
+  enableJumpBack()
+  let release!: () => void
+  const gate = new Promise<void>(resolve => { release = resolve })
+  let allowed = true
+  const recorder = recordingJumpBack({ probe: async () => { await gate; return { capable: true, helperPath: HELPER } } })
+  const pending = deliver({ jumpback: recorder.jumpback, platform: 'win32', canDispatch: () => allowed })
+  await tick()
+  allowed = false
+  release()
+  const { toastInputs } = await pending
+  assert.deepEqual(recorder.steps.map(step => step.name), ['writeMarker', 'probe'], 'the owner check happens before the registry write')
+  assert.equal(toastInputs[0].launch, undefined, 'a released owner gets no promise it cannot keep')
+})
+
+await check('a quick re-enable waits for the disable cleanup before writing the marker again', async () => {
+  enableJumpBack()
+  const steps: string[] = []
+  let release!: () => void
+  const gate = new Promise<void>(resolve => { release = resolve })
+  const port = {
+    sweepStale: (): void => { steps.push('sweepStale') },
+    cleanup: async (): Promise<void> => { steps.push('cleanup-start'); await gate; steps.push('cleanup-end') },
+    writeMarker: (): string => { steps.push('writeMarker'); return join(MARKER_DIR, 'flip.json') },
+  }
+  const off = applyJumpBackSetting(port, false, FLIP_SESSION, 'win32')
+  const on = applyJumpBackSetting(port, true, FLIP_SESSION, 'win32')
+  await tick()
+  assert.deepEqual(steps, ['cleanup-start'], 'the new generation must not write the documented path while the old cleanup is deleting it')
+  release()
+  await Promise.all([off, on])
+  assert.deepEqual(steps, ['cleanup-start', 'cleanup-end', 'sweepStale', 'writeMarker'], 'the enable lands after the old cleanup, so the new file survives')
+})
+
+await check('the last instance out releases a shared key it never registered', async () => {
+  const dir = join(sandbox, 'shared-owner')
+  const markerDir = join(dir, 'notify', 'jumpback')
+  mkdirSync(markerDir, { recursive: true })
+  const helper = join(dir, 'notify', 'helper', 'activate.exe')
+  const runner = recordingRunner()
+  const first = makeJumpBack({ run: runner, dataDir: dir, helper, pidAlive: pid => pid === 1000 }).instance
+  assert.equal(await first.ensureProtocol(helper), true, 'the first instance registers the shared key')
+  // A second instance wrote only its marker (it never notified), and is alive.
+  writeFileSync(join(markerDir, 'second.json'), JSON.stringify({ schemaVersion: 1, marker: MARKER, pid: 1000, startedAt: new Date(NOW).toISOString() }))
+  await first.cleanup()
+  assert.equal(protocolKeys(runner.calls).length, 2, 'a live sibling still needs the key, so the first one leaves it')
+
+  rmSync(join(markerDir, 'second.json'))
+  const second = makeJumpBack({ run: runner, dataDir: dir, pidAlive: () => false }).instance
+  second.writeMarker('session-second', MARKER)
+  await second.cleanup()
+  assert.deepEqual(protocolKeys(runner.calls), [], 'the last one out recognises the shared template and removes it even though it never registered')
+  assert.ok(runner.calls.some(call => call.args[0] === 'delete'), 'the release is a real unregister, not just bookkeeping')
 })
 
 // --- isolation self-proof ------------------------------------------------------
