@@ -16,6 +16,7 @@
  * Run: node --import tsx/esm scripts/verify-notify-helper.ts
  */
 import assert from 'node:assert/strict'
+import { spawnSync } from 'node:child_process'
 import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { basename, dirname, join } from 'node:path'
@@ -128,6 +129,11 @@ async function main(): Promise<boolean> {
     assert.match(sourceHash, /^[0-9a-f]{64}$/u, 'the key carries the source content hash (D5)')
     assert.equal(basename(compiler), 'csc.exe', 'and the compiler that built it, so a framework move rebuilds')
     assert.ok(existsSync(compiler), 'the key names a compiler that really exists')
+  })
+  await check('the candidate table accepts one associated target and rejects unrelated hits', () => {
+    const selftest = spawnSync(HELPER_EXE, ['--selftest-candidates'], { encoding: 'utf8', timeout: 15_000 })
+    assert.equal(selftest.status, 0, `the helper's own decision table must agree: ${selftest.stdout}${selftest.stderr}`)
+    assert.match(selftest.stdout, /candidate selftest passed/u, 'a silent pass would not prove the table ran')
   })
   const builtKey = readFileSync(HELPER_HASH, 'utf8')
 

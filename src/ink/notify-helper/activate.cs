@@ -89,6 +89,8 @@ internal static class JumpBack
     private sealed class PaneHit
     {
         public IntPtr Hwnd;
+        public AutomationElement Window;
+        public AutomationElement Tab;
         public AutomationElement Pane;
     }
 
@@ -117,6 +119,10 @@ internal static class JumpBack
 
     private static int Main(string[] args)
     {
+        // A pure decision table for the candidate association: no UIA, no desktop,
+        // so the Windows regression can prove the ambiguity rule without a window.
+        if (args.Length == 1 && args[0] == "--selftest-candidates") return RunCandidateSelfTest();
+
         Options options;
         string argumentError;
         if (!TryParseArgs(args, out options, out argumentError))
@@ -237,21 +243,70 @@ internal static class JumpBack
         List<PaneHit> panes;
         List<TabHit> tabs;
         FindHits(marker, out panes, out tabs);
-        bool capable = IsCapable(panes.Count, tabs.Count);
+        bool capable = IsCapable(panes, tabs);
         Log("stage=probe ok=" + Bool(capable) + " capable=" + Bool(capable)
             + " paneHits=" + panes.Count + " tabHits=" + tabs.Count
             + " lookupMs=" + clock.ElapsedMilliseconds);
         return capable ? ExitOk : ExitUnreachable;
     }
 
-    // AC-3: one realized pane (at most one tab title as an entry point), or no realized pane
+    // One realized pane (at most one tab title as an entry point), or no realized pane
     // but exactly one tab title. Anything else is ambiguous, and ambiguity is never resolved
-    // by picking one candidate - a jump to the wrong session is worse than no jump.
-    private static bool IsCapable(int paneHits, int tabHits)
+    // by picking one candidate - a jump to the wrong session is worse than no jump. A pane
+    // hit and a tab hit only form one candidate when the tab is the pane's own tab; two
+    // hits from different windows/tabs are two sessions even when each count is one.
+    private static bool IsCapable(List<PaneHit> panes, List<TabHit> tabs)
     {
-        if (paneHits > 1) return false;
-        if (paneHits == 1) return tabHits <= 1;
-        return tabHits == 1;
+        bool associated = panes.Count == 0 || panes[0].Tab != null;
+        bool tabsAgree = true;
+        if (panes.Count == 1)
+        {
+            for (int i = 0; i < tabs.Count; i++)
+            {
+                if (!SameElement(tabs[i].Tab, panes[0].Tab)) tabsAgree = false;
+            }
+        }
+        return CandidateVerdict(panes.Count, tabs.Count, associated, tabsAgree);
+    }
+
+    // The decision without any UIA object, so `--selftest-candidates` can table-test it.
+    private static bool CandidateVerdict(int paneCount, int tabCount, bool paneAssociated, bool tabsAgree)
+    {
+        if (paneCount > 1) return false;
+        if (paneCount == 0) return tabCount == 1;
+        if (!paneAssociated) return false;
+        return tabsAgree;
+    }
+
+    // Cases: one complete candidate is accepted; unrelated pane/tab hits are rejected before
+    // any window is touched. Exit 0 only when every row agrees.
+    private static int RunCandidateSelfTest()
+    {
+        object[][] cases = new object[][]
+        {
+            new object[] { "one associated pane", 1, 0, true, true, true },
+            new object[] { "pane plus its own tab", 1, 1, true, true, true },
+            new object[] { "pane plus another tab", 1, 1, true, false, false },
+            new object[] { "pane without a tab", 1, 1, false, true, false },
+            new object[] { "two panes", 2, 0, true, true, false },
+            new object[] { "one tab only", 0, 1, true, true, true },
+            new object[] { "two tabs", 0, 2, true, true, false },
+            new object[] { "no hits", 0, 0, true, true, false },
+        };
+        bool ok = true;
+        for (int i = 0; i < cases.Length; i++)
+        {
+            object[] row = cases[i];
+            bool actual = CandidateVerdict((int)row[1], (int)row[2], (bool)row[3], (bool)row[4]);
+            bool expected = (bool)row[5];
+            if (actual != expected)
+            {
+                Console.Error.WriteLine("selftest failed: " + row[0] + " expected " + Bool(expected) + " got " + Bool(actual));
+                ok = false;
+            }
+        }
+        Console.Out.WriteLine(ok ? "candidate selftest passed (" + cases.Length + " cases)" : "candidate selftest failed");
+        return ok ? ExitOk : ExitUnreachable;
     }
 
     // The click path (D6). Every step is verified, and when a step fails the helper
@@ -266,7 +321,7 @@ internal static class JumpBack
         // The same predicate the probe used decides here as well: a jump is only attempted for
         // the identity the probe called capable, and ambiguity is rejected before any
         // window is touched so a marker carried by two panes cannot pull one of them forward.
-        if (!IsCapable(panes.Count, tabs.Count))
+        if (!IsCapable(panes, tabs))
         {
             string reason = panes.Count == 0 && tabs.Count == 0 ? "not-found" : "ambiguous";
             Log("stage=discover ok=false reason=" + reason
@@ -399,7 +454,9 @@ internal static class JumpBack
                 {
                     PaneHit hit = new PaneHit();
                     hit.Hwnd = hwnd;
+                    hit.Window = window;
                     hit.Pane = windowPanes[j];
+                    hit.Tab = ContainingTab(windowPanes[j], window);
                     panes.Add(hit);
                 }
 
@@ -437,6 +494,21 @@ internal static class JumpBack
             if (HelpTextOf(pane).IndexOf(marker, StringComparison.Ordinal) >= 0) hits.Add(pane);
         }
         return hits;
+    }
+
+    // The TabItem a pane belongs to. A pane and a tab hit only form one candidate when
+    // this association exists; without it they are two unproven halves and stay ambiguous.
+    private static AutomationElement ContainingTab(AutomationElement pane, AutomationElement window)
+    {
+        AutomationElement current = pane;
+        while (current != null)
+        {
+            if (SameElement(current, window)) return null;
+            object type = current.GetCurrentPropertyValue(AutomationElement.ControlTypeProperty);
+            if (type is ControlType && (ControlType)type == ControlType.TabItem) return current;
+            current = TreeWalker.ControlViewWalker.GetParent(current);
+        }
+        return null;
     }
 
     private static List<AutomationElement> FindPanesInWindow(AutomationElement window, string marker)
@@ -586,6 +658,14 @@ internal static class JumpBack
 
     // Runtime ids identify an element within the desktop session. They are read after any tab
     // switch because the pane that was not realized before does not have one yet.
+    private static bool SameElement(AutomationElement left, AutomationElement right)
+    {
+        if (left == null || right == null) return false;
+        string leftId = RuntimeIdOf(left);
+        string rightId = RuntimeIdOf(right);
+        return leftId != null && leftId == rightId;
+    }
+
     private static string RuntimeIdOf(AutomationElement element)
     {
         try
