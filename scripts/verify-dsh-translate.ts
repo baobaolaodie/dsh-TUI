@@ -16,6 +16,9 @@ import { join } from 'node:path'
 import type { AgentEvent } from '../src/agent/events.js'
 import { prependHistoryRows, projectHistorySlice } from '../src/channel/history-restore.js'
 import { createDshTranslator, dshPricingWindow } from '../src/dsh-adapter/backend/translate.js'
+import { resetSessionProjection } from '../src/dsh-adapter/channel/session-reset.js'
+import { sessionWorkingDirectory } from '../src/channel/working-directory.js'
+import { displayWorkingDirectory } from '../src/sessions/format.js'
 import { FIXTURE_DIR, buildFixtures } from './fixtures/dsh/generate.js'
 import { createProjectorHarness } from './lib/projector-harness.js'
 
@@ -209,6 +212,62 @@ check('compaction bracket → compaction.start/end', of(live, 'compaction.start'
   const assistants = harness.state.rows.filter(row => row.kind === 'assistant')
   check('a live settlement never overwrites a restored row with the same seq', assistants[0]?.text === 'older answer' && assistants.at(-1)?.text === 'live answer')
 }
+// Session-search call cards: the header carries the query instead of the
+// upstream static sentence, but only while that sentence is still the pinned
+// 0.2.1-rc.2 wording — an upstream rewrite must win without editing this app.
+// The query is JSON-encoded because the header is one line: newlines, quotes
+// and control bytes stay printable instead of rewriting the header row.
+{
+  const titleFor = (presented: string, name: string, args: string): string | undefined => {
+    const translator = createDshTranslator({
+      tools: () => ({ get: () => ({ presentCall: () => ({ card: 'generic', title: presented }) }) }),
+      scope: () => ({}),
+      attachments: () => undefined,
+    })
+    const [event] = translator.translateEvent({
+      type: 'tool/call', seq: 1, time: 1,
+      data: { turn: 1, step: 1, callId: `call-${name}`, name, arguments: args },
+    } as never)
+    const presentation = (event as { presentation?: { card?: string; title?: string } } | undefined)?.presentation
+    return presentation?.card === 'generic' ? presentation.title : undefined
+  }
+  check('a session-search card header carries its query',
+    titleFor('Search prior sessions', 'session_search', '{"query":"resume preflight"}') === 'Sessions("resume preflight")')
+  check('the event-search card header carries its query too',
+    titleFor('Search session events', 'session_event_search', '{"query":"preflight"}') === 'Events("preflight")')
+  check('a newline inside the query stays one printable header line',
+    titleFor('Search prior sessions', 'session_search', '{"query":"alpha\\nbeta"}') === 'Sessions("alpha\\nbeta")')
+  check('quotes in the query are escaped in the header',
+    titleFor('Search prior sessions', 'session_search', '{"query":"say \\"hi\\""}') === 'Sessions("say \\"hi\\"")')
+  check('control bytes in the query never reach the header raw',
+    titleFor('Search prior sessions', 'session_search', '{"query":"a\\u001b[31mb"}') === 'Sessions("a\\u001b[31mb")')
+  check('an upstream wording change wins over the refinement',
+    titleFor('Find in prior sessions', 'session_search', '{"query":"x"}') === 'Find in prior sessions')
+  check('unparseable args leave the call on the plain fallback card',
+    titleFor('Search prior sessions', 'session_search', 'not json') === undefined)
+  check('a non-session tool is never retitled',
+    titleFor('Search files', 'grep', '{"query":"x"}') === 'Search files')
+}
+
+// DSH 0.2.1 `working-directory/change` (issue #1724): the durable move
+// projects as the session's current directory while `cwd` stays the project;
+// replay keeps the last move and an adoption reset forgets it.
+{
+  const translator = createDshTranslator({ tools: () => undefined, scope: () => ({}), attachments: () => undefined })
+  const move = (seq: number, cwd: unknown) => translator.translateEvent({ type: 'working-directory/change', seq, time: 0, data: { cwd } } as unknown as Parameters<Translator['translateEvent']>[0])
+  const [moved] = move(1, '/fixture/.agents/worktrees/try')
+  check('working-directory/change → session.cwd', moved?.type === 'session.cwd' && moved.cwd === '/fixture/.agents/worktrees/try')
+  check('working-directory/change without a cwd → nothing', move(2, '').length === 0 && move(3, undefined).length === 0)
+  const harness = createProjectorHarness()
+  check('no recorded move = the project', harness.state.workingDirectory === undefined && sessionWorkingDirectory(harness.state) === '/fixture')
+  harness.apply([{ type: 'session.cwd', cwd: '/fixture/src' }, { type: 'session.cwd', cwd: '/fixture/.agents/worktrees/try' }], true)
+  check('session.cwd: last move wins, project cwd unchanged', sessionWorkingDirectory(harness.state) === '/fixture/.agents/worktrees/try' && harness.state.cwd === '/fixture')
+  check('display follows the move', displayWorkingDirectory(harness.state) === '/fixture/.agents/worktrees/try')
+  check('display keeps the host form until the session moves', displayWorkingDirectory({ cwd: 'ssh://box', displayCwd: '/srv/app', workingDirectory: 'ssh://box' }) === '/srv/app')
+  resetSessionProjection(harness.state, { value: 0 }, () => undefined, () => undefined, () => undefined)
+  check('adoption reset forgets the previous session move', harness.state.workingDirectory === undefined)
+}
+
 const customs = of(live, 'custom').map(event => event.nativeType)
 check('unknown plugin events → custom', customs.includes('fixture-plugin/note') && customs.includes('other-plugin/ping') && customs.includes('developer/message'))
 

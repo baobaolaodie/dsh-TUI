@@ -10,6 +10,7 @@ import type { InputConvergence } from './input-actions.js'
 import type { DshChannelBinding } from './binding.js'
 import type { ChannelOwner } from './owner.js'
 import type { createModelSelection } from './model-selection.js'
+import { sessionWorkingDirectory } from '../../channel/working-directory.js'
 import type { ChannelState } from './types.js'
 
 /**
@@ -40,7 +41,7 @@ export function createBindingEvents(ctx: Context, deps: {
   seedTeam?(session: unknown): void
   inputConvergence: InputConvergence
   modelSelection: ReturnType<typeof createModelSelection>
-  modelActions: { applyPreferredEffort(): Promise<void> }
+  modelActions: { applyPreferredEffort(preserveSessionEffort?: boolean): Promise<void> }
   modeActions: {
     refreshMode(): void
     onSessionEvent(session: unknown, event: unknown): void
@@ -71,6 +72,10 @@ export function createBindingEvents(ctx: Context, deps: {
    *  Optional for direct/embed constructors that never emit inbox discards;
    *  channel.ts always wires it. */
   retireAttachment?(messageId: string): void
+  /** The session's current directory moved (DSH `working-directory/change`),
+   *  called once the projector has folded the move. Directory-scoped views
+   *  (skill commands, loaded context) re-read against it. */
+  onWorkingDirectoryChange?(): void
 }) {
   let subagentsInstalled = false
   /**
@@ -156,7 +161,13 @@ export function createBindingEvents(ctx: Context, deps: {
         deps.state.provider = selected.provider
         deps.state.model = selected.model
       }
-      void deps.modelActions.applyPreferredEffort()
+      const recorded = deps.binding.agent.session.requestHeader?.()?.config
+      // Reattachment keeps a live pin; an adopted header also owns the
+      // absence of a pin. A child on a different route still seeds normally.
+      const preserveSessionEffort = selected?.reasoningEffort !== undefined ||
+        (recorded?.provider === deps.state.provider && recorded?.model === deps.state.model)
+      if (preserveSessionEffort) deps.state.reasoningEffort = selected === undefined ? recorded?.reasoningEffort : selected.reasoningEffort
+      void deps.modelActions.applyPreferredEffort(preserveSessionEffort)
       deps.modeActions.refreshMode()
       // Same pattern as the preferred effort above: the remembered
       // permission preference seeds sessions that never chose their own.
@@ -179,6 +190,14 @@ export function createBindingEvents(ctx: Context, deps: {
         deps.messageObserver?.publish(native.agent.session, event)
         deps.modeActions.onSessionEvent(native.agent.session, event)
         deps.jobs?.onSessionEvent(event)
+        if ((event as { type: string }).type === 'working-directory/change') {
+          // The projector folds this event later in the same dispatch; only a
+          // move to a different directory refreshes.
+          const before = sessionWorkingDirectory(deps.state)
+          queueMicrotask(() => {
+            if (current() && sessionWorkingDirectory(deps.state) !== before) deps.onWorkingDirectoryChange?.()
+          })
+        }
       }))
     },
   } satisfies BindingFeedHooks

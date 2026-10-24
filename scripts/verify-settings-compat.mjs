@@ -12,12 +12,17 @@ import { Context } from '@deepseek-ai/cordis'
 import Loader from '@deepseek-ai/cordis-plugin-loader'
 import Schema from '@deepseek-ai/schemastery'
 import Settings from '@deepseek-ai/dsh-settings'
+import { TuiPanelRuntime } from '../src/dsh-adapter/panels.ts'
+import { applySidePanelPanels, getHiddenTemporarySidePanels, getSidePanelPanels, resolveSidePanelIds, setTemporarySidePanelHidden } from '../src/tuiDisplayPrefs.ts'
+import { bindComponentIdentity } from '../src/dsh-adapter/component-identity.ts'
+import { parseManifest, projectManifest } from '../src/adapter/standard/protocols.ts'
+import { testManifest } from './lib/plugin-test-utils.ts'
 import { Config } from '../src/dsh-adapter/index.ts'
 import { configValues, createSettingsScope, editableConfig, resolveSettingsNamespace } from '../src/dsh-adapter/compat/settings.ts'
 import { createSettingsHosts } from '../src/dsh-adapter/channel/settings-host.ts'
 import { SettingsForm } from '../src/dsh-adapter/settingsEditor.ts'
 import TuiSettingsSectionsRuntime, { getHostSettingsSections, getLocalSettingsSectionsHost, trackHostSettingsSection } from '../src/dsh-adapter/settings-sections.ts'
-import { DEFAULT_PAGE_MARGIN, DEFAULT_SIDE_PANEL_IDS, DEFAULT_STATUS_BAR, SIDE_PANEL_ID_PATTERN, isPageMarginMode, normalizePageMargin, normalizePluginFieldsOrder, normalizeSidePanelPanels, parsePageMarginSpec, parsePluginFieldsOrder } from '../src/tuiDisplayPrefs.ts'
+import { ALL_SIDE_PANELS, DEFAULT_PAGE_MARGIN, DEFAULT_STATUS_BAR, SIDE_PANEL_ID_PATTERN, isTemporarySidePanelId, isPageMarginMode, normalizePageMargin, normalizePluginFieldsOrder, normalizeSidePanelPanels, parsePageMarginSpec, parsePluginFieldsOrder, parseSidePanelPanels } from '../src/tuiDisplayPrefs.ts'
 import { SPLASH_FONTS, SPLASH_FONT_OPTIONS, normalizeSplashFont } from '../src/components/splashFonts.ts'
 import { normalizeBrandSetting } from '../src/branding.ts'
 import { getLang, isLang } from '../src/i18n.ts'
@@ -178,11 +183,20 @@ function containsWatch(node) {
 }
 const watchStatements = settingsBody.statements.filter(node => ts.isExpressionStatement(node) && containsWatch(node))
 assert.equal(watchStatements.length, 1, 'one production watch registration')
+// Exercise the production side-panel apply statement inside the real watch
+// below. The value is the single source of truth (`*` = every registered
+// panel), so the harness does not need the old boot/live bookkeeping.
+const displayDeclaration = settingsBody.statements.find(node => ts.isVariableStatement(node)
+  && node.declarationList.declarations.some(declaration => declaration.name.getText(source) === 'applyDisplay'))
+const displayBody = displayDeclaration.declarationList.declarations[0].initializer.body
+const panelsStatement = displayBody.statements.find(node => node.getText(source).includes('applySidePanelPanels'))
+assert.ok(panelsStatement, 'production applyDisplay carries the sidePanel.panels apply')
 const javascript = ts.transpileModule(`
   ${namespaceDeclaration}
   return ctx.inject(['settings'], settingsCtx => {
     ${declarations.join('\n')}
-    const apply = next => { observe(next); applyShortcuts(next) }
+    const applyPanels = value => { ${panelsStatement.getText(source)} }
+    const apply = next => { observe(next); applyShortcuts(next); applyPanels(next) }
     apply(bootSettings)
     ${watchStatements[0].getText(source)}
     capture(settingsCtx, scope, applyShortcuts)
@@ -200,6 +214,28 @@ if (modernSchema) for (const registry of ['service', 'local']) for (const entryI
   const defaultPaste = effectiveComboString('paste')
   try {
     await root.plugin(Loader)
+    await root.plugin(TuiPanelRuntime)
+    let panelId
+    await root.inject(['tuiPanels'], ctx => {
+      const manifest = parseManifest(testManifest({ id: 'verify-settings-panel' }), { source: 'test:settings' })
+      bindComponentIdentity(ctx, manifest, projectManifest(manifest))
+      ctx.tuiPanels.register({ apiVersion: 1, id: 'settings-watch', title: 'Settings watch', component: () => null })
+      panelId = ctx.tuiPanels.list()[0]?.id
+    })
+    assert.ok(panelId)
+    // A registration without a Component identity lands in the reserved
+    // session-only namespace: the stored value cannot name it, so its
+    // membership follows the registry and its hiding is session state.
+    let temporaryId
+    await root.inject(['tuiPanels'], ctx => {
+      ctx.tuiPanels.register({ apiVersion: 1, id: 'temporary-watch', title: 'Temporary watch', component: () => null })
+      temporaryId = ctx.tuiPanels.list()[0]?.id
+    })
+    assert.ok(temporaryId && isTemporarySidePanelId(temporaryId))
+    const panelEnabled = () => resolveSidePanelIds(getSidePanelPanels(), [panelId]).includes(panelId)
+    const temporaryEnabled = () => resolveSidePanelIds(
+      getSidePanelPanels(), [temporaryId], getHiddenTemporarySidePanels(),
+    ).includes(temporaryId)
     if (registry === 'service') await root.plugin(TuiSettingsSectionsRuntime)
     const sections = registry === 'service'
       ? getHostSettingsSections(root.get('tuiSettingsSections'))
@@ -224,6 +260,7 @@ if (modernSchema) for (const registry of ['service', 'local']) for (const entryI
       await ctx.plugin(async runtimeCtx => {
         await bindSettings({
           ctx: runtimeCtx, configOwner: ctx, runtimeConfig, config: configValues(runtimeConfig), Schema, SHORTCUT_ACTIONS,
+          applySidePanelPanels,
           DEFAULT_STATUS_BAR, normalizePageMargin, isLang, Config, configValues, resolveSettingsNamespace, setKeymapOverrides,
           // Capture the legacy scope's own schema: the production wiring hands
           // it a second hand-written statusBar list that has to stay in step
@@ -240,15 +277,17 @@ if (modernSchema) for (const registry of ['service', 'local']) for (const entryI
     await root.loader.await()
     assert.notEqual(owner.fiber, child.fiber, 'injection has its own lifecycle')
     assert.equal(effectiveComboString('paste'), 'alt+v')
+    assert.equal(panelEnabled(), true, 'the boot default `*` enables a registered panel')
     const ownerFiber = owner.fiber
     const unregister = trackProductionSection({
       ctx: root, trackHostSettingsSection,
       configOwner: owner, Config, resolveSettingsNamespace,
       config: configValues(runtime), SHORTCUT_ACTIONS, SHORTCUT_FIELD_META, SETTING_GROUPS, settingField, effectiveComboString, parseComboDraft, draftComboConflicts,
       getLang, DEFAULT_PAGE_MARGIN, isPageMarginMode, parsePageMarginSpec, SPLASH_FONT_OPTIONS, normalizeSplashFont, normalizeBrandSetting,
-      // Side-panel fields (sidePanel.panels) validate their draft against the
-      // production id grammar, so the eval scope mirrors those helpers too.
-      DEFAULT_SIDE_PANEL_IDS, SIDE_PANEL_ID_PATTERN, normalizeSidePanelPanels,
+      // Side-panel fields (sidePanel.panels) format/parse through the
+      // production sentinel, grammar and temporary-address gate, so the eval
+      // scope mirrors those helpers too (issues #1662, #1695).
+      ALL_SIDE_PANELS, SIDE_PANEL_ID_PATTERN, isTemporarySidePanelId, normalizeSidePanelPanels, parseSidePanelPanels,
       // Plugin footer field list (statusBar.pluginFieldsOrder): its parse and
       // format callbacks validate/canonicalize through these two helpers.
       parsePluginFieldsOrder, normalizePluginFieldsOrder,
@@ -269,6 +308,10 @@ if (modernSchema) for (const registry of ['service', 'local']) for (const entryI
     const view = host.listNamespaces().find(view => view.ns === ns)
     const diffField = section.fields.find(field => field.path.length === 1 && field.path[0] === 'diffLayout')
     assert.ok(diffField, 'the production section exposes diffLayout')
+    const panelField = section.fields.find(field => field.path.join('.') === 'sidePanel.panels')
+    assert.ok(panelField)
+    assert.equal(panelField.parse('todo,session:act1:search'), undefined, 'production parse refuses temporary addresses')
+    assert.deepEqual(panelField.parse('todo,component:act1:search'), { kind: 'set', value: 'todo,component:act1:search' })
     const form = new SettingsForm(host, view, section.fields)
     assert.equal(form.available, true, 'real describe() supplies the editable TUI section')
     assert.equal(form.field(diffField).text, 'split', 'the settings page shows the effective value')
@@ -323,6 +366,23 @@ if (modernSchema) for (const registry of ['service', 'local']) for (const entryI
     const costField = section.fields.find(field => field.path.length === 2 && field.path[0] === 'statusBar' && field.path[1] === 'cost')
     assert.ok(costField, `${registry}: the production section exposes statusBar.cost`)
     assert.equal(form.field(costField).text, 'true', 'unset statusBar.cost shows the effective on')
+    // sidePanel.panels（issue #1662）：Config 默认值就是 `*`，未设置时生产 format
+    // 也给出 `*`（勾选器据此显示「全部已注册面板」）；`*` 可保存、`*,todo` 被拒绝、
+    // 空串仍是 clear。
+    assert.equal(configValues(runtime).sidePanel.panels, ALL_SIDE_PANELS, 'the Config default is the * sentinel')
+    const panelsField = section.fields.find(field => field.path.length === 2 && field.path[0] === 'sidePanel' && field.path[1] === 'panels')
+    assert.ok(panelsField, `${registry}: the production section exposes sidePanel.panels`)
+    assert.equal(form.field(panelsField).text, ALL_SIDE_PANELS, 'unset sidePanel.panels shows the * sentinel')
+    assert.deepEqual(panelsField.parse?.('*'), { kind: 'set', value: ALL_SIDE_PANELS })
+    assert.deepEqual(panelsField.parse?.(''), { kind: 'clear' })
+    assert.equal(panelsField.parse?.('*,todo'), undefined)
+    assert.deepEqual(panelsField.parse?.('todo,demo:future'), { kind: 'set', value: 'todo,demo:future' })
+    // 生产 format 投影与存储同源：手工写进设置文档的非法混合值，在勾选器里读到的
+    // 必须就是 store/PanelBar 实际使用的那一份，否则勾选态与标签栏会各说各话。
+    assert.equal(panelsField.format?.('todo,bad!'), 'todo', 'a stored value with an unusable token projects as the store normalizes it')
+    assert.equal(panelsField.format?.('*,todo'), 'todo', 'a sentinel mixed with ids projects as the store folds it')
+    assert.equal(panelsField.format?.('todo,jobs'), 'todo,jobs', 'a well-formed stored list projects verbatim')
+    assert.equal(panelsField.format?.(''), ALL_SIDE_PANELS, 'an empty stored value projects as the * default')
     observed.length = 0
     form.edit(diffField, 'unified')
     form.edit(splashField, 'classic')
@@ -338,6 +398,11 @@ if (modernSchema) for (const registry of ['service', 'local']) for (const entryI
     assert.equal(configValues(runtime).statusBar.cost, false, 'the panel persists the status-bar cost switch')
     assert.equal(owner.fiber, ownerFiber, 'editing settings does not remount the agent owner')
     assert.equal(observed.length, 1)
+    assert.equal(panelEnabled(), true, 'unrelated form edits re-apply `*` without hiding a registered panel')
+    assert.equal(temporaryEnabled(), true, 'unrelated real settings replay keeps temporary selection enabled')
+    // Hide it the way the picker does — a session-only move — and let the
+    // replay below prove it is not a preference.
+    setTemporarySidePanelHidden(temporaryId, true)
     assert.equal(host.listNamespaces().find(view => view.ns === ns).value.diffLayout, 'unified')
     assert.equal(host.listNamespaces().find(view => view.ns === ns).value.recapOnOpen, false, 'describe() projects the recap switch for the channel read site')
     assert.equal(host.listNamespaces().find(view => view.ns === ns).value.statusBar.cost, false, 'describe() projects the cost switch for the status-bar read site')
@@ -353,6 +418,14 @@ if (modernSchema) for (const registry of ['service', 'local']) for (const entryI
       applyShortcuts({ shortcuts })
       assert.equal(effectiveComboString('paste'), defaultPaste, 'unset and blank overrides do not revive the startup snapshot')
     }
+    await root.settings.mutate(ns, [{ op: 'set', path: ['sidePanel', 'panels'], value: `todo,${panelId}` }])
+    assert.equal(panelEnabled(), true, 'an explicit selection includes the plugin')
+    await root.settings.mutate(ns, [{ op: 'set', path: ['sidePanel', 'panels'], value: 'todo' }])
+    assert.equal(panelEnabled(), false, 'an explicit changed CSV removes the plugin')
+    await root.settings.mutate(ns, [{ op: 'set', path: ['diffLayout'], value: 'split' }])
+    assert.equal(panelEnabled(), false, 'unrelated edits do not revive an explicit removal')
+    assert.equal(temporaryEnabled(), false, 'real Loader and settings replay never revive a manually closed temporary panel')
+    const observationsBeforeDispose = observed.length
     // The legacy scope still layers user choices over the deployment config.
     liveScope.legacy = true
     applyShortcuts({ shortcuts: {} })
@@ -363,7 +436,7 @@ if (modernSchema) for (const registry of ['service', 'local']) for (const entryI
     await child.fiber.dispose()
     await root.loader.update(entryId, { config: { diffLayout: 'split', shortcuts: {} } })
     await root.loader.await()
-    assert.equal(observed.length, 1, 'disposing the injection removes its owner-fiber listener')
+    assert.equal(observed.length, observationsBeforeDispose, 'disposing the injection removes its owner-fiber listener')
     await root.loader.create({ id: 'restarted', name: 'cordis:fixture', config: { diffLayout: 'split', shortcuts: {} } })
     await root.loader.await()
     assert.equal(effectiveComboString('paste'), defaultPaste, 'a fresh boot agrees with the live reset')

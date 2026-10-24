@@ -151,6 +151,8 @@ const dict = {
   'export-model': { zh: '- 模型: {{model}}', en: '- Model: {{model}}' },
   'export-session': { zh: '- 会话: {{id}}', en: '- Session: {{id}}' },
   'export-dir': { zh: '- 目录: {{cwd}}', en: '- Directory: {{cwd}}' },
+  'mentions-image-adjusted': { zh: '@{{path}} 已适配：{{detail}}', en: '@{{path}} adapted: {{detail}}' },
+  'mentions-image-failed': { zh: '@{{path}} 无法附加：{{reason}}', en: '@{{path}} could not be attached: {{reason}}' },
   'mentions-attached': { zh: '已附加 {{count}} 个文件引用', en: { one: 'Attached {{count}} file reference', other: 'Attached {{count}} file references' } },
   'mentions-missing': { zh: '未找到引用: {{paths}}', en: 'References not found: {{paths}}' },
   // Agent Teams: the tag after the sender of a peer message bubble.
@@ -377,6 +379,7 @@ const dict = {
   'resume-mount-ledger-repair': { zh: '该文件已损坏：无其他 dsh-tui 运行时删除它，会自动重建', en: 'Damaged: remove it with no other TUI running (it rebuilds)' },
   'session-mount-occupied-short': { zh: '占用 pid {{pid}}', en: 'held by pid {{pid}}' },
   'resume-failed': { zh: '恢复失败 · {{err}}', en: 'Resume failed · {{err}}' },
+  'resume-owned-elsewhere': { zh: '另一个 DSH 进程正在写入此会话。请先在该进程（如 dsh web）释放会话，再重试恢复；不要删除会话或锁文件。', en: 'Another DSH process is writing this session. Release it in that process (for example, dsh web), then retry resume. Do not delete the session or lock files.' },
   'resume-attach-failed': { zh: '已恢复会话，但工作区挂载失败 · {{err}}', en: 'Session resumed, but workspace attachment failed · {{err}}' },
   'resume-session-changed': { zh: '会话已切换，恢复已放弃', en: 'The session changed; the resume was dropped' },
   'new-session-while-working': { zh: '回合运行中，无法新建会话', en: 'Cannot start a new session while a turn is running' },
@@ -463,6 +466,7 @@ const dict = {
   'questionnaire-answered': { zh: '📋 问卷已答 · {{total}} 题', en: '📋 Questionnaire answered · {{total}} questions' },
 
   // ── utils/loaded-context.ts ─────────────────────────────────────────
+  'command-output-truncated': { zh: '…（命令输出已截断：最多 200 行、65536 个 UTF-16 码元、每行 4000 显示单元）', en: '… (command output truncated: 200 lines, 65536 UTF-16 code units, 4000 cells per line)' },
   'context-truncated': { zh: '…（已截断）', en: '… (truncated)' },
   'context-sections': { zh: '系统提示词 {{n}} 段', en: 'System prompt {{n}} sections' },
   'context-files': { zh: '工作区指令 ×{{n}}', en: 'Workspace instructions ×{{n}}' },
@@ -1176,7 +1180,8 @@ const dict = {
   'help-complete-command': { zh: 'tab 补全命令', en: 'tab to complete command' },
   'help-cycle-mode': { zh: 'shift+tab 切换模式', en: 'shift+tab to cycle mode' },
   'help-open-editor': { zh: '{{key}} 打开编辑器', en: '{{key}} to open editor' },
-  'help-fold-todos': { zh: '{{key}} 折叠待办', en: '{{key}} to fold todos' },
+  'help-fold-todos': { zh: '{{key}} 运行时折叠／空闲时隐藏待办', en: '{{key}} to fold running / hide idle todos' },
+  'goal-todo-hide-hint': { zh: '{{key}} 隐藏／恢复', en: '{{key}} to hide/restore' },
   'goal-todo-fold-hint': { zh: '{{key}} 折叠', en: '{{key}} to fold' },
   // ── goal budget and the backend-neutral /goal (src/channel/goal-command.ts)
   'goal-budget-used': { zh: '已用 {{used}} / {{budget}} tokens · {{time}}', en: 'Used {{used}} / {{budget}} tokens · {{time}}' },
@@ -1253,6 +1258,8 @@ const dict = {
   'settings-web-key-changed': { zh: '网页搜索设置已变化，请重新打开设置后输入密钥', en: 'Web search settings changed. Reopen settings and enter the key again.' },
   // /settings 里 sidePanel.panels 的勾选列表。
   'settings-panels-unclaimed': { zh: '暂无面板使用此 id：先保留，等插件注册后生效', en: 'No panel uses this id yet; kept until a plugin registers it' },
+  'settings-panels-temporary': { zh: '临时面板 #{{n}} · 仅本次运行，不保存', en: 'Temporary panel #{{n}} · this run only, not saved' },
+  'settings-panels-legacy-anonymous': { zh: '旧匿名地址无法识别，请移除并重新选择面板', en: 'Old anonymous address: remove it and select the panel again' },
   'settings-panels-plugin': { zh: '插件面板（{{plugin}}）', en: 'Plugin panel ({{plugin}})' },
   'settings-panels-advanced': { zh: '高级：编辑原始面板列表', en: 'Advanced: edit raw panel list' },
   'settings-fields-advanced': { zh: '高级：编辑原始字段列表', en: 'Advanced: edit raw field list' },
@@ -1447,13 +1454,19 @@ const dict = {
     zh: '关闭：/plugin disable {{bundle}}',
     en: 'Disable: /plugin disable {{bundle}}',
   },
+  // 「用途」一行只回答「开完多出什么」，命令只留躲不掉的那一个：机制（索引在内存、
+  // 极简模式如何取舍）与迁移细节都属于 README，这一屏是目录而不是说明书。
   'plugins-experimental-team-hint': {
-    zh: '用法：服务运行后 /team status',
-    en: 'Use: /team status once the service runs',
+    zh: '用途：Agent 分工合作，/team status 看状态',
+    en: 'Use: agents divide the work; /team status shows the roster',
   },
   'plugins-experimental-auto-review-hint': {
-    zh: '用法：在 /permission 选择「自动授权审查」',
-    en: 'Use: pick Auto review in /permission',
+    zh: '用途：/permission auto，模型自主审批',
+    en: 'Use: /permission auto — the model approves on its own',
+  },
+  'plugins-experimental-session-search-hint': {
+    zh: '用途：Agent 能翻本工作区的历史会话',
+    en: 'Use: agents can browse past sessions in this workspace',
   },
   'plugins-bundles-header': { zh: '已装 bundle（数据来自 profile 插件服务）：', en: 'Installed bundles (from the profile plugin service):' },
   'plugins-bundles-official': { zh: '安装自带', en: 'Official (installation-supplied)' },
@@ -1759,6 +1772,7 @@ const dict = {
   'question-fold-waiting': { zh: '正在等你回答', en: 'Waiting for your answer' },
   'question-fold-expand': { zh: '{{combo}} 展开', en: '{{combo}} to expand' },
   'question-fold-hint': { zh: '{{combo}} 折叠 / 点标题行收起', en: '{{combo}} to fold / click the header' },
+  'question-detail-scroll': { zh: '… {{count}} 行未显示 · {{up}}/{{down}} 翻阅', en: { one: '… {{count}} line outside view · {{up}}/{{down}} to scroll', other: '… {{count}} lines outside view · {{up}}/{{down}} to scroll' } },
   'question-submit-selection': { zh: '提交选择（Enter）', en: 'Submit selection (Enter)' },
   'question-custom-tab': { zh: '自定义回答', en: 'Custom answer' },
   'question-attached-label': { zh: '（附加：{{label}}）', en: '(attached: {{label}})' },
@@ -1775,9 +1789,11 @@ const dict = {
   'approval-always': { zh: '允许，且不再询问', en: 'Yes, and don\'t ask again' },
   'approval-hint': { zh: '↑/↓ 选择 · Enter 确认 · Esc 拒绝', en: '↑/↓ select · Enter confirm · Esc reject' },
   'approval-hint-feedback': { zh: '↑/↓/Tab 选择 · Enter 确认 · 选中拒绝后可输入理由 · Esc 拒绝', en: '↑/↓/Tab select · Enter confirm · on No, type a reason · Esc reject' },
+  'approval-hint-preview': { zh: '↑/↓ 选择 · Enter 确认 · Esc 拒绝 · {{up}}/{{down}} 翻阅预览', en: '↑/↓ select · Enter confirm · Esc reject · {{up}}/{{down}} scroll preview' },
   'approval-feedback-row': { zh: '{{label}}：{{reason}}', en: '{{label}}: {{reason}}' },
   'approval-subagent': { zh: '来自子代理 {{id}} 的请求', en: 'Requested by subagent {{id}}' },
   'approval-blocked-path': { zh: '涉及允许目录之外的路径：{{path}}', en: 'Outside the allowed directories: {{path}}' },
+  'panel-preview-omitted': { zh: '… 另有 {{count}} 行未显示', en: { one: '… {{count}} more line not shown', other: '… {{count}} more lines not shown' } },
 
   // ── components/Subagent*.tsx ────────────────────────────────────────
   'subagent-model': { zh: '模型', en: 'Model' },
@@ -2479,8 +2495,7 @@ const dict = {
 
   // ── screens/Launchpad.tsx（开屏落地页：取代旧的"只有标题的空白会话"）───────
   // 落地页是"启动后第一屏"：大标题与吉祥物居中、输入框在下、再往下是
-  // 信息与快捷入口。用户真正发出第一条内容后才进聊天页，所以这里的
-  // 文案要短、要是动作而不是说明。
+  // 信息与快捷入口。发送首句或开始多行编辑时进入聊天页；这里的文案要短。
   'launchpad-placeholder': { zh: '说点什么，或输入 / 看命令…', en: 'Say something, or type / for commands…' },
   // （launchpad-param-*-label / launchpad-param-mode-* 六键已删：2026-10 第四版
   // 参数行只画值不画字段名——用户原话"大家都知道是模型啊，不用画蛇添足"；
@@ -2493,8 +2508,8 @@ const dict = {
   // 轮换顺序 = launchpad-tip → launchpad-tip-2 → launchpad-tip-3 → 回到首条；
   // 首启那一条（launchpad-first-run）优先级最高，不参与轮换。
   'launchpad-tip-2': {
-    zh: 'Ctrl+V 直接粘贴，Esc 清空后按 Esc 去看历史会话',
-    en: 'Ctrl+V pastes; Esc clears the draft, then Esc again opens sessions',
+    zh: 'Ctrl+V 直接粘贴，Shift+Enter 进入聊天页换行',
+    en: 'Ctrl+V pastes; Shift+Enter opens chat with a newline',
   },
   'launchpad-tip-3': {
     zh: '参数行四段都能点：模型 · 思考深度 · 模式 · 权限',

@@ -395,7 +395,7 @@ function toSegments(line: readonly StyledGrapheme[]): Segment[] {
  * mid-word. The space a break lands on stays at the end of the row it closes,
  * so joining the rows reproduces the input exactly.
  *
- * Empty text yields no rows: the caller paints the blank pane itself.
+ * Empty source text still occupies one row; only a missing side has no rows.
  */
 function wrapSegments(segments: readonly Segment[], budget: number): Segment[][] {
   const all = graphemes(segments)
@@ -420,7 +420,7 @@ function wrapSegments(segments: readonly Segment[], budget: number): Segment[][]
     rows.push(toSegments(all.slice(start, end)))
     start = end
   }
-  return rows
+  return rows.length > 0 ? rows : [[]]
 }
 
 /** How many graphemes of a pane line the renderer's `truncate` drops. It cuts
@@ -452,6 +452,8 @@ function clippedGraphemes(segments: readonly Segment[] | undefined, budget: numb
 type PaintPlan =
   | { readonly separator: string }
   | {
+      readonly singleSide: 'old' | 'new' | undefined
+      readonly paneWidth: number
       readonly leftPrefix: string
       readonly rightPrefix: string
       readonly leftRows: readonly (readonly Segment[])[]
@@ -495,7 +497,13 @@ function PaneLine({
   width,
   tone,
   toolBackground,
+  paneId,
+  padding,
+  continuation,
 }: {
+  readonly padding: boolean
+  readonly paneId: string
+  readonly continuation?: number
   readonly segments: readonly Segment[] | undefined
   readonly prefix: string
   readonly kind: DiffRow['kind']
@@ -518,8 +526,8 @@ function PaneLine({
         : 'diffAddedDimmed'
   const wordColor = tone === 'old' ? 'diffRemovedWord' : 'diffAddedWord'
   return (
-    <Box width={width} flexShrink={0} backgroundColor={backgroundColor}>
-      <Text dimColor backgroundColor={backgroundColor}>{prefix}</Text>
+    <Box width={width} flexShrink={0} backgroundColor={backgroundColor} selectionPane={paneId} noSelect={padding} softWrapContinuation={continuation}>
+      <Box noSelect><Text dimColor backgroundColor={backgroundColor}>{prefix}</Text></Box>
       {segments === undefined ? (
         <Text backgroundColor={backgroundColor}> </Text>
       ) : (
@@ -568,6 +576,7 @@ export function SplitDiffView({
    */
   readonly reveal?: { readonly key: string }
 }): React.ReactNode {
+  const paneId = React.useId()
   const [hl, setHl] = React.useState<CliHighlight | null>(null)
   React.useEffect(() => {
     let mounted = true
@@ -613,6 +622,16 @@ export function SplitDiffView({
     rows.push(...alignFileDiff(fileIndex, diff.oldText, diff.newText))
   })
 
+  // Determine each file's sides from its complete alignment, before folding
+  // or smooth reveal can hide the opposite side and make the layout jump.
+  const oldFiles = new Set<number>()
+  const newFiles = new Set<number>()
+  for (const row of rows) {
+    if ('separator' in row) continue
+    if (row.oldIndex !== undefined) oldFiles.add(row.fileIndex)
+    if (row.newIndex !== undefined) newFiles.add(row.fileIndex)
+  }
+
   const totalRows = rows.length
   const capped = verbose || totalRows <= maxRows || totalRows - maxRows === 1
   const visible = capped ? rows : rows.slice(0, maxRows)
@@ -625,6 +644,7 @@ export function SplitDiffView({
   const shown = revealedRows >= visible.length ? visible : visible.slice(0, revealedRows)
 
   const paneWidth = Math.max(20, Math.floor((width - 1) / 2))
+  const blockWidth = Math.max(width, paneWidth * 2 + 1)
 
   // Whole-hunk highlight per file (multi-line lexer state preserved);
   // only the visible rows merge syntax runs with word flags below.
@@ -682,8 +702,11 @@ export function SplitDiffView({
     const rightKind = row.kind === 'del' ? 'context' : row.kind
     const leftPrefix = `${gutterText(leftKind, 'old', row.oldNo, oldSegments !== undefined, lineNoWidth)} `
     const rightPrefix = `${gutterText(rightKind, 'new', row.newNo, newSegments !== undefined, lineNoWidth)} `
-    const leftBudget = paneWidth - stringWidth(leftPrefix)
-    const rightBudget = paneWidth - stringWidth(rightPrefix)
+    const singleSide = oldFiles.has(row.fileIndex) === newFiles.has(row.fileIndex)
+      ? undefined : oldFiles.has(row.fileIndex) ? 'old' : 'new'
+    const rowPaneWidth = singleSide === undefined ? paneWidth : blockWidth
+    const leftBudget = rowPaneWidth - stringWidth(leftPrefix)
+    const rightBudget = rowPaneWidth - stringWidth(rightPrefix)
     if (!verbose) {
       clippedChars += clippedGraphemes(oldSegments, leftBudget)
       clippedChars += clippedGraphemes(newSegments, rightBudget)
@@ -705,6 +728,8 @@ export function SplitDiffView({
       // paintedRows short of totalVisualRows is what shows the window notice.
       const take = Math.min(height, windowLimit - paintedRows)
       paint.push({
+        singleSide,
+        paneWidth: rowPaneWidth,
         leftPrefix,
         rightPrefix,
         leftRows: take < height ? leftRows.slice(0, take) : leftRows,
@@ -718,11 +743,11 @@ export function SplitDiffView({
   }
 
   return (
-    <Box flexDirection="column" width={paneWidth * 2 + 1}>
+    <Box flexDirection="column" width={blockWidth}>
       {paint.map((plan, index) => {
         if ('separator' in plan) {
           return (
-            <Box key={index} width={paneWidth * 2 + 1}>
+            <Box key={index} width={blockWidth}>
               <Text dimColor wrap="truncate">
                 {plan.separator === '⋯' ? '⋯' : `  ${plan.separator}`}
               </Text>
@@ -733,11 +758,11 @@ export function SplitDiffView({
         const rightPad = ' '.repeat(stringWidth(plan.rightPrefix))
         return Array.from({ length: plan.height }, (_, visual) => (
           <Box key={`${index}-${visual}`} flexDirection="row">
-            <PaneLine segments={plan.leftRows[visual]} prefix={visual === 0 ? plan.leftPrefix : leftPad} kind={plan.leftKind} tone="old" width={paneWidth} toolBackground={toolBackground} />
-            <Box width={1} flexShrink={0}>
+            {plan.singleSide !== 'new' && <PaneLine padding={plan.leftRows[visual] === undefined} paneId={paneId + '-old'} continuation={visual > 0 && plan.leftRows[visual] !== undefined ? stringWidth(plan.leftPrefix) + stringWidth(plan.leftRows[visual - 1]!.map(s => s.text).join('')) : undefined} segments={plan.leftRows[visual]} prefix={visual === 0 ? plan.leftPrefix : leftPad} kind={plan.leftKind} tone="old" width={plan.paneWidth} toolBackground={toolBackground} />}
+            {plan.singleSide === undefined && <Box width={1} flexShrink={0} noSelect>
               <Text dimColor>│</Text>
-            </Box>
-            <PaneLine segments={plan.rightRows[visual]} prefix={visual === 0 ? plan.rightPrefix : rightPad} kind={plan.rightKind} tone="new" width={paneWidth} toolBackground={toolBackground} />
+            </Box>}
+            {plan.singleSide !== 'old' && <PaneLine padding={plan.rightRows[visual] === undefined} paneId={paneId + '-new'} continuation={visual > 0 && plan.rightRows[visual] !== undefined ? stringWidth(plan.rightPrefix) + stringWidth(plan.rightRows[visual - 1]!.map(s => s.text).join('')) : undefined} segments={plan.rightRows[visual]} prefix={visual === 0 ? plan.rightPrefix : rightPad} kind={plan.rightKind} tone="new" width={plan.paneWidth} toolBackground={toolBackground} />}
           </Box>
         ))
       })}

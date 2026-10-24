@@ -30,7 +30,7 @@ dsh-tui
 - `dsh-tui safe`：安全模式——只读查看环境、列出 profile 插件并给出修复建议，还能创建干净的救援 profile（见 §5.5）。
 - `dsh --profile dsh-tui`：与 `dsh-tui` 等价的手工启动方式（`/update` 仅此方式可用）。
 - `deepseek-official` 路由需要 `DEEPSEEK_API_KEY`；DSH 0.2.0-rc.1+ 可用标准 profile 的 `deepseek-account` 浏览器授权路由。其他支持的订阅模型可用内置 OAuth 登录。环境自检用 `/doctor`。
-- 主验证 dsh 引擎版本 `0.2.1-rc.2`；兼容列表以 `ADAPTER.md` 为准，列表之外的版本在 logo 页提示版本漂移与对齐命令。
+- 主验证 dsh 引擎版本 `0.2.1-rc.3`；兼容列表以 `ADAPTER.md` 为准，列表之外的版本在 logo 页提示版本漂移与对齐命令。
 - 如果 logo 页出现 ⚠ 版本漂移警告，按提示执行 `npm i -g @deepseek-ai/dsh@<版本>` 对齐 dsh 引擎。
 
 ### 1.2 首次启动你会看到
@@ -56,8 +56,9 @@ dsh-tui
    入口与参数段用 `↑/↓` 或 `Tab` 移焦点、`Enter` 激活，也可以直接点；终端变矮时按"整块撤"的顺序降级
    （快捷入口 → 提示行 → 只留输入框），变窄时按 5.1 的阶梯降级。
    从这一屏打开的整屏界面（会话与工作区 / 设置 / 后台任务 / 引导向导）都**盖在落地页之上**，
-   `Esc` 退出即回到落地页（草稿、参数、焦点原样保留）；**离开落地页进对话页的唯一方式是
-   回车提交一条非命令消息**。
+   `Esc` 退出即回到落地页（草稿、参数、焦点原样保留）；离开落地页进对话页有两条路：
+   **回车提交一条非命令消息**，或在输入框里按 `Shift+Enter`（`Option+Enter`）带着未发送的草稿
+   进入对话页、在光标处换行继续编辑。
    dsh 引擎版本不在验证范围时会出现 **⚠ 版本漂移警告** 及对齐命令。
 3. **底部状态栏**：工作状态行、上下文进度条、TPS 仪表与各类实时指标（见
    [5. 界面与状态栏](#5-界面与状态栏)）。
@@ -166,6 +167,7 @@ dsh-tui
 **问卷（模型 ask_user_question）**
 
 - `↑/↓` 选、`Space` 多选、`Tab` 切自定义回答、`Enter` 提交；`←/→` 换题（不提交，草稿保留）；`Ctrl+V` 粘贴、`Ctrl+K` 折叠。
+- 问题正文与说明可用 `Alt+Up` / `Alt+Down` 翻阅（可在 `/settings` 改键）；全屏也可在正文区域使用滚轮。选项和回答焦点保持原位，OAuth 授权链接不会因预览上限而丢失尾部。
 - `Esc` 第 2 题起返回、第 1 题取消整批；`Ctrl+C` 任意题取消。输入行里 `←/→` 先移动光标，到行首/行尾才换题。
 
 **计划评审（plan review）**
@@ -175,6 +177,7 @@ dsh-tui
 **工具审批（approval）**
 
 - `↑/↓` 移动、`1` 允许（仅本次）、`2` 拒绝、`Enter` 提交；`Esc`/`Ctrl+C` 拒绝。
+- 极矮终端采用紧凑布局，保留决策行和状态栏；`Alt+Up` / `Alt+Down` 翻阅完整预览，标题、命令和理由仍可读取。
 
 **会话管理界面**（`/resume`、`/home`、`/agentview`、`/bg`、输入框行首 `⌸`，同一个界面）
 
@@ -255,7 +258,7 @@ dsh-tui
   点右端的 `⤢` 把当前面板放大成整屏。悬停中缝会提亮，按住鼠标左键左右拖拽即可实时调宽：
   向左加宽侧栏、向右缩窄，聊天列至少 64 列、侧栏至少 28 列；拖拽会退出 zoom，保留键盘焦点，
   宽度在当前会话内保留。聊天内起拖只选聊天文字，右栏内起拖可选右栏文字。
-- **面板**：全部 8 个内置面板默认启用，可在 `sidePanel.panels` 调整。`todo`（Goals/Todos，分栏时从输入框上方迁到这里）、`jobs`（后台任务，点转录里的任务卡
+- **面板**：默认（`sidePanel.panels: '*'`）启用全部面板——8 个内置面板加上之后注册的插件面板；可在 `sidePanel.panels` 或 `/settings` 勾选里改成显式列表。`todo`（Goals/Todos，分栏时从输入框上方迁到这里）、`jobs`（后台任务，点转录里的任务卡
   会直接定位到该任务）、`agents`（子代理 Dashboard 与详情：Enter 进详情、Esc 逐级返回）、`companion`
    （宠物：跟随会话状态换心情动画，点击
    比爱心、Enter 戳一戳；皮肤 `dsh-tui.companion.skin` 可选 deepy（默认，非官方粉丝作品 deepy
@@ -287,6 +290,7 @@ dsh-tui
 - 原本只能整屏的视图现在也能进侧栏：分屏开着且对应面板已启用时，`Ctrl+T` / `/trace` 打开轨迹面板、
   `/home` 打开工作区面板；面板栏右端的 `⤢` 再把它们放回整屏（`⤢` 是鼠标入口，键盘等价物就是各自的
   整屏快捷键：`Ctrl+T` 轨迹、`Ctrl+A` 子代理、`/jobs` 任务、`/home` 工作区主页）。
+- 临时插件面板显示可读标题与本次运行的独立编号，勾选只改变当前界面，不保存为偏好。请移除旧 `actN:panel` 占位项并重新选择当前面板。
 - 设置：`/settings` → `侧栏` 分组，或 `dsh-tui.sidePanel.{splitEnabled,open,ratio,panels}`
   （见[配置参考](configuration.md#tui-配置)）。
 - **tmux 用户注意**：`Ctrl+B` 是 tmux 的默认前缀键，会被 tmux 截走、送不到 TUI——到
@@ -314,7 +318,7 @@ dsh-tui
 | `/workspace` | `resume` / `rename <名称>` / `open <路径或URI>` | 管理工作区；`open` 支持绝对路径、file URI、插件 scheme |
 | `/clear` | 无 | 清空当前会话视图（重置展开/选择状态） |
 | `/compact` | 无 | 压缩会话历史（无可压缩内容时会提示） |
-| `/export` | 无 | 导出会话为 Markdown 到工作目录 |
+| `/export` | 无 | 导出会话为 Markdown 到会话启动时的项目目录（不跟随 Agent 的 `working_directory` cd） |
 | `/btw` | `<问题>` | 侧问：单轮、无工具、不打断主回合、不写历史 |
 | `/trace` | 无 | 打开轨迹场景（同 `Ctrl+T`） |
 | `/rewind` | 无 | 回退选择器（同空输入双击 Esc 的时间回溯）；**回合运行中会先取消当前回合**再回溯 |
@@ -402,7 +406,7 @@ dsh-TUI 不预装通用技能；`/skills` 浏览 DSH 发现的技能，可直调
 | 恢复 | `/resume`（同 `/home` `/agentview` `/bg` 与输入框行首 `⌸`） | 三合一**会话管理界面**：`←/→` 切栏、打字筛选、`Enter` 进入、`Ctrl+N` 新建、`Ctrl+X` 停后台会话、行内 ★/☆ 固定。切换只是**停放**，回合继续跑；被其他终端占用的会话标红进不去（详见 §2.7） |
 | 重命名 | `/rename <标题>` | 立即改名并持久化（写入 session/title 事件，会话管理界面里能读回） |
 | 压缩 | `/compact` | 手动触发 compaction；**回合运行中拒绝**；minimal preset 下不可用；压缩点以 Divider 摘要行呈现 |
-| 导出 | `/export` | 从完整 session log 导出 Markdown（含 thinking 与工具调用分节），文件 `dsh-tui-export-<时间戳>.md` 落在当前会话 cwd |
+| 导出 | `/export` | 从完整 session log 导出 Markdown（含 thinking 与工具调用分节），文件 `dsh-tui-export-<时间戳>.md` 落在会话启动时的项目 cwd（不跟随 Agent cd） |
 | 清屏 | `/clear` | 只清视图，不动会话日志 |
 | 停止 | 会话管理界面 `Ctrl+X` | 停止光标所在的**后台**会话；当前终端正在用的会话停不了（想退出整个 TUI 用 `/exit` 或双击 `Ctrl+C`） |
 | 退出 | `/exit`（或 `/quit` `/q`） | 空闲 `Ctrl+C` 双击或 `Ctrl+D` 双击也可退出；工作中中断迟迟不收敛时再按 `Ctrl+C`/`Ctrl+D` 强制退出 |
@@ -542,7 +546,7 @@ dsh-TUI 不预装通用技能；`/skills` 浏览 DSH 发现的技能，可直调
   cost（`≈¥0.05 谷`，**本会话估算**：包含子代理用量，按各自模型 × 峰值/空闲 × 缓存分项计价；
   hover 拆「主会话 ¥ / 子代理 ¥ / 未计价 N tok」；非官方/未收录模型只显示 token 并标注未计价；
   **估算是参考，以平台账单为准**）
-- 右组：git 分支（**跟随工作树 HEAD**——别处切分支约 1 秒内反映到界面，detached HEAD 时清空）→ 工作目录（紧凑模式仅 basename）→ 会话标题 → 短会话 ID（`#` + 前 8 位，方便 `--resume` 定位）
+- 右组：git 分支（**跟随工作树 HEAD**——别处切分支约 1 秒内反映到界面，detached HEAD 时清空）→ 工作目录（紧凑模式：未移动时显示项目名；项目内移动显示 `项目›相对路径`，项目外移动显示 `项目→路径`）→ 会话标题 → 短会话 ID（`#` + 前 8 位，方便 `--resume` 定位）
 - `statusBar.compact` 时左右合并为单行。
 - **插件底栏字段**：插件可通过 `ctx.tuiStatus.setField` 贡献字段（三槽：左组末尾 / 右组开头 / 右组末尾，可选 hover 详情与全屏点击）；`statusBar.pluginFields`（默认开）可一次关掉全部插件字段，关闭不会卸载插件。
 - **逐字段启停与排序**：`/settings → Status bar → 插件底栏字段名单`（`statusBar.pluginFieldsOrder`）把字段按三槽分组列出，逐条勾选，并用底部「高级」行调整顺序。值形如 `build,ci;git;pet`——恰好三组（`;` 分隔），组序号即槽位、组内顺序即显示顺序；列进名单的字段跟随所在组（覆盖插件声明的槽）。留空 = 一个都不显示；`*`（默认）= 全部（含以后注册的字段，按声明槽与注册序）。从 `*` 进入高级行编辑会预填三组骨架，原样保存不改变模式；名单固定后新注册的字段默认不出现，需要勾选。
@@ -582,7 +586,7 @@ dsh-tui 自身区块在 0.1.7 写入当前 profile 的 `cordis.patch.yml`，旧�
 | btw.contextBudget | `/btw` 追问携带的最近问答总字符预算（默认 24000，范围 1000-200000）；超出时从最旧的整组开始裁剪。立即生效 |
 | btw.contextTurns | `/btw` 追问显式携带的最近完成问答组数（默认 4，范围 1-8）；窗口外的问答不进入请求，线程与面板仍保留全文。立即生效 |
 | jobGroupFold | 连续的后台任务卡：auto（默认，≥2 张成组；整组落定且 ≥3 张时折叠成汇总行）/ always（≥2 张立即折叠，含在跑的任务）/ never（从不自动折叠，每张卡都留着）。组头一行汇总状态与合计时长，点组头或 Ctrl+O 展开 |
-| effortDefault | 默认推理强度：auto / off / low / high / max。新会话的起始档位（细节见下） |
+| effortDefault | 默认推理强度：自动及当前后端/模型声明的档位（包括自定义 ID）。未支持的已存值仍可读；加载中或不可用时仅可选自动 |
 | smoothStreaming | 流式平滑输出（默认开）：回复/思考/工具卡正文按 ~30fps 匀速揭示；回放/历史完整直出 |
 | toolBackground | 工具卡背景强调：none / subtle / strong |
 | turnUsageRow | 回合用量行（默认关闭）：在每回合末显示 token、缓存、耗时与重试摘要；`/tokens`、`/status` 和底栏 token 悬停不受此开关影响 |
@@ -596,8 +600,8 @@ dsh-tui 自身区块在 0.1.7 写入当前 profile 的 `cordis.patch.yml`，旧�
 | statusBar.* | 上表全部状态栏开关（compact/model/thinking/cwd/contextUsage/cache/tokens/cost/tps/gitBranch/sessionTitle/sessionId/mode/contextBar/activity/trajectory/pluginFields/pluginFieldsOrder；statusBar.sessionId 是底栏显示开关，与 cordis 的启动 sessionId 无关；pluginFieldsOrder 是插件字段名单：`''`=不显示、`*`=全部、`a,b;c;d`=三组即三槽） |
 | jumpBack | 完成通知跳回（Windows，默认关）：开启后窗格标题末尾追加 `[dsh-tui:<16 位十六进制>]` 标记；点击本会话的完成通知回到这个窗格，无法核验的布局降级为普通通知。首次通知会注册当前用户的 HKCU 协议键。立即生效 |
 
-**effortDefault**：模型没有该档时自动就近降级并弹提示；优先级 settings 用户层 > 上次 `/effort`
-（effort.json，即上次实际运行的档位）> cordis `effort`（部署默认值）> 模型默认。
+**effortDefault**：模型没有该档时向下选择最近的可用档位，否则回到模型默认，并弹提示。DSH 的优先级为 settings 用户层 > 上次 `/effort`
+（effort.json，即上次实际运行的档位）> cordis `effort`（部署默认值）> 模型默认。Claude/Codex 通过自身控制接口和后端偏好应用修改；启动采用自动模式或恢复会话时保留原有选择，在设置中主动选择自动会重置为模型默认。
 
 **scrollGutter**：scrollbar 轨道可直接拖；`Shift`/`Alt`/`Ctrl`+拖动仍是文字选择。
 

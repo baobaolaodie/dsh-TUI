@@ -27,6 +27,7 @@ import type { ToolCallView, ToolResultView, ToolsRegistryLike } from '../channel
 import { isCompactionCheckpointSource, toolResultPayload } from '../compat/messages.js'
 import { transcriptImagesOf } from '../transcript-images.js'
 import { isTeamToolName, TEAM_SPAWN_TOOL, teamMessageOf, teamToolCallView, teamToolResultView } from '../team-tools.js'
+import { refineSessionSearchTitle } from '../session-tools.js'
 import { teamMailboxAsRelay, withoutTeammateReminder } from '../compat/agent-team-0.2.0.js'
 
 export interface DshTranslatorDeps {
@@ -62,6 +63,7 @@ export function dshEmits(type: AgentEventType): boolean {
   switch (type) {
     case 'session.title':
     case 'session.color':
+    case 'session.cwd':
     case 'session.status':
     case 'turn.start':
     case 'turn.end':
@@ -264,7 +266,9 @@ export function createDshTranslator(deps: DshTranslatorDeps) {
     try {
       const tool = deps.tools()?.get(name, deps.scope())
       if (tool?.presentCall === undefined) return teamToolCallView(name, rawArgs)
-      return tool.presentCall(JSON.parse(rawArgs)) as ToolCallView | undefined
+      // The session-search calls carry a static sentence the card header would
+      // repeat verbatim; put the query back in the header (session-tools.ts).
+      return refineSessionSearchTitle(name, tool.presentCall(JSON.parse(rawArgs)) as ToolCallView | undefined, rawArgs)
     } catch {
       return undefined
     }
@@ -520,6 +524,12 @@ export function createDshTranslator(deps: DshTranslatorDeps) {
         const preset = typeof recorded === 'string' ? recorded : 'unknown'
         const aliases = PRESET_ALIASES.get(preset)
         return [{ type: 'preset.selected', preset, ...(aliases === undefined ? {} : { aliases }) }]
+      }
+      case 'working-directory/change': {
+        // DSH 0.2.1+ (`dsh-working-directory`, not in dsh-session's typed
+        // union — matched by name). The header keeps the original project.
+        const cwd = (data as { cwd?: unknown }).cwd
+        return typeof cwd === 'string' && cwd !== '' ? [{ type: 'session.cwd', cwd }] : NO_EVENTS
       }
       case 'session/color': {
         // `/color` accent (dsh-tui plugin event): '' clears to the default.

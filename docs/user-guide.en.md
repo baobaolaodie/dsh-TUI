@@ -30,7 +30,7 @@ dsh-tui
 - `dsh-tui safe`: safe mode — read-only environment view, lists profile plugins, suggests fixes, and can create a clean rescue profile (see §5.5).
 - `dsh --profile dsh-tui`: manual launch, equivalent to `dsh-tui` (`/update` only works this way).
 - The `deepseek-official` route needs `DEEPSEEK_API_KEY`; on DSH 0.2.0-rc.1+ the standard profile can use the separate `deepseek-account` browser-authorization route. Other supported subscriptions use built-in OAuth sign-in. Run `/doctor` to check the environment.
-- Primary verified dsh engine version: `0.2.1-rc.2`. See `ADAPTER.md` for compatibility lines; versions outside that list show a drift note and the command to align on the logo page.
+- Primary verified dsh engine version: `0.2.1-rc.3`. See `ADAPTER.md` for compatibility lines; versions outside that list show a drift note and the command to align on the logo page.
 - If the logo page shows a ⚠ version-drift warning, align the dsh engine:
   `npm i -g @deepseek-ai/dsh@<版本>`
 
@@ -66,9 +66,10 @@ dsh-tui
    whole blocks (quick actions → hint line → input only) and narrow ones climb down the ladder in
    5.1. Full screens opened from this screen (sessions & workspaces / settings / background jobs /
    the first-run guide) render **above the launchpad** — `Esc` closes them back onto the launchpad
-   (draft, params and focus intact); the only way off the launchpad into the chat is submitting a
-   non-command line with Enter. When the dsh engine is out of the verified range, a **⚠
-   version-drift warning** appears with the align command.
+   (draft, params and focus intact); there are two ways off the launchpad into the chat: submit a
+   non-command line with Enter, or press `Shift+Enter` (`Option+Enter`) in the input to carry the
+   unsent draft over and start a new line at the caret. When the dsh engine is out of the verified
+   range, a **⚠ version-drift warning** appears with the align command.
 3. **Bottom status bar**: working-status row, context bar, TPS gauge, and other live
    indicators (see [5. UI and status bar](#5-ui-and-status-bar)).
 4. **Startup hint line**: one fixed line under the logo:
@@ -179,6 +180,7 @@ Unrecognized keys are ignored, `Esc` does nothing, clear with `Ctrl+C`/`dd`.
 **Questionnaire (model ask_user_question)**
 
 - `↑/↓` select, `Space` multi-select, `Tab` jump to custom answer, `Enter` submit; `←/→` switch question (no submit, draft kept); `Ctrl+V` paste, `Ctrl+K` fold.
+- Page through question text and details with `Alt+Up` / `Alt+Down` (remappable in `/settings`), or use the wheel over the body in fullscreen. Options and answer focus stay in place, and OAuth links remain readable in full.
 - `Esc` back from question 2 onward, cancel the whole batch on question 1; `Ctrl+C` cancel on any question. On the input row, `←/→` move the caret first and switch questions only at the text edge.
 
 **Plan review**
@@ -188,6 +190,7 @@ Unrecognized keys are ignored, `Esc` does nothing, clear with `Ctrl+C`/`dd`.
 **Tool approval**
 
 - `↑/↓` move, `1` allow (this time only), `2` deny, `Enter` submit; `Esc`/`Ctrl+C` deny.
+- Very short terminals use a compact layout that preserves decision rows and the footer; `Alt+Up` / `Alt+Down` pages through the full title, command and reason.
 
 **Session manager** (`/resume`, `/home`, `/agentview`, `/bg`, `⌸` at the input line start — the same screen)
 
@@ -281,7 +284,7 @@ one-column seam between the two surfaces.
   at least 64 columns and the panel at least 28. Dragging exits zoom, preserves keyboard focus,
   and keeps the width for the current session. Text drags starting in chat select only chat;
   drags starting inside the panel can select panel text.
-- **Panels**: all eight built-in panels are enabled by default and can be changed in `sidePanel.panels`. `todo` (Goals/Todos — with a split it moves here from above the input), `jobs`
+- **Panels**: by default (`sidePanel.panels: '*'`) every panel is enabled — the eight built-ins plus plugin panels registered later; change it in `sidePanel.panels` or the `/settings` checkboxes. `todo` (Goals/Todos — with a split it moves here from above the input), `jobs`
   (background jobs; clicking a job card in the transcript focuses that job here), `agents`
   (subagent dashboard and detail: Enter opens the detail, Esc steps back), `companion`
   (the pet — its mood follows
@@ -322,6 +325,7 @@ one-column seam between the two surfaces.
   workspace panel; the `⤢` on the panel bar puts them back on the whole screen (`⤢` is the mouse
   path — the keyboard equivalents are each view's own full-screen shortcut: `Ctrl+T` trajectory,
   `Ctrl+A` agents, `/jobs` jobs, `/home` the workspace home).
+- Temporary plugin panels show their readable title and a unique number for this run. Their checkboxes change only the running UI, without saving a preference. Remove old `actN:panel` placeholders and select the current panel again.
 - Settings: the **Side panel** group in `/settings`, or
   `dsh-tui.sidePanel.{splitEnabled,open,ratio,panels}` (see the
   [configuration reference](configuration.en.md#tui-configuration)).
@@ -350,7 +354,7 @@ The command menu = built-in commands (aliases included) + DSH registry commands 
 | `/workspace` | `resume` / `rename <名称>` / `open <路径或URI>` | manage workspaces; `open` accepts an absolute path, file URI, or plugin scheme |
 | `/clear` | none | clear the current session view (reset expand/selection state) |
 | `/compact` | none | compact session history (prompts when nothing to compact) |
-| `/export` | none | export the session as Markdown to the working directory |
+| `/export` | none | export the session as Markdown to the project the session opened in (an Agent `working_directory` cd does not move it) |
 | `/btw` | `<问题>` | side question: single turn, no tools, doesn't interrupt the main turn, not written to history |
 | `/trace` | none | open the trace scene (same as `Ctrl+T`) |
 | `/rewind` | none | rewind selector (same as double-press Esc on empty input); **a running turn is cancelled first** |
@@ -438,7 +442,7 @@ dsh-TUI ships no generic skills; `/skills` browses skills DSH discovers, and a d
 | Resume | `/resume` (same as `/home` `/agentview` `/bg` and `⌸` at the input line start) | the three-in-one **session manager**: `←/→` switch column, type to filter, `Enter` enter, `Ctrl+N` new, `Ctrl+X` stop background session, `★`/`☆` pin. Switching just parks the session, the turn keeps running; a session taken by another terminal shows red and can't be entered (see §2.7) |
 | Rename | `/rename <标题>` | rename immediately and persist (writes a session/title event, readable back in the session manager) |
 | Compact | `/compact` | trigger DSH compaction manually; **rejected mid-turn**; unavailable under minimal preset; the compaction point renders as a Divider summary row |
-| Export | `/export` | export Markdown from the full session log (thinking and tool-call sections), file `dsh-tui-export-<时间戳>.md` in the current session cwd |
+| Export | `/export` | export Markdown from the full session log (thinking and tool-call sections), file `dsh-tui-export-<时间戳>.md` in the session's opening project cwd (an Agent `cd` does not move it) |
 | Clear | `/clear` | clears the view only, never the session log |
 | Stop | session manager `Ctrl+X` | stop the **background** session under the cursor; the session the current terminal is using can't be stopped (exit the whole TUI with `/exit` or double-press `Ctrl+C`) |
 | Exit | `/exit` (or `/quit` `/q`) | double-press `Ctrl+C` or `Ctrl+D` also exits when idle; mid-work, press `Ctrl+C`/`Ctrl+D` again to force quit when the interrupt won't settle |
@@ -600,7 +604,7 @@ An empty session shows the whale logo area at the top (scrolls away with the con
   each agent's model × peak/idle × cache components; hover splits main ¥ / subagent ¥ / unpriced N tok;
   unofficial or unlisted models show tokens only and are marked unpriced;
   **the platform bill is authoritative**)
-- right group: git branch (**follows the workspace HEAD** — a checkout elsewhere reaches it within about a second, and a detached HEAD clears it) → working directory (basename only in compact mode) → session title → short session ID (`#` + first 8 chars, for `--resume`)
+- right group: git branch (**follows the workspace HEAD** — a checkout elsewhere reaches it within about a second, and a detached HEAD clears it) → working directory (compact mode shows the project name until the session moves, then `project›relative` for an in-project move and `project→path` for a move outside) → session title → short session ID (`#` + first 8 chars, for `--resume`)
 - `statusBar.compact` merges the two sides into one row.
 - **Plugin footer fields**: plugins may contribute fields via `ctx.tuiStatus.setField` (three slots: left group's tail / right group's head / right group's tail, with optional hover detail and fullscreen click); `statusBar.pluginFields` (default on) hides every plugin field at once without uninstalling anything.
 - **Per-field control and order**: `/settings → Status bar → Plugin field list` (`statusBar.pluginFieldsOrder`) lists the fields in their three slot groups for individual ticking, with an `Advanced` row at the bottom for ordering. The value looks like `build,ci;git;pet` — exactly three `;`-separated groups, group index = slot, order inside a group = display order; a listed key follows its group (overriding the plugin-declared slot). Empty = show none; `*` (default) = all of them (future registrations included, in their declared slots and registration order). Entering the advanced row from `*` pre-fills the three-group skeleton, and saving it untouched keeps the mode; once a list is fixed, newly registered fields stay hidden until ticked.
@@ -640,7 +644,7 @@ Common items below, full list on the /settings screen. Most topics (**Appearance
 | btw.contextBudget | Total character budget of recent Q/A pairs carried into a `/btw` follow-up (default 24000, range 1000-200000); oldest whole pairs are dropped first. Applies immediately |
 | btw.contextTurns | Number of most recent completed Q/A pairs explicitly carried into a `/btw` follow-up (default 4, range 1-8); older pairs stay in the thread and panel but are omitted from the request. Applies immediately |
 | jobGroupFold | consecutive background-job cards: auto (default — runs of 2+ group, a settled run of 3+ folds into its summary line) / always (any run of 2+ folds right away, live jobs included) / never (never folds on its own, every card stays). The group header summarizes status and total time; click it or press Ctrl+O to expand |
-| effortDefault | default reasoning effort: auto / off / low / high / max. Start level for new sessions (details below) |
+| effortDefault | default reasoning effort: Auto plus the current backend/model’s declared tiers (including custom IDs). Saved unsupported values remain readable; only Auto is selectable while loading or unavailable |
 | smoothStreaming | smooth streaming output (default on): replies/thinking/tool-card text reveal at ~30fps; replay/history always direct |
 | toolBackground | tool-card background emphasis: none / subtle / strong |
 | turnUsageRow | Turn-usage row (default off): show a per-turn summary of tokens, cache, duration and retries; `/tokens`, `/status` and the footer token hover are unaffected |
@@ -654,8 +658,8 @@ Common items below, full list on the /settings screen. Most topics (**Appearance
 | statusBar.* | all status-bar toggles above (compact/model/thinking/cwd/contextUsage/cache/tokens/cost/tps/gitBranch/sessionTitle/sessionId/mode/contextBar/activity/trajectory/pluginFields/pluginFieldsOrder; statusBar.sessionId is the bottom-bar display toggle, unrelated to cordis startup sessionId; pluginFieldsOrder is the plugin field list: `''`=none, `*`=all, `a,b;c;d`=three groups and three slots) |
 | jumpBack | jump back from completion notifications (Windows, default off): the pane title gains a `[dsh-tui:<16 hex>]` suffix; clicking this session's completion toast returns to exactly this pane, and layouts it cannot verify fall back to a plain toast. The first toast registers a per-user HKCU protocol key. Applies immediately |
 
-**effortDefault**: when the model lacks that level, drop one level and show a notice; priority settings user layer > the last `/effort`
-(effort.json, the level the last session ran) > cordis `effort` (deployment default) > model default.
+**effortDefault**: when the model lacks that level, choose the nearest lower offered tier or the model default and show a notice. On DSH, priority is settings user layer > the last `/effort`
+(effort.json, the level the last session ran) > cordis `effort` (deployment default) > model default. Claude/Codex apply edits through their own controls and backend preferences; Auto at startup and resumed sessions preserve the selection, while explicitly choosing Auto resets the model default.
 
 **scrollGutter**: the scrollbar track can be dragged directly; `Shift`/`Alt`/`Ctrl`+drag is still text selection.
 

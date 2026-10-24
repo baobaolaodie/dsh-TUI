@@ -10,7 +10,7 @@ import { envThemeOverride } from '../components/design-system/ThemeProvider.js'
 import { resolveBrand, setActiveBrand } from '../branding.js'
 import { hasPath } from '../dsh-adapter/settingsEditor.js'
 import { planReload, type ReloadKind } from '../reload.js'
-import { AlternateScreen, Box, Image, Text, InputCaret, useInput, useApp, ScrollBox, type ScrollBoxHandle, useTheme, useTerminalSize } from '../ui.js'
+import { AlternateScreen, Box, Image, Text, InputCaret, useInput, useApp, useStdin, ScrollBox, type ScrollBoxHandle, useTheme, useTerminalSize } from '../ui.js'
 import * as tuiKit from '../ui.js'
 import { usePageInset } from '../components/PageMargin.js'
 import { POINTER } from '../terminal-utils/figures.js'
@@ -20,9 +20,11 @@ import { actionMatches, effectiveComboDisplay, primaryComboString } from '../uti
 import { formatTokens } from '../terminal-utils/format.js'
 import { formatClock } from '../trajectory/format.js'
 import { homeDir } from '../utils/paths.js'
+import { displayWorkingDirectory } from '../sessions/format.js'
+import { sessionWorkingDirectory } from '../channel/working-directory.js'
 import { execFileNoThrow } from '../utils/execFileNoThrow.js'
 import type { LlmModelInfo, LlmProviderInfo } from '../adapter/ports/channel-view.js'
-import { cleanBlockLines, cleanRenderText, cleanScalarText } from '../dsh-adapter/sanitize.js'
+import { cleanBlockLines, cleanCommandReport, cleanRenderText, cleanScalarText } from '../dsh-adapter/sanitize.js'
 import { readModelRecents, recordModelUse, type ModelRecentsRef } from '../modelRecents.js'
 import { WORKING_GATE_NOTICES } from '../commands.js'
 import type { ChannelUi as Channel } from '../adapter/channel/ui-policy.js'
@@ -55,6 +57,7 @@ import { AskUserQuestionPanel } from '../components/questions/AskUserQuestionPan
 import { ApprovalPanel } from '../components/approvals/ApprovalPanel.js'
 import { ExtensionDialog } from '../components/ExtensionDialog.js'
 import { consumeBoundaryRecoveryRemount } from '../ink/update-overflow-guard.js'
+import { InputEvent } from '../ink/events/input-event.js'
 import type { DOMElement } from '../ink/dom.js'
 import { useSearchHighlight } from '../ink/hooks/use-search-highlight.js'
 import { ChatTitle } from '../components/ChatTitle.js'
@@ -79,6 +82,7 @@ import { PromptInput, composerImageRefsForText, type PromptController } from '..
 import { turnUsageParts } from '../components/TurnUsageRow.js'
 import { AgentTranscriptScene } from './AgentTranscriptScene.js'
 import { agentViewStore } from '../components/sidePanel/agentViewStore.js'
+import { subagentFailureRead, subagentFailureScope } from '../components/sidePanel/subagentFailureRead.js'
 import { agentComposeTargetOf, type AgentComposeTarget, type AgentMessageView, type AgentViewSource } from '../components/messages/agentTeam.js'
 import { resolveBindingGeneration, type PromptDraftCache } from '../components/promptDraftCache.js'
 import type { InjectController } from '../dsh-adapter/inject-channel.js'
@@ -605,6 +609,7 @@ export function Chat({
    */
   promptControllerRef?: React.RefObject<PromptController | null>
 }) {
+  const { internal_eventEmitter: inputEmitter } = useStdin()
   const writeRaw = React.useContext(TerminalWriteContext)
   // Re-render whenever the channel mutates; rows/status are read fresh below.
   // DEFAULT lane on purpose (useExternalVersion): the channel version bumps
@@ -615,6 +620,7 @@ export function Chat({
   // the process (beta.3; the reveal-store half was PR #680, this is the
   // channel half — the surviving source on Windows timer granularity).
   useExternalVersion(channel.subscribe, () => channel.version)
+  const failureScope = subagentFailureScope(channel)
   // Re-render on language switches so the whole UI hot-swaps its strings; the
   // value itself is what memoized strings key their language dependency on.
   const lang = React.useSyncExternalStore(subscribeLang, getLang)
@@ -984,9 +990,8 @@ export function Chat({
   /**
    * 打开**整屏界面**的命令（第七版）：从落地页触发这些命令时**不收掉落地页**
    * ——整屏盖在落地页之上渲染（它们的 early-return 排在落地页分支之前），
-   * Esc 退出整屏回到落地页（草稿/参数/焦点原样保留）。这是「从启动页进入
-   * 对话页的唯一路径 = Enter 提交一条非命令消息」的落地：任何返回键都不再
-   * 把人甩到对话页。其余命令（star / update / help / 转录输出类）的反馈在
+   * Esc 退出整屏回到落地页（草稿/参数/焦点原样保留），返回键不会切到对话页。
+   * 其余命令（star / update / help / 转录输出类）的反馈在
    * 对话页，仍按旧约收掉落地页再执行。
    */
   const launchpadScreenCommands = React.useMemo(
@@ -1455,6 +1460,38 @@ export function Chat({
   const questionMinimized = questionSnapshot !== null && minimizedQuestionKey === questionSnapshot.key
   /** Fold state for the GoalTodoPanel todo section (ctrl/cmd+q or click). */
   const [todoCollapsed, setTodoCollapsed] = React.useState(false)
+  // Dismiss only this idle projection; new goal/todo data or a session switch
+  // reveals the footer again without changing the backend's canonical state.
+  const [todoFooterOverride, setTodoFooterOverride] = React.useState<{
+    hidden: boolean
+    agentId: string
+    goal: Channel['goal']
+    todos: Channel['todos']
+  } | undefined>(undefined)
+  const todoFooterOverrideMatches = !channel.working && todoFooterOverride !== undefined
+    && todoFooterOverride.agentId === channel.agentId
+    && todoFooterOverride.goal === channel.goal
+    && todoFooterOverride.todos === channel.todos
+  const completedTodoSnapshot = React.useRef<{
+    agentId: string
+    goal: Channel['goal']
+    todos: Channel['todos']
+  } | undefined>(undefined)
+  if (channel.goal?.phase !== 'complete') completedTodoSnapshot.current = undefined
+  else if (channel.working || completedTodoSnapshot.current?.goal !== channel.goal
+    || completedTodoSnapshot.current?.agentId !== channel.agentId) {
+    completedTodoSnapshot.current = { agentId: channel.agentId, goal: channel.goal, todos: channel.todos }
+  }
+  const completedTodoFooter = channel.goal?.phase === 'complete' && !channel.working
+    && completedTodoSnapshot.current?.todos === channel.todos
+  const todoFooterHidden = todoFooterOverrideMatches ? todoFooterOverride!.hidden : completedTodoFooter
+  const toggleTodoFooter = (): void => {
+    if (channel.working) setTodoCollapsed(previous => !previous)
+    else setTodoFooterOverride({
+      hidden: !todoFooterHidden,
+      agentId: channel.agentId, goal: channel.goal, todos: channel.todos,
+    })
+  }
   const [thinkingVisible, setThinkingVisible] = React.useState(true)
   /** ctrl+r history-search entries (loaded on open, persists). */
   const [historyEntries, setHistoryEntries] = React.useState<readonly HistoryEntry[]>([])
@@ -1905,14 +1942,16 @@ export function Chat({
    * in the effect below) resolves every clickable target the transcript
    * renders — http(s) links open the browser, `dsh-file:`/`file://` paths
    * open the file-action menu. `dsh-file:` payloads are RAW display paths
-   * (possibly relative), so they resolve against the CURRENT channel cwd
-   * at click time (read through a ref so this callback keeps a stable
-   * identity — it is threaded into memoized row components).
+   * (possibly relative), so they resolve against the session's CURRENT
+   * directory at click time — where it moved after opening, else its cwd
+   * (read through a ref so this callback keeps a stable identity — it is
+   * threaded into memoized row components).
    */
-  const cwdRef = React.useRef(channel.cwd)
+  const currentCwd = sessionWorkingDirectory(channel)
+  const cwdRef = React.useRef(currentCwd)
   React.useEffect(() => {
-    cwdRef.current = channel.cwd
-  }, [channel.cwd])
+    cwdRef.current = currentCwd
+  }, [currentCwd])
   const openFileActions = React.useCallback((rawPath: string): void => {
     const resolved = resolveTargetPath(rawPath, cwdRef.current)
     // Whether the target is a directory decides the first menu row's label
@@ -2176,6 +2215,7 @@ export function Chat({
    * the user into a different conversation.
    */
   const promptDraftRef = React.useRef<PromptDraftCache>({ current: null })
+  const launchpadPendingInputRef = React.useRef<InputEvent['keypress'][]>([])
   /**
    * Latest channel for the unmount release below: that effect must not re-run
    * on a channel identity change, yet its cleanup must release against the
@@ -2277,6 +2317,7 @@ export function Chat({
     // A stored draft can only belong to the conversation being replaced: the
     // composer is the one that writes it, and it writes it on the way out.
     promptDraftRef.current.current = null
+    launchpadPendingInputRef.current = []
     if (pendingFillRef.current === draftSessionId) {
       pendingFillRef.current = null
       return
@@ -2586,7 +2627,7 @@ export function Chat({
    * Dispatch a slash command; false lets the input flow to the model.
    * Built-in names run the local switch; anything registered by a DSH
    * plugin (plan/goal/…) dispatches through the command registry, whose
-   * result text lands as a notification. `rawInput` carries the text after
+   * result text lands as a local report for generic plugin commands. `rawInput` carries the text after
    * the command name (`/plan off` → ` off`).
    *
    * `render.block` prints a multi-line report the way `/plugins` prints one:
@@ -2600,7 +2641,7 @@ export function Chat({
     name: string,
     rawInput: string,
     images: readonly ComposerImageRef[] = [],
-    render?: { readonly block?: boolean },
+    render?: { readonly block?: boolean; readonly report?: boolean },
   ): Promise<boolean> => {
     const originAgentBinding = channel.agentBindingGeneration
     return channel.runExternalCommandOutcome(name, rawInput, images).then((outcome) => {
@@ -2609,7 +2650,17 @@ export function Chat({
         channel.notify(t('command-not-found', { name }), { color: 'error' })
         return false
       }
-      if (render?.block === true && outcome.kind !== 'error') {
+      if (render?.report === true) {
+        const { lines, truncated } = cleanCommandReport(outcome.text)
+        if (truncated) lines.push(t('command-output-truncated'))
+        // The report already has a cell cap. Avoid a second UTF-16 preview cut
+        // splitting an emoji or a combining sequence in the local row sink.
+        if (lines.length > 0) channel.pushLocal(`/${name}`, lines, { lineLimit: 65_536, preserveWhitespace: true })
+        if (outcome.kind === 'error') {
+          const cleaned = cleanRenderText(outcome.text, COMMAND_RESULT_CELLS)
+          if (cleaned !== '') channel.notify(cleaned, { color: 'error' })
+        }
+      } else if (render?.block === true && outcome.kind !== 'error') {
         // Per-line sanitize: the newlines here are the report's structure.
         const lines = cleanBlockLines(outcome.text, LOCAL_BLOCK_CELLS)
         if (lines.length > 0) channel.pushLocal(`/${name}`, lines, { lineLimit: LOCAL_BLOCK_CELLS })
@@ -2789,6 +2840,28 @@ export function Chat({
     if (channel.ready !== false || (name !== undefined && isBootSafeCommand(name))) return false
     channel.notify(t('startup-not-ready', { backend: kernelCurrentOption?.shortLabel ?? channel.backendCapabilities.backendId }), { color: 'warning', timeoutMs: 2500 })
     return true
+  }
+
+  /** Move the unsent draft to chat, inserting a newline at the launchpad caret. */
+  const newlineLaunchpad = (text: string, cursor: number): void => {
+    promptDraftRef.current.current = {
+      ownerAgentId: String(channel.agentId),
+      bindingGeneration: resolveBindingGeneration(channel),
+      value: text.slice(0, cursor) + '\n' + text.slice(cursor),
+      cursor: cursor + 1,
+      foldBlock: null,
+      expanded: false,
+      vimEnabled: false,
+      vimInsert: true,
+      images: [...launchpadImagesRef.current],
+    }
+    // The composer snapshot now owns the capabilities behind the image chips.
+    launchpadImagesRef.current.clear()
+    setSupervisorOpen(false)
+    setLaunchpadOpen(false)
+    setLaunchpadFocus(-1)
+    setLaunchpadDraft('')
+    setLaunchpadCaret(0)
   }
 
   /**
@@ -3534,7 +3607,7 @@ export function Chat({
           `${t('status-model', { model: channel.model })}${channel.reasoningEffort ? ` · ${capitalize(channel.reasoningEffort)} effort` : ''}`,
           `${t('status-state', { state: channel.working ? t('status-working') : t('status-idle') })}`,
           `${t('status-session', { id: channel.agentId })}`,
-          `${t('status-dir', { cwd: channel.displayCwd })}${channel.gitBranch ? ` · ${channel.gitBranch}` : ''}`,
+          `${t('status-dir', { cwd: displayWorkingDirectory(channel) })}${channel.gitBranch ? ` · ${channel.gitBranch}` : ''}`,
           t('tokens-session-total', {
             input: formatTokens(channel.tokens.input),
             output: formatTokens(channel.tokens.output),
@@ -4334,7 +4407,7 @@ export function Chat({
         )
         if (external) {
           setHelpOpen(false)
-          return runExternalCommand(name, rawInput, images)
+          return runExternalCommand(name, rawInput, images, { report: true })
         }
         return false
       }
@@ -5773,10 +5846,8 @@ export function Chat({
       // additionally moving the caret (one press, one meaning).
       event.stopImmediatePropagation()
     } else if (actionMatches('todoFold', input, key)) {
-      // Fold/unfold the GoalTodoPanel todo section (default Ctrl+Q) — works
-      // mid-turn too: the collapsed line keeps the done/total count and the
-      // live task preview, so long todo lists stop crowding the prompt.
-      setTodoCollapsed(previous => !previous)
+      // Fold running work; hide/restore the idle footer without mutating todos.
+      toggleTodoFooter()
       // Consume: same readline-shadowing rule as dashboard/showAll above.
       event.stopImmediatePropagation()
     } else if (actionMatches('star', input, key)) {
@@ -6561,6 +6632,7 @@ export function Chat({
     const viewScene = (
       <AgentTranscriptScene
         subagent={viewSubagent}
+        onFailureRead={agent => subagentFailureRead.acknowledge(failureScope, agent)}
         source={agentView.source}
         onExit={() => exitAgentView(agentView.source)}
         {...(loadTranscript === undefined ? {} : { loadTranscript })}
@@ -6591,6 +6663,7 @@ export function Chat({
     const scene = (
       <SubagentDetailScene
         subagent={subagent}
+        onFailureRead={agent => subagentFailureRead.acknowledge(failureScope, agent)}
         onInterrupt={(id) => channel.subagentControl?.interrupt(id)}
         {...(channel.subagentControl?.history === undefined ? {} : { loadTranscript: channel.subagentControl.history })}
         onOpenView={() => openAgentView(subagent.agentId, { kind: 'agent-detail', agentId: subagent.agentId })}
@@ -6702,8 +6775,9 @@ export function Chat({
    * 第七版渲染姿态：early-return 排在**所有整屏界面（会话浏览器 / 设置 /
    * 任务面板 / 家谱 / 子代理 / 轨迹场景）之后**——从落地页打开的整屏盖在
    * 落地页之上，Esc 退出整屏回到这里（草稿/参数/焦点原样保留）。硬约束：
-   * 从启动页进入对话页的唯一路径是**提交一条非命令消息**（Enter 发送）；
-   * 任何 Esc/返回都回到启动页。参数行点开的选择器经 `pickerPanels` +
+   * Enter 发送非命令消息后进入对话页；Shift/Option+Enter 则带着未发送的
+   * 草稿进入对话页，并在当前光标处换行。Esc/返回都回到启动页。
+   * 参数行点开的选择器经 `pickerPanels` +
    * `inputPaused` 渲染在本屏之上，Esc 关掉它也回到这里。
    */
   if (launchpadShown) {
@@ -6791,11 +6865,12 @@ export function Chat({
         }}
         onQueryChange={changeLaunchpadDraft}
         onSubmit={submitLaunchpad}
+        onNewline={newlineLaunchpad}
+        onHandoffInput={event => launchpadPendingInputRef.current.push(event.keypress)}
         onFocusChange={setLaunchpadFocus}
         onAction={(action) => {
           // 第八版（用户实测：「刚点帮助，不知道为什么直接进入聊天页面了」）：
-          // 帮助**不属于**离开启动页的两条路（Enter 发非命令消息 / 会话浏览
-          // 里选中会话）——它盖在落地页之上（overlay kind 'help'），再点同一
+          // 帮助盖在落地页之上（overlay kind 'help'），再点同一
           // 入口 = 收起（与参数段同一条切换语义）。
           if (action.command === 'help') {
             dispatchOverlay(overlay.kind === 'help'
@@ -7153,11 +7228,13 @@ export function Chat({
         )}
         {/* 分栏且 todo Panel 已启用时，Goal/Todo 由右栏 Panel 承载，
             底部 chrome 不再挂载（窄屏 / inline / 未启用时保留现状）。 */}
-        {!(sidePanel.split && sidePanel.enabledPanelIds.includes('todo')) && (
+        {!(sidePanel.split && sidePanel.enabledPanelIds.includes('todo'))
+          && !todoFooterHidden && (
           <GoalTodoPanel
             channel={channel}
             collapsed={todoCollapsed}
-            onToggle={() => setTodoCollapsed(previous => !previous)}
+            onToggle={toggleTodoFooter}
+            idleDismissal
           />
         )}
         {recap !== null && recap.auto && !recap.expanded && (
@@ -7288,6 +7365,13 @@ export function Chat({
           // 先闪一帧 toast 再消失。
           toastSuppressed={petSaysNotices}
           draftCache={promptDraftRef.current}
+          onInputReady={() => {
+            // Restore the draft and register the composer listener before
+            // replaying keys captured during the launchpad's final stdin batch.
+            const pending = launchpadPendingInputRef.current
+            launchpadPendingInputRef.current = []
+            for (const keypress of pending) inputEmitter.emit('input', new InputEvent(keypress))
+          }}
           helpOpen={helpOpen}
           onToggleHelp={() =>{  setHelpOpen(previous => !previous) }}
           onRunCommand={runCommand}

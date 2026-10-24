@@ -82,6 +82,8 @@ type MutableChannelView = { -readonly [K in keyof ChannelUi]: ChannelUi[K] }
 
 /** Internal writable store; command signatures are owned once by ChannelUi. */
 export interface ChannelState extends Omit<MutableChannelView, 'rows' | 'notifications' | 'todos' | 'pending' | 'tpsSamples' | 'subagents' | 'backgroundJobs' | 'pluginScene' | 'traceEvents' | 'trajectorySource'> {
+  /** False defers a concrete default until the capability catalog becomes available. */
+  setDefaultEffort(id: string | undefined): void | false
 
   rows: ChatRow[]
   notifications: NotificationItem[]
@@ -169,4 +171,8 @@ export interface MentionExpansion {
   attached: string[]
   /** Mention tokens that failed to resolve (kept literal, warned about). */
   missing: string[]
+  /** Store-reported transformations for successfully attached mention images. */
+  imageAdjustments?: { path: string; adjustment: StagedImageAdjustment }[]
+  /** Controlled admission refusals, excluding arbitrary filesystem/store errors. */
+  imageFailures?: { path: string; reason: string }[]
 }
