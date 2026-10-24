@@ -522,6 +522,9 @@ internal static class JumpBack
             if (!tab.TryGetCurrentPattern(SelectionItemPattern.Pattern, out pattern)) continue;
             if (((SelectionItemPattern)pattern).Current.IsSelected) return tab;
         }
+        // A single-tab window has no ambiguity to resolve; when the pattern is
+        // unavailable in some WT build this is still one provable candidate.
+        if (tabs.Count == 1) return tabs[0];
         return null;
     }
 

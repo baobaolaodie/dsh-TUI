@@ -371,7 +371,7 @@ export async function deliverTaskCompletionOnWindows(
   // promise anything now.
   if (target !== undefined) {
     const state = getJumpBackState()
-    if (!state.enabled || state.generation !== target.generation || delivery.canDispatch?.() === false) {
+    if (!state.enabled || state.generation !== target.generation || !ownerAllows(delivery)) {
       target = undefined
     }
   }
@@ -487,13 +487,29 @@ function refreshJumpBackMarker(delivery: TaskCompletionDelivery): JumpBackTarget
  * @param target - The marker and the orchestration that must prove it reachable.
  * @returns The activation URI, or undefined for the plain toast.
  */
+/**
+ * Whether the host still owns this completion. A throwing callback is a released
+ * owner, not a reason to break the delivery path: the promise is the only thing
+ * it may cost.
+ */
+function ownerAllows(delivery: TaskCompletionDelivery): boolean {
+  try {
+    return delivery.canDispatch?.() !== false
+  } catch (error) {
+    logForDebugging('jumpback: the owner check threw; treating the owner as released', {
+      detail: error instanceof Error ? error.message : String(error),
+    })
+    return false
+  }
+}
+
 async function jumpBackLaunch(target: JumpBackTarget, delivery: TaskCompletionDelivery): Promise<string | undefined> {
   // The setting can be turned off while this completion waits for its probe or
   // for the registry. A stale preparation must not write the key back: the
   // disable already ran its cleanup, and the click would outlive the switch.
   const stillWanted = (): boolean => {
     const state = getJumpBackState()
-    return state.enabled && state.generation === target.generation && delivery.canDispatch?.() !== false
+    return state.enabled && state.generation === target.generation && ownerAllows(delivery)
   }
   if (!stillWanted()) return undefined
   try {
@@ -583,6 +599,10 @@ export async function applyJumpBackSetting(
     // the old cleanup would remove the file this generation just published.
     await pendingCleanup
     pendingCleanup = Promise.resolve()
+    // A second toggle may have turned the switch off while this enable waited
+    // for the old cleanup; writing the seam now would recreate what that toggle
+    // just removed.
+    if (!getJumpBackState().enabled) return
     jumpback.sweepStale()
     refreshEnabledMarker(jumpback, sessionId, platform)
   } else if (!enabled && wasEnabled) {

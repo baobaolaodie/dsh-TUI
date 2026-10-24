@@ -549,6 +549,8 @@ function recordingJumpBack(options: {
   markerPath?: string
   /** False makes the port answer like an unwritable directory (undefined, not a throw). */
   markerWritten?: boolean
+  /** Holds the registration open so a toggle can land while it is pending. */
+  registerGate?: Promise<void>
   throwOn?: 'writeMarker' | 'probe' | 'ensureProtocol'
   /** Also reports each step into a shared log, so ordering against another port is assertable. */
   onStep?: (name: string) => void
@@ -572,6 +574,7 @@ function recordingJumpBack(options: {
     async ensureProtocol(helper) {
       guard('ensureProtocol')
       record('ensureProtocol', [helper])
+      if (options.registerGate !== undefined) await options.registerGate
       return options.register ?? true
     },
   }
@@ -805,6 +808,53 @@ await check('the last instance out releases a shared key it never registered', a
   await second.cleanup()
   assert.deepEqual(protocolKeys(runner.calls), [], 'the last one out recognises the shared template and removes it even though it never registered')
   assert.ok(runner.calls.some(call => call.args[0] === 'delete'), 'the release is a real unregister, not just bookkeeping')
+})
+
+await check('disabling while the registration is in flight yields no URI', async () => {
+  enableJumpBack()
+  let release!: () => void
+  const gate = new Promise<void>(resolve => { release = resolve })
+  const recorder = recordingJumpBack({ registerGate: gate })
+  const pending = deliver({ jumpback: recorder.jumpback, platform: 'win32' })
+  await tick()
+  setJumpBackEnabled(false)
+  release()
+  const { toastInputs } = await pending
+  assert.deepEqual(recorder.steps.map(step => step.name), ['writeMarker', 'probe', 'ensureProtocol'], 'the registration may finish, but its result is not used by a superseded generation')
+  assert.equal(toastInputs[0].launch, undefined, 'the disable cleanup owns the key from here; the toast must not promise it')
+})
+
+await check('an enable that waited for cleanup does not write after a later disable', async () => {
+  enableJumpBack()
+  const steps: string[] = []
+  let release!: () => void
+  const gate = new Promise<void>(resolve => { release = resolve })
+  const port = {
+    sweepStale: (): void => { steps.push('sweepStale') },
+    cleanup: async (): Promise<void> => { steps.push('cleanup-start'); await gate; steps.push('cleanup-end') },
+    writeMarker: (): string => { steps.push('writeMarker'); return join(MARKER_DIR, 'triple.json') },
+  }
+  const off1 = applyJumpBackSetting(port, false, FLIP_SESSION, 'win32')
+  const on = applyJumpBackSetting(port, true, FLIP_SESSION, 'win32')
+  const off2 = applyJumpBackSetting(port, false, FLIP_SESSION, 'win32')
+  await tick()
+  release()
+  await Promise.all([off1, on, off2])
+  assert.ok(!steps.includes('writeMarker'), 'the enable must re-check the switch after the cleanup it waited for')
+  assert.ok(!steps.includes('sweepStale'), 'and skip the sweep that belongs to an enabled generation')
+})
+
+await check('a throwing owner check is a released owner, not a broken delivery', async () => {
+  enableJumpBack()
+  const recorder = recordingJumpBack()
+  const { result, lines } = await captureDebug(() => deliver({
+    jumpback: recorder.jumpback,
+    platform: 'win32',
+    canDispatch: () => { throw new Error('owner port exploded') },
+  }))
+  assert.deepEqual(recorder.steps.map(step => step.name), ['writeMarker'], 'no probe and no registration for an owner that cannot confirm it still owns the completion')
+  assert.equal(result.toastInputs[0].launch, undefined)
+  assert.match(lines.join(''), /treating the owner as released/u, 'the reason is logged, not swallowed')
 })
 
 // --- isolation self-proof ------------------------------------------------------
