@@ -244,8 +244,18 @@ internal static class JumpBack
         List<TabHit> tabs;
         FindHits(marker, out panes, out tabs);
         bool capable = IsCapable(panes, tabs);
+        bool associated = panes.Count == 0 || panes[0].Tab != null;
+        bool tabsAgree = true;
+        if (panes.Count == 1)
+        {
+            for (int i = 0; i < tabs.Count; i++)
+            {
+                if (!SameElement(tabs[i].Tab, panes[0].Tab)) tabsAgree = false;
+            }
+        }
         Log("stage=probe ok=" + Bool(capable) + " capable=" + Bool(capable)
             + " paneHits=" + panes.Count + " tabHits=" + tabs.Count
+            + " associated=" + Bool(associated) + " tabsAgree=" + Bool(tabsAgree)
             + " lookupMs=" + clock.ElapsedMilliseconds);
         return capable ? ExitOk : ExitUnreachable;
     }
@@ -449,6 +459,7 @@ internal static class JumpBack
             IntPtr hwnd = HwndOf(window);
             try
             {
+                AutomationElement selectedTab = SelectedTabOf(window);
                 List<AutomationElement> windowPanes = PanesCarryingMarker(window, marker);
                 for (int j = 0; j < windowPanes.Count; j++)
                 {
@@ -456,7 +467,7 @@ internal static class JumpBack
                     hit.Hwnd = hwnd;
                     hit.Window = window;
                     hit.Pane = windowPanes[j];
-                    hit.Tab = ContainingTab(windowPanes[j], window);
+                    hit.Tab = selectedTab;
                     panes.Add(hit);
                 }
 
@@ -496,17 +507,20 @@ internal static class JumpBack
         return hits;
     }
 
-    // The TabItem a pane belongs to. A pane and a tab hit only form one candidate when
-    // this association exists; without it they are two unproven halves and stay ambiguous.
-    private static AutomationElement ContainingTab(AutomationElement pane, AutomationElement window)
+    // The TabItem a pane belongs to. Only the selected tab's panes are realized in
+    // the UIA tree, so the window's selected tab is the pane's tab; a window without
+    // a selected tab cannot prove the association and stays ambiguous.
+    private static AutomationElement SelectedTabOf(AutomationElement window)
     {
-        AutomationElement current = pane;
-        while (current != null)
+        AutomationElementCollection tabs = window.FindAll(
+            TreeScope.Descendants,
+            new PropertyCondition(AutomationElement.ControlTypeProperty, ControlType.TabItem));
+        for (int i = 0; i < tabs.Count; i++)
         {
-            if (SameElement(current, window)) return null;
-            object type = current.GetCurrentPropertyValue(AutomationElement.ControlTypeProperty);
-            if (type is ControlType && (ControlType)type == ControlType.TabItem) return current;
-            current = TreeWalker.ControlViewWalker.GetParent(current);
+            AutomationElement tab = tabs[i];
+            object pattern;
+            if (!tab.TryGetCurrentPattern(SelectionItemPattern.Pattern, out pattern)) continue;
+            if (((SelectionItemPattern)pattern).Current.IsSelected) return tab;
         }
         return null;
     }
